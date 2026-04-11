@@ -1,0 +1,11 @@
+appId: com.yourcompany.medicalpos
+---
+- tapOn:
+    text: "Settings"
+- scrollUntilVisible:
+    element:
+      text: "Sign Out"
+    direction: DOWN
+- tapOn:
+    text: "Sign Out"
+- assertVisible: "Sign In"

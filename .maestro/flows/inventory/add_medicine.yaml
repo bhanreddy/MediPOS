@@ -1,0 +1,27 @@
+appId: com.yourcompany.medicalpos
+---
+- runFlow: ../auth/login.yaml
+
+- tapOn: "Inventory"
+- tapOn:
+    id: "fab-add-medicine"
+
+- tapOn:
+    id: "medicine-name-input"
+- inputText: "Amoxicillin 500mg"
+
+- tapOn:
+    id: "generic-name-input"
+- inputText: "Amoxicillin"
+
+- tapOn:
+    id: "gst-rate-0"
+
+- tapOn:
+    text: "Save Medicine"
+
+- assertVisible:
+    text: "Amoxicillin 500mg"
+    timeout: 3000
+
+- takeScreenshot: "medicine_added_successfully"

@@ -1,0 +1,8 @@
+appId: com.yourcompany.medicalpos
+---
+- runFlow: ../auth/login.yaml
+- tapOn:
+    text: "Purchases"
+- assertVisible:
+    text: "Purchase"
+    timeout: 5000

@@ -1,0 +1,36 @@
+appId: com.yourcompany.medicalpos
+---
+- runFlow: ../auth/login.yaml
+
+- tapOn:
+    text: "Billing"
+
+- tapOn:
+    id: "fab-new-sale"
+
+- tapOn:
+    id: "medicine-search"
+- inputText: "Para"
+
+- assertVisible:
+    text: "Paracetamol"
+    timeout: 3000
+
+- tapOn:
+    text: "Add"
+
+- assertVisible: "Paracetamol"
+
+- scroll:
+    direction: DOWN
+
+- tapOn:
+    text: "Confirm Sale"
+
+- assertVisible:
+    text: "CLI-"
+    timeout: 5000
+
+- assertVisible: "Invoice"
+
+- takeScreenshot: "sale_created_successfully"

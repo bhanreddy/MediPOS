@@ -1,0 +1,186 @@
+@import "tailwindcss";
+
+@theme {
+  --color-background: rgb(var(--background));
+  --color-surface: rgb(var(--surface));
+  --color-surface-elevated: rgb(var(--surface-elevated));
+  --color-surface-alt: rgb(var(--surface-alt));
+  --color-border: rgb(var(--border));
+  --color-foreground: rgb(var(--foreground));
+  --color-foreground-strong: rgb(var(--foreground-strong));
+  --color-muted: rgb(var(--muted));
+  --color-overlay: rgb(var(--overlay));
+  --color-primary: rgb(var(--primary));
+  --color-success: rgb(var(--success));
+  --color-warning: rgb(var(--warning));
+  --color-danger: rgb(var(--danger));
+  --color-error: rgb(var(--danger));
+  --color-on-primary: rgb(var(--on-primary));
+  --color-on-success: rgb(var(--on-success));
+  --color-on-warning: rgb(var(--on-warning));
+  --color-on-danger: rgb(var(--on-danger));
+  --color-focus: rgb(var(--focus));
+
+  --font-sans: "Plus Jakarta Sans", ui-sans-serif, system-ui, sans-serif;
+  --font-mono: "JetBrains Mono", ui-monospace, monospace;
+
+  --shadow-shell: 0 1px 0 rgb(255 255 255 / 0.06) inset, 0 24px 48px -24px rgb(0 0 0 / 0.35);
+  --shadow-card: 0 4px 24px -8px rgb(0 0 0 / 0.12), 0 0 0 1px rgb(var(--border) / 0.5);
+  --shadow-card-dark: 0 8px 32px -12px rgb(0 0 0 / 0.45), 0 0 0 1px rgb(255 255 255 / 0.06);
+}
+
+/* MedPOS — clinical slate + teal accent */
+:root {
+  --font-sans: "Plus Jakarta Sans", ui-sans-serif, system-ui, sans-serif;
+  --font-mono: "JetBrains Mono", ui-monospace, monospace;
+
+  --background: 240 244 242;
+  --surface: 255 255 255;
+  --surface-elevated: 248 252 250;
+  --surface-alt: 236 253 245;
+  --border: 203 213 210;
+  --foreground: 15 23 42;
+  --foreground-strong: 15 23 42;
+  --muted: 71 85 95;
+  --overlay: 15 23 42;
+
+  --primary: 15 118 110;
+  --success: 5 122 85;
+  --warning: 180 83 9;
+  --danger: 185 28 28;
+
+  --on-primary: 255 255 255;
+  --on-success: 255 255 255;
+  --on-warning: 255 255 255;
+  --on-danger: 255 255 255;
+
+  --focus: 13 148 136;
+
+  --text-billing-total: 48px;
+  --text-heading: 24px;
+  --text-item-name: 16px;
+  --text-base: 14px;
+  --text-label: 12px;
+  --text-small: 11px;
+
+  --radius-sm: 4px;
+  --radius-md: 8px;
+  --radius-lg: 12px;
+}
+
+.no-theme-transition,
+.no-theme-transition * {
+  transition: none !important;
+}
+
+.theme-toggle-icon::before {
+  content: '🌙';
+}
+
+.dark .theme-toggle-icon::before {
+  content: '☀';
+}
+
+.dark {
+  --background: 10 16 24;
+  --surface: 15 23 34;
+  --surface-elevated: 24 34 48;
+  --surface-alt: 18 28 40;
+  --border: 51 65 82;
+  --foreground: 226 232 240;
+  --foreground-strong: 248 250 252;
+  --muted: 148 163 184;
+  --overlay: 2 6 23;
+
+  --primary: 45 212 191;
+  --success: 52 211 153;
+  --warning: 251 191 36;
+  --danger: 248 113 113;
+
+  --on-primary: 10 16 24;
+  --on-success: 10 16 24;
+  --on-warning: 15 23 42;
+  --on-danger: 15 23 42;
+
+  --focus: 45 212 191;
+}
+
+@layer base {
+  html {
+    @apply antialiased;
+    font-feature-settings: "ss01" on, "cv11" on;
+  }
+
+  body {
+    @apply bg-background text-foreground;
+    font-family: var(--font-sans);
+    line-height: 1.5;
+    overflow: hidden;
+    height: 100vh;
+    letter-spacing: -0.01em;
+  }
+
+  h1,
+  h2,
+  h3,
+  h4,
+  h5,
+  h6 {
+    @apply font-bold text-foreground-strong tracking-tight;
+    letter-spacing: -0.02em;
+  }
+
+  :focus-visible {
+    @apply outline-none ring-2 ring-focus ring-offset-2 ring-offset-background;
+  }
+
+  input,
+  select,
+  textarea {
+    @apply bg-surface-elevated border-border text-foreground rounded-lg placeholder:text-muted;
+  }
+
+  kbd {
+    font-family: var(--font-mono);
+  }
+}
+
+::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+
+::-webkit-scrollbar-track {
+  @apply bg-transparent;
+}
+
+::-webkit-scrollbar-thumb {
+  @apply rounded-full bg-border/80 hover:bg-muted/80;
+}
+
+@keyframes slideIn {
+  from {
+    transform: translateY(10px);
+    opacity: 0;
+  }
+
+  to {
+    transform: translateY(0);
+    opacity: 1;
+  }
+}
+
+@keyframes fade-in-up {
+  from {
+    transform: translateY(8px);
+    opacity: 0;
+  }
+  to {
+    transform: translateY(0);
+    opacity: 1;
+  }
+}
+
+#root {
+  height: 100vh;
+}

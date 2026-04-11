@@ -1,0 +1,10 @@
+# Local Supabase CLI configuration. Set project_id when linking a hosted project.
+
+[api]
+enabled = true
+
+[functions]
+# JWT verification is enabled for all functions except the PhonePe webhook.
+
+[functions.webhook-phonepe]
+verify_jwt = false

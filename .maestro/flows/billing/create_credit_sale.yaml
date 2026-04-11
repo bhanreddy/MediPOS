@@ -1,0 +1,10 @@
+appId: com.yourcompany.medicalpos
+---
+- runFlow: ../auth/login.yaml
+- tapOn:
+    text: "Billing"
+- tapOn:
+    id: "fab-new-sale"
+- assertVisible:
+    text: "New Sale"
+    timeout: 5000

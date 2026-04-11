@@ -1,0 +1,23 @@
+appId: com.yourcompany.medicalpos
+---
+- launchApp:
+    clearState: true
+
+- assertVisible: "Sign In"
+
+- tapOn:
+    id: "email-input"
+- inputText: "owner@testclinic.com"
+
+- tapOn:
+    id: "password-input"
+- inputText: "TestPassword123!"
+
+- tapOn:
+    text: "Sign In"
+
+- assertVisible:
+    text: "Good morning"
+    timeout: 5000
+
+- assertVisible: "Dashboard"
