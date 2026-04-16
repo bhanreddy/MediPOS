@@ -4,8 +4,8 @@ import { router } from 'expo-router';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { Ionicons } from '@expo/vector-icons';
 import { format } from 'date-fns';
-import { LineChart } from 'react-native-chart-kit';
 import { theme } from '../../constants/theme';
+import { WeeklySalesChart } from '../../components/charts/WeeklySalesChart';
 import { reportsApi } from '../../lib/api';
 import { useSessionStore } from '../../store/sessionStore';
 import { useAlerts } from '../../hooks/useAlerts';
@@ -111,35 +111,7 @@ export default function DashboardScreen() {
           </Card>
         </ScrollView>
 
-        {/* Weekly Sales Chart */}
-        {chartLabels.length > 0 && chartValues.some((v: number) => v > 0) && (
-          <View style={{ marginBottom: 20 }}>
-            <Text style={{ color: theme.text.primary, fontSize: 16, fontWeight: '700', marginBottom: 12 }}>Weekly Sales</Text>
-            <Card>
-              <LineChart
-                data={{
-                  labels: chartLabels,
-                  datasets: [{ data: chartValues.length > 0 ? chartValues : [0] }],
-                }}
-                width={screenWidth - 80}
-                height={180}
-                yAxisLabel="₹"
-                yAxisSuffix=""
-                chartConfig={{
-                  backgroundColor: 'transparent',
-                  backgroundGradientFrom: theme.bg.card,
-                  backgroundGradientTo: theme.bg.card,
-                  decimalPlaces: 0,
-                  color: (opacity = 1) => `rgba(0, 201, 167, ${opacity})`,
-                  labelColor: () => theme.text.muted,
-                  propsForDots: { r: '4', strokeWidth: '2', stroke: theme.accent.primary },
-                }}
-                bezier
-                style={{ borderRadius: theme.radius.sm }}
-              />
-            </Card>
-          </View>
-        )}
+        <WeeklySalesChart chartLabels={chartLabels} chartValues={chartValues} chartWidth={screenWidth - 80} />
 
         {/* Quick Actions */}
         <Text style={{ color: theme.text.primary, fontSize: 16, fontWeight: '700', marginBottom: 12 }}>Quick Actions</Text>

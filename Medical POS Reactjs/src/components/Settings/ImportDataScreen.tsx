@@ -81,11 +81,13 @@ export const ImportDataScreen: React.FC = () => {
     };
 
     if (role && role !== 'OWNER') {
-        return <div className="p-8 text-danger font-semibold">Only the clinic owner can import data.</div>;
+        return (
+            <div className="p-8 max-w-7xl mx-auto text-danger font-semibold">Only the clinic owner can import data.</div>
+        );
     }
 
     return (
-        <div className="max-w-3xl space-y-6 animate-slideIn">
+        <div className="p-8 max-w-7xl mx-auto space-y-6 animate-slideIn">
             <div className="rounded-lg border-2 border-amber-500/40 bg-amber-500/10 p-4 text-sm text-foreground">
                 This cannot be undone. Review your CSV carefully before confirming.
             </div>

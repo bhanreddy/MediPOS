@@ -1,11 +1,14 @@
 import { View, Text, ScrollView, FlatList, TouchableOpacity, Alert, TextInput } from 'react-native';
-import { useState, useEffect } from 'react';
+import { useState, useEffect, lazy, Suspense } from 'react';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { router } from 'expo-router';
 import { Ionicons } from '@expo/vector-icons';
 import { theme } from '../../../constants/theme';
 import { inventoryApi, salesApi, api } from '../../../lib/api';
-import { BarcodeScanner } from '../../../components/BarcodeScanner';
+
+const LazyBarcodeScanner = lazy(() =>
+  import('../../../components/BarcodeScanner').then((m) => ({ default: m.BarcodeScanner }))
+);
 import { useOfflineSync } from '../../../hooks/useOfflineSync';
 import { initOfflineDb, queueOfflineSale, cacheMedicines } from '../../../lib/offlineDb';
 import { useSessionStore } from '../../../store/sessionStore';
@@ -197,7 +200,9 @@ export default function NewSaleScreen() {
     return (
       <View style={{ flex: 1, backgroundColor: theme.bg.primary }}>
         {showScanner && (
-          <BarcodeScanner onScanned={handleBarcodeScanned} onClose={() => setShowScanner(false)} />
+          <Suspense fallback={null}>
+            <LazyBarcodeScanner onScanned={handleBarcodeScanned} onClose={() => setShowScanner(false)} />
+          </Suspense>
         )}
         {!isOnline && (
           <View style={{ backgroundColor: 'rgba(234,179,8,0.2)', padding: 10, marginHorizontal: 16, marginTop: 8, borderRadius: 8 }}>

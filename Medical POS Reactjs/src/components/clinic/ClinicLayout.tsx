@@ -1,6 +1,8 @@
 import { useState } from 'react';
+import type { LucideIcon } from 'lucide-react';
 import { Outlet, Link, useLocation } from 'react-router-dom';
 import { useAuth } from '../../lib/auth';
+import { useClinicNavHotkeys } from '../../hooks/useClinicNavHotkeys';
 import { 
     LayoutDashboard, 
     Receipt, 
@@ -19,37 +21,48 @@ import {
 } from 'lucide-react';
 import { Button } from '../ui/Button';
 
+type NavItem = { name: string; path: string; icon: LucideIcon; fKey: number };
+
 export const ClinicLayout = () => {
     const { signOut, user } = useAuth();
     const location = useLocation();
     const [alertsOpen, setAlertsOpen] = useState(false);
 
-    const MAIN_NAV = [
-        { name: 'Dashboard', path: '/dashboard', icon: LayoutDashboard },
-        { name: 'Billing', path: '/billing', icon: Receipt },
-        { name: 'Purchases', path: '/purchases', icon: ShoppingCart },
-        { name: 'Inventory', path: '/inventory', icon: PackageSearch },
+    useClinicNavHotkeys();
+
+    const MAIN_NAV: NavItem[] = [
+        { name: 'Dashboard', path: '/dashboard', icon: LayoutDashboard, fKey: 1 },
+        { name: 'Billing', path: '/billing', icon: Receipt, fKey: 2 },
+        { name: 'Purchases', path: '/purchases', icon: ShoppingCart, fKey: 3 },
+        { name: 'Inventory', path: '/inventory', icon: PackageSearch, fKey: 4 },
     ];
 
-    const PEOPLE_NAV = [
-        { name: 'Customers', path: '/customers', icon: Users },
-        { name: 'Suppliers', path: '/suppliers', icon: Building2 },
+    const PEOPLE_NAV: NavItem[] = [
+        { name: 'Customers', path: '/customers', icon: Users, fKey: 5 },
+        { name: 'Suppliers', path: '/suppliers', icon: Building2, fKey: 6 },
     ];
 
-    const FINANCE_NAV = [
-        { name: 'Expenses', path: '/expenses', icon: Wallet },
-        { name: 'Reports', path: '/reports', icon: FileBarChart },
-        { name: 'Analytics', path: '/analytics', icon: LineChart },
+    const FINANCE_NAV: NavItem[] = [
+        { name: 'Expenses', path: '/expenses', icon: Wallet, fKey: 7 },
+        { name: 'Reports', path: '/reports', icon: FileBarChart, fKey: 8 },
+        { name: 'Analytics', path: '/analytics', icon: LineChart, fKey: 9 },
     ];
 
-    const renderNavLinks = (links: any[]) => {
-        return links.map(link => {
+    const SYSTEM_NAV: NavItem[] = [
+        { name: 'Settings', path: '/settings', icon: Settings, fKey: 10 },
+        { name: 'Import data', path: '/settings/import', icon: Upload, fKey: 11 },
+    ];
+
+    const renderNavLinks = (links: NavItem[]) => {
+        return links.map((link) => {
             const isActive = location.pathname.startsWith(link.path);
             const Icon = link.icon;
             return (
                 <Link
                     key={link.path}
                     to={link.path}
+                    title={`${link.name} (F${link.fKey})`}
+                    aria-keyshortcuts={`F${link.fKey}`}
                     className={`flex items-center gap-3 px-3 py-2 rounded-lg transition-colors text-sm font-medium ${
                         isActive 
                             ? 'bg-accent-primary/10 text-accent-primary' 
@@ -57,7 +70,10 @@ export const ClinicLayout = () => {
                     }`}
                 >
                     <Icon className="w-5 h-5" />
-                    {link.name}
+                    <span className="flex-1">{link.name}</span>
+                    <kbd className="hidden xl:inline text-[10px] font-mono text-muted/70 border border-border rounded px-1 py-0.5 bg-bg-card">
+                        F{link.fKey}
+                    </kbd>
                 </Link>
             );
         });
@@ -92,16 +108,14 @@ export const ClinicLayout = () => {
                     </div>
                     <div>
                         <p className="px-3 text-xs font-bold uppercase tracking-wider text-muted mb-2">System</p>
-                        <div className="space-y-1">
-                            {renderNavLinks([
-                                { name: 'Settings', path: '/settings/clinic', icon: Settings },
-                                { name: 'Import data', path: '/settings/import', icon: Upload },
-                            ])}
-                        </div>
+                        <div className="space-y-1">{renderNavLinks(SYSTEM_NAV)}</div>
                     </div>
                 </nav>
 
-                <div className="p-3 border-t border-border">
+                <div className="p-3 border-t border-border space-y-2">
+                    <p className="px-2 text-[10px] text-muted leading-snug">
+                        <span className="font-bold text-foreground/80">F12</span> New invoice · F1–F11 sidebar (off when typing)
+                    </p>
                     <Button 
                         variant="ghost" 
                         size="sm"

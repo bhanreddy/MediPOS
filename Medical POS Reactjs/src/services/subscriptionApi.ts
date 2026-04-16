@@ -1,25 +1,4 @@
-import { supabase } from '../lib/supabase';
-
-const fnUrl = (name: string) => {
-  const base = import.meta.env.VITE_SUPABASE_URL as string;
-  return `${base.replace(/\/$/, '')}/functions/v1/${name}`;
-};
-
-async function edgeFunctionHeaders(): Promise<Record<string, string>> {
-  const { data, error } = await supabase.auth.getSession();
-  if (error) throw error;
-  const token = data.session?.access_token;
-  if (!token) throw new Error('Not signed in');
-  const anon =
-    String(import.meta.env.VITE_SUPABASE_ANON_KEY || '').trim() ||
-    String(import.meta.env.VITE_SUPABASE_PUBLISHABLE_DEFAULT_KEY || '').trim();
-  if (!anon) throw new Error('Missing VITE_SUPABASE_ANON_KEY (or VITE_SUPABASE_PUBLISHABLE_DEFAULT_KEY)');
-  return {
-    Authorization: `Bearer ${token}`,
-    apikey: anon,
-    'Content-Type': 'application/json',
-  };
-}
+import api from '../lib/api';
 
 export type PlanId = 'monthly' | 'yearly';
 
@@ -38,49 +17,49 @@ export type SubscriptionStatusResponse = {
 };
 
 export async function createSubscriptionOrder(plan: PlanId): Promise<CreateOrderResponse> {
-  const headers = await edgeFunctionHeaders();
-  const res = await fetch(fnUrl('create-order'), {
-    method: 'POST',
-    headers,
-    body: JSON.stringify({ plan }),
+  const billingCycle = plan === 'yearly' ? 'annual' : 'monthly';
+  const res = await api.post('/subscriptions/create', {
+    plan_name: plan,
+    billing_cycle: billingCycle,
   });
-  const body = (await res.json().catch(() => ({}))) as CreateOrderResponse & { error?: string };
-  if (!res.ok) throw new Error(body.error || `create-order failed (${res.status})`);
-  return body;
+  return res.data.data;
 }
 
 export async function verifySubscriptionPayment(payload: {
   merchant_order_id: string;
 }): Promise<{ ok: true; subscription_id: string; expires_at: string | null; plan: PlanId }> {
-  const headers = await edgeFunctionHeaders();
-  const res = await fetch(fnUrl('verify-payment'), {
-    method: 'POST',
-    headers,
-    body: JSON.stringify(payload),
-  });
-  const body = (await res.json().catch(() => ({}))) as {
-    ok?: boolean;
-    subscription_id?: string;
-    expires_at?: string | null;
-    plan?: PlanId;
-    error?: string;
-    order_state?: string;
-  };
-  if (!res.ok || !body.ok) {
-    throw new Error(body.error || `verify-payment failed (${res.status})`);
-  }
+  const res = await api.post('/subscriptions/verify-payment', payload);
+  const d = res.data.data;
   return {
     ok: true,
-    subscription_id: body.subscription_id!,
-    expires_at: body.expires_at ?? null,
-    plan: body.plan!,
+    subscription_id: d.subscription_id,
+    expires_at: d.current_period_end ?? null,
+    plan: d.plan_name as PlanId,
   };
 }
 
 export async function fetchSubscriptionStatus(): Promise<SubscriptionStatusResponse> {
-  const headers = await edgeFunctionHeaders();
-  const res = await fetch(fnUrl('subscription-status'), { method: 'GET', headers });
-  const body = (await res.json().catch(() => ({}))) as SubscriptionStatusResponse & { error?: string };
-  if (!res.ok) throw new Error(body.error || `subscription-status failed (${res.status})`);
-  return body;
+  try {
+    const res = await api.get('/subscriptions/current');
+    const sub = res.data.data?.subscription;
+
+    if (!sub) {
+      return { status: 'none', plan: null, expires_at: null, subscription_id: null };
+    }
+
+    const billingToPlan: Record<string, PlanId> = { monthly: 'monthly', annual: 'yearly' };
+
+    return {
+      status: sub.status === 'trial' ? 'active' : sub.status,
+      plan: billingToPlan[sub.billing_cycle] ?? 'monthly',
+      expires_at: sub.current_period_end ?? sub.trial_end ?? null,
+      subscription_id: sub.id,
+    };
+  } catch (err: unknown) {
+    const status = (err as { response?: { status?: number } })?.response?.status;
+    if (status === 401 || status === 404) {
+      return { status: 'none', plan: null, expires_at: null, subscription_id: null };
+    }
+    throw err;
+  }
 }

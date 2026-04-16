@@ -24,6 +24,7 @@ export default ({ config }: ConfigContext): ExpoConfig => ({
   ...config,
   name: envConfig[APP_ENV as keyof typeof envConfig].name,
   slug: 'medical-pos',
+  scheme: 'medpos',
   version: '1.0.0',
   icon: envConfig[APP_ENV as keyof typeof envConfig].icon,
   android: {

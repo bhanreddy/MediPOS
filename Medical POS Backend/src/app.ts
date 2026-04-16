@@ -3,6 +3,7 @@ import cors from 'cors';
 import morgan from 'morgan';
 import dotenv from 'dotenv';
 import { routes } from './routes';
+import { v1Router } from './v1';
 import { publicRouter } from './routes/public';
 import { errorHandler } from './middleware/errorHandler';
 import { helmetConfig, authRateLimit, apiRateLimit, sanitizeInput, validateUUID } from './middleware/security';
@@ -46,6 +47,7 @@ export function createApp(): express.Application {
 
   app.use('/api/auth', authRateLimit);
   app.use('/api', apiRateLimit, routes);
+  app.use('/api/v1', apiRateLimit, v1Router);
 
   sentryErrorHandler(app);
   app.use(errorHandler);

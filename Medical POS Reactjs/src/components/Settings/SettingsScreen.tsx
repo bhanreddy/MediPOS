@@ -9,6 +9,7 @@ import { useUpiId } from '../../hooks/useUpiId';
 
 import { Button } from '../ui/Button';
 import { Badge } from '../ui/Badge';
+import { Card } from '../ui/Card';
 import { Input } from '../ui/Input';
 import { QRCodeSVG } from 'qrcode.react';
 import { BRANDING, PAYMENT_COPY, SETTINGS_SCREEN_COPY } from '../../config/appContent';
@@ -155,67 +156,60 @@ export const SettingsScreen: React.FC = () => {
     };
 
     return (
-        <div className="h-full flex flex-col gap-8 animate-slideIn select-none">
-            <div className="flex justify-between items-end gap-6 flex-wrap">
-                <div className="space-y-1">
-                    <h2 className="text-billing-total font-black text-foreground-strong tracking-tighter uppercase italic leading-none">
-                        {SETTINGS_SCREEN_COPY.title}
-                    </h2>
-                    <p className="text-muted text-sm font-black uppercase tracking-widest">{SETTINGS_SCREEN_COPY.subtitle}</p>
+        <div className="p-8 max-w-7xl mx-auto space-y-6 animate-slideIn">
+            <div className="flex flex-col gap-4 sm:flex-row sm:items-end sm:justify-between">
+                <div>
+                    <h1 className="text-2xl font-black text-foreground-strong tracking-tight">{SETTINGS_SCREEN_COPY.title}</h1>
+                    <p className="text-sm text-muted mt-1">{SETTINGS_SCREEN_COPY.subtitle}</p>
                 </div>
-                <div className="flex items-center gap-2">
-                    <Badge variant={session?.is_offline_session ? 'warning' : 'success'}>{sessionModeLabel}</Badge>
-                </div>
+                <Badge variant={session?.is_offline_session ? 'warning' : 'success'}>{sessionModeLabel}</Badge>
             </div>
 
             {(error || status) && (
                 <div
-                    className={`${error ? 'bg-danger/10 border-danger text-danger' : 'bg-success/10 border-success text-success'} border-2 px-4 py-3 rounded-md font-black uppercase tracking-widest text-xs`}
+                    className={`rounded-lg border px-4 py-3 text-sm font-semibold ${
+                        error ? 'bg-danger/10 border-danger/30 text-danger' : 'bg-success/10 border-success/30 text-success'
+                    }`}
                 >
                     {error ?? status}
                 </div>
             )}
 
-            <div className="grid grid-cols-1 xl:grid-cols-3 gap-8">
-                <div className="bg-surface border-2 border-border rounded-2xl p-6 flex flex-col gap-4 col-span-1 xl:col-span-2">
+            <div className="grid grid-cols-1 xl:grid-cols-3 gap-6">
+                <Card className="p-6 flex flex-col gap-4 col-span-1 xl:col-span-2">
                     <MedicalProfileCard />
-                </div>
+                </Card>
 
-                <div className="bg-surface border-2 border-border rounded-2xl p-6 flex flex-col gap-4">
-                    <div className="flex items-center justify-between">
-                        <div className="text-heading font-black uppercase tracking-widest text-foreground-strong">Sales Rules</div>
+                <Card className="p-6 flex flex-col gap-4">
+                    <div className="flex items-center justify-between gap-2">
+                        <h2 className="text-sm font-bold text-muted uppercase tracking-wider">Sales rules</h2>
                         <Badge variant="primary">Live</Badge>
                     </div>
-
-                    <div className="bg-surface-elevated border-2 border-border rounded-xl p-5 flex items-center justify-between gap-4">
+                    <div className="rounded-lg border border-border bg-bg-primary p-4 flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4">
                         <div>
-                            <div className="text-label font-black uppercase tracking-widest text-muted">Allow Expired Sale</div>
-                            <div className="text-xs font-black uppercase tracking-widest text-muted mt-1">
-                                Controls FEFO allocation behavior
-                            </div>
+                            <p className="text-xs font-bold text-muted uppercase tracking-wider">Allow expired sale</p>
+                            <p className="text-xs text-muted mt-1">Controls FEFO allocation behavior.</p>
                         </div>
                         <Button
                             variant={allowExpiredSale ? 'danger' : 'secondary'}
                             onClick={toggleAllowExpiredSale}
                             disabled={isLoading}
                         >
-                            {allowExpiredSale ? 'ON' : 'OFF'}
+                            {allowExpiredSale ? 'On' : 'Off'}
                         </Button>
                     </div>
-                </div>
+                </Card>
 
-                <div className="bg-surface border-2 border-border rounded-2xl p-6 flex flex-col gap-4">
-                    <div className="flex items-center justify-between">
-                        <div className="text-heading font-black uppercase tracking-widest text-foreground-strong">Backup</div>
+                <Card className="p-6 flex flex-col gap-4">
+                    <div className="flex items-center justify-between gap-2">
+                        <h2 className="text-sm font-bold text-muted uppercase tracking-wider">Backup</h2>
                         <Badge variant="warning">Manual</Badge>
                     </div>
-
-                    <div className="bg-surface-elevated border-2 border-border rounded-xl p-5 flex flex-col gap-4">
-                        <div className="text-xs font-black uppercase tracking-widest text-muted">
+                    <div className="rounded-lg border border-border bg-bg-primary p-4 flex flex-col gap-4">
+                        <p className="text-xs text-muted leading-relaxed">
                             Export creates a JSON backup. Restore overwrites local data and reloads.
-                        </div>
-
-                        <div className="flex items-center gap-2">
+                        </p>
+                        <div className="flex flex-wrap items-center gap-2">
                             <Button variant="primary" onClick={exportBackup} isLoading={isLoading}>
                                 Export
                             </Button>
@@ -231,49 +225,50 @@ export const SettingsScreen: React.FC = () => {
                             />
                         </div>
                     </div>
-                </div>
+                </Card>
 
-                <div className="bg-surface border-2 border-border rounded-2xl p-6 flex flex-col gap-4 xl:col-span-3">
+                <Card className="p-6 flex flex-col gap-4 xl:col-span-3">
                     <div className="flex items-center justify-between flex-wrap gap-2">
-                        <div className="text-heading font-black uppercase tracking-widest text-foreground-strong">Stock alerts</div>
+                        <h2 className="text-sm font-bold text-muted uppercase tracking-wider">Stock alerts</h2>
                         <Badge variant="primary">IndexedDB</Badge>
                     </div>
                     <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                        <div className="bg-surface-elevated border-2 border-border rounded-xl p-5 space-y-2">
-                            <div className="text-label font-black uppercase tracking-widest text-muted">Expiry warning window (days)</div>
-                            <p className="text-xs font-bold text-muted uppercase tracking-tight">
+                        <div className="rounded-lg border border-border bg-bg-primary p-4 space-y-3">
+                            <p className="text-xs font-bold text-muted uppercase tracking-wider">Expiry warning window (days)</p>
+                            <p className="text-xs text-muted leading-relaxed">
                                 Batches expiring within this window count toward header badges and startup alert.
                             </p>
-                            <div className="flex gap-2 items-end">
+                            <div className="flex flex-wrap gap-2 items-end">
                                 <Input
                                     label="Days (1–365)"
                                     value={alertExpiryDays}
                                     onChange={e => setAlertExpiryDays(e.target.value)}
+                                    containerClassName="min-w-[8rem] flex-1"
                                 />
-                                <Button variant="primary" onClick={() => void saveExpiryAlertDays()} disabled={isLoading}>
+                                <Button variant="primary" onClick={() => void saveExpiryAlertDays()} disabled={isLoading} className="shrink-0">
                                     Save
                                 </Button>
                             </div>
                         </div>
-                        <div className="bg-surface-elevated border-2 border-border rounded-xl p-5 space-y-2">
-                            <div className="text-label font-black uppercase tracking-widest text-muted">Low stock</div>
-                            <p className="text-xs font-bold text-muted uppercase tracking-tight">
-                                Each medicine uses its own “min stock alert” from Medicine Master. Inventory radar compares on-hand qty to that threshold.
+                        <div className="rounded-lg border border-border bg-bg-primary p-4 space-y-2">
+                            <p className="text-xs font-bold text-muted uppercase tracking-wider">Low stock</p>
+                            <p className="text-xs text-muted leading-relaxed">
+                                Each medicine uses its own min stock alert from Medicine Master. Inventory compares on-hand qty to that threshold.
                             </p>
                         </div>
                     </div>
-                </div>
+                </Card>
 
-                <div className="bg-surface border-2 border-border rounded-2xl p-6 flex flex-col gap-4 xl:col-span-3">
+                <Card className="p-6 flex flex-col gap-4 xl:col-span-3">
                     <div className="flex items-center justify-between flex-wrap gap-2">
-                        <div className="text-heading font-black uppercase tracking-widest text-foreground-strong">Payment settings</div>
+                        <h2 className="text-sm font-bold text-muted uppercase tracking-wider">Payment settings</h2>
                         <Badge variant="primary">UPI</Badge>
                     </div>
-                    <p className="text-xs font-black uppercase tracking-widest text-muted">
+                    <p className="text-xs text-muted leading-relaxed">
                         Store your VPA for customer UPI payments. Used on the billing screen to generate a dynamic pay QR per bill.
                     </p>
                     <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
-                        <div className="bg-surface-elevated border-2 border-border rounded-xl p-5 space-y-3">
+                        <div className="rounded-lg border border-border bg-bg-primary p-4 space-y-3">
                             <Input
                                 label="UPI ID"
                                 placeholder="pharmacy@upi or 9876543210@paytm"
@@ -284,12 +279,12 @@ export const SettingsScreen: React.FC = () => {
                                 }}
                                 error={upiFieldError || undefined}
                             />
-                            <Button variant="primary" onClick={saveUpiSettings} disabled={isLoading} className="font-black">
+                            <Button variant="primary" onClick={saveUpiSettings} disabled={isLoading}>
                                 Save UPI ID
                             </Button>
                         </div>
-                        <div className="bg-surface-elevated border-2 border-border rounded-xl p-5 flex flex-col items-center justify-center gap-3 min-h-[200px]">
-                            <div className="text-label font-black uppercase tracking-widest text-muted">Live preview</div>
+                        <div className="rounded-lg border border-border bg-bg-primary p-4 flex flex-col items-center justify-center gap-3 min-h-[200px]">
+                            <p className="text-xs font-bold text-muted uppercase tracking-wider">Live preview</p>
                             {UPI_PATTERN.test(upiDraft.trim()) ? (
                                 <>
                                     <div className="bg-white p-2 rounded-lg border border-border">
@@ -301,21 +296,21 @@ export const SettingsScreen: React.FC = () => {
                                     <span className="text-[10px] font-bold text-muted text-center">{PAYMENT_COPY.upiQrPreviewNote}</span>
                                 </>
                             ) : (
-                                <span className="text-sm font-bold text-muted text-center">Enter a valid UPI ID to preview QR</span>
+                                <span className="text-sm text-muted text-center">Enter a valid UPI ID to preview QR</span>
                             )}
                         </div>
                     </div>
-                </div>
+                </Card>
 
-                <div className="bg-surface border-2 border-border rounded-2xl p-6 flex flex-col gap-4 xl:col-span-3 opacity-90">
+                <Card className="p-6 flex flex-col gap-3 xl:col-span-3 border-dashed opacity-95">
                     <div className="flex items-center justify-between flex-wrap gap-2">
-                        <div className="text-heading font-black uppercase tracking-widest text-foreground-strong">Cloud backup</div>
-                        <Badge variant="warning">Coming Soon</Badge>
+                        <h2 className="text-sm font-bold text-muted uppercase tracking-wider">Cloud backup</h2>
+                        <Badge variant="warning">Coming soon</Badge>
                     </div>
-                    <p className="text-xs font-black uppercase tracking-widest text-muted">
+                    <p className="text-xs text-muted leading-relaxed">
                         Encrypted cloud sync for multi-terminal shops will appear here. Local JSON export remains the supported backup today.
                     </p>
-                </div>
+                </Card>
             </div>
         </div>
     );
@@ -383,9 +378,10 @@ const MedicalProfileCard = () => {
 
     if (!profile) {
         return (
-            <div className="p-4 text-muted flex flex-col gap-2 items-start">
-                <div>No Profile Data Found locally.</div>
+            <div className="flex flex-col gap-3 text-muted">
+                <p className="text-sm text-foreground">No profile data found locally.</p>
                 <button
+                    type="button"
                     onClick={() => {
                         setLoading(true);
                         ShopProfileService.syncShopProfile()
@@ -394,9 +390,9 @@ const MedicalProfileCard = () => {
                             .finally(() => setLoading(false));
                     }}
                     disabled={loading}
-                    className="text-primary font-black underline"
+                    className="text-sm font-semibold text-accent-primary hover:underline w-fit"
                 >
-                    {loading ? 'Syncing...' : 'Sync from Online'}
+                    {loading ? 'Syncing…' : 'Sync from online'}
                 </button>
             </div>
         );
@@ -407,7 +403,7 @@ const MedicalProfileCard = () => {
             <div className="flex items-center justify-between">
                 <div className="flex items-center gap-4">
                     <div
-                        className="relative w-16 h-16 rounded-full border-2 border-border bg-surface-elevated overflow-hidden group cursor-pointer"
+                        className="relative w-16 h-16 rounded-full border-2 border-border bg-bg-primary overflow-hidden group cursor-pointer"
                         onClick={() => logoInputRef.current?.click()}
                     >
                         {profile.logo_url ? (
@@ -428,12 +424,10 @@ const MedicalProfileCard = () => {
                     />
 
                     <div>
-                        <div className="text-heading font-black uppercase tracking-widest text-foreground-strong">
-                            {profile.medical_name}
-                        </div>
-                        <div className="text-xs font-bold text-muted uppercase tracking-widest">
-                            {profile.verified ? '✅ Verified Business' : '⚠️ Unverified'}
-                        </div>
+                        <p className="text-lg font-black text-foreground-strong tracking-tight">{profile.medical_name}</p>
+                        <p className="text-xs text-muted mt-1">
+                            {profile.verified ? 'Verified business' : 'Unverified'}
+                        </p>
                     </div>
                 </div>
                 <Badge variant={profile.verified ? 'success' : 'warning'}>
@@ -444,7 +438,7 @@ const MedicalProfileCard = () => {
             <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
                 {/* LEGAL (LOCKED) */}
                 <div className="space-y-4">
-                    <h4 className="text-xs font-black text-muted uppercase tracking-widest border-b border-border pb-2">Legal Identity (Locked)</h4>
+                    <h4 className="text-xs font-bold text-muted uppercase tracking-wider border-b border-border pb-2">Legal identity (locked)</h4>
 
                     <div>
                         <div className="text-[10px] font-bold text-muted uppercase">Owner / License Holder</div>
@@ -465,7 +459,7 @@ const MedicalProfileCard = () => {
 
                 {/* CONTACT & ADDRESS */}
                 <div className="space-y-4">
-                    <h4 className="text-xs font-black text-muted uppercase tracking-widest border-b border-border pb-2">Location & Contact</h4>
+                    <h4 className="text-xs font-bold text-muted uppercase tracking-wider border-b border-border pb-2">Location & contact</h4>
 
                     <div>
                         <div className="text-[10px] font-bold text-muted uppercase">Registered Address</div>
@@ -476,7 +470,7 @@ const MedicalProfileCard = () => {
                         </div>
                     </div>
 
-                    <div className="bg-surface-elevated p-3 rounded-lg border border-border">
+                    <div className="bg-bg-primary p-3 rounded-lg border border-border">
                         <div className="flex justify-between items-center mb-1">
                             <div className="text-[10px] font-bold text-muted uppercase">Customer Support Phone</div>
                             {!isEditingPhone ? (
@@ -507,7 +501,7 @@ const MedicalProfileCard = () => {
 
                         {isEditingPhone ? (
                             <input
-                                className="w-full bg-surface border border-border px-2 py-1 font-mono font-bold"
+                                className="w-full bg-bg-surface border border-border rounded-md px-2 py-1.5 font-mono font-bold text-sm"
                                 value={phoneDraft}
                                 onChange={e => setPhoneDraft(e.target.value)}
                             />

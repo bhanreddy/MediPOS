@@ -15,13 +15,16 @@ api.interceptors.request.use(async (config) => {
   return config;
 });
 
-// 401 → redirect to login
+// 401 → let callers handle it. Only force sign-out for non-auth API calls
+// when there is genuinely no Supabase session left.
 api.interceptors.response.use(
   (res) => res,
   async (err) => {
     if (err.response?.status === 401) {
-      await supabase.auth.signOut();
-      window.location.href = '/login';
+      const { data } = await supabase.auth.getSession();
+      if (!data.session) {
+        window.location.href = '/login';
+      }
     }
     return Promise.reject(err);
   }

@@ -3,7 +3,14 @@ import { View, Text, TouchableOpacity, StyleSheet, Modal, Linking, Platform } fr
 import { BarCodeScanner } from 'expo-barcode-scanner';
 import * as Haptics from 'expo-haptics';
 import { Ionicons } from '@expo/vector-icons';
-import { theme } from '../constants/theme';
+
+/** Local palette — avoids StyleSheet.create touching theme at module load (order / cache issues). */
+const C = {
+  bg: '#0A0A0F',
+  text: '#F0F4FF',
+  accent: '#00C9A7',
+  borderMuted: 'rgba(255,255,255,0.12)',
+} as const;
 
 type Props = {
   onScanned: (barcode: string) => void;
@@ -111,11 +118,11 @@ const styles = StyleSheet.create({
     justifyContent: 'center',
     alignItems: 'center',
     padding: 24,
-    backgroundColor: theme.bg.primary,
+    backgroundColor: C.bg,
   },
-  msg: { color: theme.text.primary, textAlign: 'center', marginBottom: 16 },
+  msg: { color: C.text, textAlign: 'center', marginBottom: 16 },
   btn: {
-    backgroundColor: theme.accent.primary,
+    backgroundColor: C.accent,
     paddingHorizontal: 20,
     paddingVertical: 12,
     borderRadius: 10,
@@ -123,13 +130,13 @@ const styles = StyleSheet.create({
   },
   btnSecondary: {
     borderWidth: 1,
-    borderColor: theme.border.subtle,
+    borderColor: C.borderMuted,
     paddingHorizontal: 20,
     paddingVertical: 12,
     borderRadius: 10,
   },
   btnText: { color: '#0a0a0a', fontWeight: '700' },
-  btnTextDark: { color: theme.text.primary, fontWeight: '600' },
+  btnTextDark: { color: C.text, fontWeight: '600' },
   overlayTop: {
     position: 'absolute',
     top: 48,

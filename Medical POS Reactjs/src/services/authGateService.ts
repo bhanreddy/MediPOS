@@ -57,8 +57,13 @@ export async function resolveColdStartGate(): Promise<AuthGate> {
 }
 
 export async function routeAfterPasswordLogin(): Promise<AuthGate> {
-  const remote = await fetchSubscriptionStatus();
-  await CloudAuthService.applySubscriptionCacheFromServer();
+  let remote;
+  try {
+    remote = await fetchSubscriptionStatus();
+  } catch {
+    remote = { status: 'none' as const, plan: null, expires_at: null, subscription_id: null };
+  }
+  await CloudAuthService.applySubscriptionCacheFromServer().catch(() => undefined);
 
   if (remote.status === 'active') {
     const ok = await CloudAuthService.ensurePosSessionFromCloud();
@@ -67,5 +72,11 @@ export async function routeAfterPasswordLogin(): Promise<AuthGate> {
   if (remote.status === 'expired') {
     return 'renewal';
   }
+
+  if (remote.status === 'none') {
+    const ok = await CloudAuthService.ensurePosSessionFromCloud();
+    if (ok) return 'app';
+  }
+
   return 'payment';
 }

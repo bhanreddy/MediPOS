@@ -1,21 +1,18 @@
 import { CloudAuthService } from './cloudAuthService';
 import { verifySubscriptionPayment } from './subscriptionApi';
-
-const PENDING_KEY = 'medpos_phonepe_merchant_order';
-
-function matchesReturnPath(pathname: string): boolean {
-  const configured = (import.meta.env.VITE_PHONEPE_RETURN_PATH as string | undefined) || '/payment-return';
-  const normalized = configured.startsWith('/') ? configured : `/${configured}`;
-  return pathname === normalized || pathname.endsWith(normalized);
-}
+import {
+  matchesUserSubscriptionReturnPath,
+  PHONEPE_SESSION_PAYMENT_ERROR,
+  PHONEPE_SESSION_PENDING_USER,
+} from '../payment/phonePePG';
 
 /**
  * After PhonePe redirects back to the SPA, confirm payment server-side and open the POS session.
  */
 export async function tryCompletePhonePeReturn(): Promise<void> {
-  if (!matchesReturnPath(window.location.pathname || '')) return;
+  if (!matchesUserSubscriptionReturnPath(window.location.pathname || '')) return;
 
-  const moid = sessionStorage.getItem(PENDING_KEY);
+  const moid = sessionStorage.getItem(PHONEPE_SESSION_PENDING_USER);
   if (!moid) {
     window.history.replaceState({}, '', '/');
     return;
@@ -27,11 +24,11 @@ export async function tryCompletePhonePeReturn(): Promise<void> {
       plan: verified.plan,
       expiresAt: verified.expires_at,
     });
-    sessionStorage.removeItem(PENDING_KEY);
+    sessionStorage.removeItem(PHONEPE_SESSION_PENDING_USER);
   } catch (e) {
     const msg = e instanceof Error ? e.message : 'Payment verification failed';
-    sessionStorage.setItem('medpos_payment_error', msg);
-    sessionStorage.removeItem(PENDING_KEY);
+    sessionStorage.setItem(PHONEPE_SESSION_PAYMENT_ERROR, msg);
+    sessionStorage.removeItem(PHONEPE_SESSION_PENDING_USER);
   } finally {
     window.history.replaceState({}, '', '/');
   }

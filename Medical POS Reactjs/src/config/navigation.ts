@@ -18,7 +18,7 @@ export type NavItem = {
     /** Short label under icon (sidebar width). */
     abbr: string;
     path: string;
-    /** Global F1–F12 when focus is not inside `[data-pos-local-fkeys]` (Purchase/Inventory use local F6/F12). */
+    /** Clinic shell: F1–F11 = sidebar order; F12 = new invoice. Skipped in form fields & inside `[data-pos-local-fkeys]` (Purchase F4/F6/F12, Inventory F6). */
     key?: string;
     badge?: string;
     section: NavSectionId;
@@ -50,13 +50,13 @@ export const NAV_ITEMS: NavItem[] = [
     { id: 'dashboard', label: 'Dashboard', abbr: 'Home', key: 'F1', path: '/dashboard', section: 'operations' },
     { id: 'billing', label: 'Billing', abbr: 'POS', key: 'F2', path: '/billing', section: 'operations' },
     { id: 'inventory', label: 'Inventory', abbr: 'Stock', key: 'F3', path: '/inventory', section: 'operations' },
-    { id: 'purchase', label: 'Purchase', abbr: 'In', key: 'F4', path: '/purchase', section: 'operations' },
-    { id: 'expense', label: 'Expense', abbr: 'Cost', key: 'F5', path: '/expense', section: 'finance' },
+    { id: 'purchase', label: 'Purchase', abbr: 'In', key: 'F4', path: '/purchases', section: 'operations' },
+    { id: 'expense', label: 'Expense', abbr: 'Cost', key: 'F5', path: '/expenses', section: 'finance' },
     { id: 'customers', label: 'Customers', abbr: 'CRM', key: 'F6', path: '/customers', section: 'operations' },
     { id: 'reports', label: 'Reports', abbr: 'Rpt', key: 'F7', path: '/reports', section: 'finance' },
     { id: 'settings', label: 'Settings', abbr: 'Cfg', key: 'F8', path: '/settings', section: 'system' },
-    { id: 'expiry_alerts', label: 'Expiry Alerts', abbr: 'Exp', key: 'F9', path: '/expiry-alerts', section: 'compliance' },
-    { id: 'medicine_master', label: 'Medicines', abbr: 'Rx', key: 'F10', path: '/medicines', section: 'operations' },
+    { id: 'expiry_alerts', label: 'Expiry Alerts', abbr: 'Exp', key: 'F9', path: '/alerts', section: 'compliance' },
+    { id: 'medicine_master', label: 'Medicines', abbr: 'Rx', key: 'F10', path: '/inventory', section: 'operations' },
     { id: 'suppliers_hub', label: 'Suppliers', abbr: 'Vend', key: 'F11', path: '/suppliers', section: 'operations' },
     { id: 'sales_analytics', label: 'Analytics', abbr: 'BI', key: 'F12', path: '/analytics', section: 'finance' },
 

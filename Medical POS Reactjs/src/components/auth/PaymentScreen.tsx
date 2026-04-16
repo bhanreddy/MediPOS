@@ -7,8 +7,11 @@ import type { RootState } from '../../state/store';
 import { createSubscriptionOrder, type PlanId } from '../../services/subscriptionApi';
 import { AuthService } from '../../services/authService';
 import type { AuthGate } from '../../services/authGateService';
-
-const PENDING_KEY = 'medpos_phonepe_merchant_order';
+import {
+  PHONEPE_SESSION_PAYMENT_ERROR,
+  PHONEPE_SESSION_PENDING_USER,
+  redirectToPhonePeCheckout,
+} from '../../payment/phonePePG';
 
 export function PaymentScreen({
   onNavigate,
@@ -25,10 +28,10 @@ export function PaymentScreen({
   const { isLoading } = useSelector((s: RootState) => s.ui);
 
   useEffect(() => {
-    const pe = sessionStorage.getItem('medpos_payment_error');
+    const pe = sessionStorage.getItem(PHONEPE_SESSION_PAYMENT_ERROR);
     if (pe) {
       setError(pe);
-      sessionStorage.removeItem('medpos_payment_error');
+      sessionStorage.removeItem(PHONEPE_SESSION_PAYMENT_ERROR);
     }
   }, []);
 
@@ -40,8 +43,7 @@ export function PaymentScreen({
       if (!order.redirect_url || !order.merchant_order_id) {
         throw new Error('Invalid response from payment server (missing redirect).');
       }
-      sessionStorage.setItem(PENDING_KEY, order.merchant_order_id);
-      window.location.assign(order.redirect_url);
+      redirectToPhonePeCheckout(PHONEPE_SESSION_PENDING_USER, order.merchant_order_id, order.redirect_url);
     } catch (e: unknown) {
       const msg = e instanceof Error ? e.message : 'Payment start failed';
       setError(msg);
@@ -93,7 +95,7 @@ export function PaymentScreen({
             disabled={isLoading}
             onClick={() =>
               void (async () => {
-                sessionStorage.removeItem(PENDING_KEY);
+                sessionStorage.removeItem(PHONEPE_SESSION_PENDING_USER);
                 await AuthService.logout();
                 onNavigate('login');
               })()

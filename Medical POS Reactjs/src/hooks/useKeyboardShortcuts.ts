@@ -25,21 +25,25 @@ export const useKeyboardShortcuts = (shortcuts: ShortcutMap) => {
         const local = targetInsideLocalFkeyZone(event.target);
         const isF = F_KEYS.includes(event.key as (typeof F_KEYS)[number]);
 
-        if (isF) {
-            if (local) return;
-            event.preventDefault();
-        }
-
         if (event.ctrlKey && event.key.toLowerCase() === 'k') {
             event.preventDefault();
             shortcuts['Ctrl+K']?.();
             return;
         }
 
-        if (shortcuts[event.key]) {
-            if (isF && local) return;
-            shortcuts[event.key]();
+        const action = shortcuts[event.key];
+        if (!action) return;
+
+        if (isF) {
+            if (local) {
+                event.preventDefault();
+                action();
+                return;
+            }
+            event.preventDefault();
         }
+
+        action();
     }, [shortcuts]);
 
     useEffect(() => {

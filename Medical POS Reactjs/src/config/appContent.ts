@@ -347,7 +347,7 @@ export const REPORTS_SCREEN_COPY = {
 
 export const SETTINGS_SCREEN_COPY = {
     title: 'Settings',
-    subtitle: 'F8 • System configuration',
+    subtitle: 'System configuration, backups, alerts, and UPI.',
 } as const;
 
 export const BILLING_SCREEN_COPY = {

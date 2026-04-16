@@ -463,7 +463,7 @@ CREATE POLICY "device_tokens_owner" ON device_tokens
   FOR ALL USING (user_id = auth.uid());
 
 -- ==========================================
--- PHASE 6: SUBSCRIPTION BILLING (RAZORPAY)
+-- PHASE 6: SUBSCRIPTION BILLING (PhonePe PG + legacy plan columns)
 -- ==========================================
 
 CREATE TABLE subscription_plans (
@@ -472,7 +472,7 @@ CREATE TABLE subscription_plans (
   display_name text NOT NULL,
   price_monthly  numeric NOT NULL DEFAULT 0,
   price_annual   numeric NOT NULL DEFAULT 0,
-  razorpay_plan_id_monthly text,         -- from Razorpay dashboard
+  razorpay_plan_id_monthly text,         -- legacy; unused with PhonePe checkout
   razorpay_plan_id_annual  text,
   features    jsonb NOT NULL DEFAULT '{}',
   limits      jsonb NOT NULL DEFAULT '{}',  -- { max_users: 2, max_daily_bills: 25 }
@@ -486,8 +486,10 @@ CREATE TABLE clinic_subscriptions (
   plan_name               text NOT NULL,
   razorpay_subscription_id text UNIQUE,
   razorpay_customer_id    text,
+  payment_merchant_order_id text UNIQUE,
+  payment_provider_order_id text,
   status                  text NOT NULL DEFAULT 'created'
-                            CHECK (status IN ('created','authenticated','active','paused','cancelled','expired','trial')),
+                            CHECK (status IN ('created','authenticated','active','paused','cancelled','expired','trial','pending')),
   billing_cycle           text NOT NULL DEFAULT 'monthly'
                             CHECK (billing_cycle IN ('monthly', 'annual')),
   current_period_start    timestamptz,
@@ -501,8 +503,8 @@ CREATE TABLE subscription_invoices (
   id                    uuid PRIMARY KEY DEFAULT gen_random_uuid(),
   clinic_id             uuid NOT NULL REFERENCES clinics(id),
   subscription_id       uuid REFERENCES clinic_subscriptions(id),
-  razorpay_invoice_id   text,
-  razorpay_payment_id   text,
+  razorpay_invoice_id   text,            -- stores PhonePe merchant order id for new rows
+  razorpay_payment_id   text,            -- stores PhonePe transaction id for new rows
   amount                numeric NOT NULL,
   status                text NOT NULL DEFAULT 'pending',
   paid_at               timestamptz,

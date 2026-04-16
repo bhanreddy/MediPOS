@@ -6,25 +6,22 @@ import { useEffect, useRef } from 'react';
 import { router } from 'expo-router';
 import { api } from './api';
 
-// Configure foreground notification behavior
 Notifications.setNotificationHandler({
   handleNotification: async () => ({
     shouldShowAlert: true,
     shouldPlaySound: true,
     shouldSetBadge: true,
     shouldShowBanner: true,
-    shouldShowList: true
+    shouldShowList: true,
   }),
 });
 
-// Register device for push notifications + save token to backend
 export async function registerForPushNotifications(): Promise<string | null> {
   if (!Device.isDevice) {
     console.warn('Push notifications only work on physical devices');
     return null;
   }
 
-  // Check + request permission
   const { status: existingStatus } = await Notifications.getPermissionsAsync();
   let finalStatus = existingStatus;
   if (existingStatus !== 'granted') {
@@ -36,7 +33,6 @@ export async function registerForPushNotifications(): Promise<string | null> {
     return null;
   }
 
-  // Android channel setup
   if (Platform.OS === 'android') {
     await Notifications.setNotificationChannelAsync('alerts', {
       name: 'Medical POS Alerts',
@@ -50,7 +46,6 @@ export async function registerForPushNotifications(): Promise<string | null> {
     });
   }
 
-  // Get Expo push token
   const projectId = Constants.expoConfig?.extra?.eas?.projectId || 'development-fallback-id';
   let expoPushToken = null;
   try {
@@ -61,7 +56,6 @@ export async function registerForPushNotifications(): Promise<string | null> {
     return null;
   }
 
-  // Save token to backend
   try {
     await api.post('/devices/register', {
       expo_push_token: expoPushToken,
@@ -74,25 +68,21 @@ export async function registerForPushNotifications(): Promise<string | null> {
   return expoPushToken;
 }
 
-// Set up notification listeners — call in root _layout.tsx
 export function useNotificationListeners() {
-  const notificationListener = useRef<Notifications.Subscription>();
-  const responseListener = useRef<Notifications.Subscription>();
+  const notificationListener = useRef<Notifications.Subscription | undefined>(undefined);
+  const responseListener = useRef<Notifications.Subscription | undefined>(undefined);
 
   useEffect(() => {
-    // Received while app is foregrounded
-    notificationListener.current = Notifications.addNotificationReceivedListener(notification => {
+    notificationListener.current = Notifications.addNotificationReceivedListener((notification) => {
       console.log('Notification received:', notification);
     });
 
-    // Tapped by user
-    responseListener.current = Notifications.addNotificationResponseReceivedListener(response => {
+    responseListener.current = Notifications.addNotificationResponseReceivedListener((response) => {
       const data = response.notification.request.content.data;
       if (!data) return;
-      // Deep link based on notification type:
-      if (data.type === 'low_stock')   router.push('/(app)/alerts/low-stock' as any);
-      if (data.type === 'expiry')      router.push('/(app)/alerts/expiry' as any);
-      if (data.type === 'refill')      router.push(`/(app)/customers/${data.customer_id}` as any);
+      if (data.type === 'low_stock') router.push('/(app)/alerts/low-stock' as any);
+      if (data.type === 'expiry') router.push('/(app)/alerts/expiry' as any);
+      if (data.type === 'refill') router.push(`/(app)/customers/${data.customer_id}` as any);
       if (data.type === 'outstanding') router.push(`/(app)/customers/${data.customer_id}` as any);
     });
 

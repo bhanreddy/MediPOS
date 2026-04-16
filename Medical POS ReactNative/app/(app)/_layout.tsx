@@ -14,7 +14,11 @@ export default function AppLayout() {
   const { isOnline, pendingCount, isSyncing } = useOfflineSync();
 
   useEffect(() => {
-    initOfflineDb();
+    try {
+      initOfflineDb();
+    } catch (e) {
+      console.warn('initOfflineDb:', e);
+    }
   }, []);
 
   if (!user) {

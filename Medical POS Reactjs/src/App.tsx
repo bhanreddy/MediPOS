@@ -1,27 +1,10 @@
 import { useEffect } from 'react';
-import { createBrowserRouter, RouterProvider, Outlet, useNavigate } from 'react-router-dom';
+import { createBrowserRouter, RouterProvider, Outlet } from 'react-router-dom';
 import { useAuth } from './lib/auth';
 import { AuthGuard } from './components/auth/AuthGuard';
+import { LoginFlowPage } from './components/auth/LoginFlowPage';
 
-// Placeholder Pages - We will map these in Block 4 & 5
 const Placeholder = ({ title }: { title: string }) => <div className="p-4"><h1 className="text-xl">{title}</h1></div>;
-
-const Login = () => {
-    const { session, role } = useAuth();
-    const navigate = useNavigate();
-
-    useEffect(() => {
-        if (session) {
-            if (role === 'SUPER_ADMIN') {
-                navigate('/admin/dashboard', { replace: true });
-            } else {
-                navigate('/dashboard', { replace: true });
-            }
-        }
-    }, [session, role, navigate]);
-
-    return <Placeholder title="Login Screen" />;
-};
 
 const Error403 = () => <div className="p-8 text-center text-red-500"><h1 className="text-2xl font-bold">403 - Forbidden</h1><p>You do not have permission to access this page.</p></div>;
 
@@ -49,13 +32,21 @@ import { RegisterWizard } from './components/auth/RegisterWizard';
 import BillingSettings from './routes/(clinic)/settings/billing';
 import { BusinessAnalyticsScreen } from './components/Analytics/BusinessAnalyticsScreen';
 import { ImportDataScreen } from './components/Settings/ImportDataScreen';
+import { BillingSalesListPage } from './components/clinic/BillingSalesListPage';
+import { PurchasesListPage } from './components/clinic/PurchasesListPage';
+import { CustomersListPage } from './components/clinic/CustomersListPage';
+import { SuppliersListPage } from './components/clinic/SuppliersListPage';
+import { ExpensesListPage } from './components/clinic/ExpensesListPage';
+import { ReportsHubPage } from './components/clinic/ReportsHubPage';
+import { PurchaseWorkflowPage, InventoryPageShell } from './components/clinic/EmbeddedClinicScreens';
+import { SettingsScreen } from './components/Settings/SettingsScreen';
 
 const router = createBrowserRouter([
     {
         path: '/',
         element: <RootLayout />,
         children: [
-            { path: 'login', element: <Login /> },
+            { path: 'login', element: <LoginFlowPage /> },
             { path: 'register', element: <RegisterWizard /> },
             { path: '403', element: <Error403 /> },
             {
@@ -82,24 +73,46 @@ const router = createBrowserRouter([
                 ),
                 children: [
                     { path: 'dashboard', element: <ClinicDashboard /> },
-                    { path: 'billing', element: <Placeholder title="Billing Sales List" /> },
+                    { path: 'billing', element: <BillingSalesListPage /> },
                     { path: 'billing/new', element: <WebPos /> },
-                    { path: 'purchases', element: <Placeholder title="Purchases List" /> },
-                    { path: 'purchases/new', element: <Placeholder title="New Purchase" /> },
-                    { path: 'inventory', element: <Placeholder title="Inventory List" /> },
-                    { path: 'customers', element: <Placeholder title="Customers" /> },
-                    { path: 'suppliers', element: <Placeholder title="Suppliers" /> },
-                    { path: 'expenses', element: <Placeholder title="Expenses" /> },
-                    { path: 'reports', element: <Placeholder title="Reports Hub" /> },
+                    { path: 'purchases', element: <PurchasesListPage /> },
+                    { path: 'purchases/new', element: <PurchaseWorkflowPage /> },
+                    { path: 'inventory', element: <InventoryPageShell /> },
+                    { path: 'customers', element: <CustomersListPage /> },
+                    { path: 'suppliers', element: <SuppliersListPage /> },
+                    { path: 'expenses', element: <ExpensesListPage /> },
+                    { path: 'reports', element: <ReportsHubPage /> },
                     { path: 'alerts', element: <Placeholder title="Alerts" /> },
-                    { path: 'settings/clinic', element: <Placeholder title="Clinic Settings" /> },
-                    { path: 'settings/billing', element: <AuthGuard requireRole={['OWNER']}><BillingSettings /></AuthGuard> },
-                    { path: 'settings/users', element: <AuthGuard requireRole={['OWNER']}><Placeholder title="User Settings" /></AuthGuard> },
-                    { path: 'settings/invoice', element: <Placeholder title="Invoice Settings" /> },
                     { path: 'analytics', element: <BusinessAnalyticsScreen /> },
-                    { path: 'settings/import', element: <AuthGuard requireRole={['OWNER']}><ImportDataScreen /></AuthGuard> },
-                ]
-            }
+                    { path: 'settings', element: <SettingsScreen /> },
+                    { path: 'settings/clinic', element: <Placeholder title="Clinic Settings" /> },
+                    {
+                        path: 'settings/billing',
+                        element: (
+                            <AuthGuard requireRole={['OWNER']}>
+                                <BillingSettings />
+                            </AuthGuard>
+                        ),
+                    },
+                    {
+                        path: 'settings/users',
+                        element: (
+                            <AuthGuard requireRole={['OWNER']}>
+                                <Placeholder title="User Settings" />
+                            </AuthGuard>
+                        ),
+                    },
+                    { path: 'settings/invoice', element: <Placeholder title="Invoice Settings" /> },
+                    {
+                        path: 'settings/import',
+                        element: (
+                            <AuthGuard requireRole={['OWNER']}>
+                                <ImportDataScreen />
+                            </AuthGuard>
+                        ),
+                    },
+                ],
+            },
         ]
     }
 ]);

@@ -1,40 +1,40 @@
-import { verifyWebhookSignature } from '../services/razorpay';
 import crypto from 'crypto';
+import {
+  sha256HexUtf8,
+  timingSafeEqualLowerHex,
+  verifyPhonePeWebhookCredentials,
+} from '../payment/phonePePG';
 
-describe('Razorpay Webhook Verification', () => {
-  const originalEnv = process.env;
-
-  beforeEach(() => {
-    process.env = { ...originalEnv };
+describe('PhonePe webhook credentials', () => {
+  it('rejects missing credentials or header', () => {
+    expect(verifyPhonePeWebhookCredentials(undefined, 'u', 'p')).toBe(false);
+    expect(verifyPhonePeWebhookCredentials('abc', undefined, 'p')).toBe(false);
+    expect(verifyPhonePeWebhookCredentials('abc', 'u', undefined)).toBe(false);
   });
 
-  afterAll(() => {
-    process.env = originalEnv;
+  it('accepts Authorization equal to sha256hex(username:password)', () => {
+    const user = 'webhook_user';
+    const pass = 'webhook_pass';
+    const expected = sha256HexUtf8(`${user}:${pass}`);
+    expect(verifyPhonePeWebhookCredentials(expected, user, pass)).toBe(true);
+    expect(verifyPhonePeWebhookCredentials(expected.toUpperCase(), user, pass)).toBe(true);
   });
 
-  it('should return false when RAZORPAY_WEBHOOK_SECRET is not set', () => {
-    // env module caches, so we test via the function directly
-    const result = verifyWebhookSignature('test-body', 'test-signature');
-    // With no secret configured, it should return false
-    expect(result).toBe(false);
+  it('rejects wrong secret', () => {
+    const user = 'webhook_user';
+    const pass = 'webhook_pass';
+    const wrong = sha256HexUtf8(`${user}:other`);
+    expect(verifyPhonePeWebhookCredentials(wrong, user, pass)).toBe(false);
   });
 
-  it('should correctly validate a matching HMAC signature', () => {
-    const secret = 'test_webhook_secret_12345';
-    const body = JSON.stringify({ event: 'subscription.charged', payload: {} });
-    const expectedSig = crypto.createHmac('sha256', secret).update(body).digest('hex');
-
-    // We can't easily override the env module cache, so test the crypto logic directly
-    const computed = crypto.createHmac('sha256', secret).update(body).digest('hex');
-    expect(computed).toBe(expectedSig);
+  it('computes same HMAC-style digest as manual sha256', () => {
+    const user = 'a';
+    const pass = 'b';
+    const manual = crypto.createHash('sha256').update(`${user}:${pass}`, 'utf8').digest('hex');
+    expect(sha256HexUtf8(`${user}:${pass}`)).toBe(manual);
   });
 
-  it('should reject a tampered signature', () => {
-    const secret = 'test_webhook_secret_12345';
-    const body = JSON.stringify({ event: 'subscription.charged' });
-    const wrongSig = 'definitely_not_a_valid_signature';
-
-    const computed = crypto.createHmac('sha256', secret).update(body).digest('hex');
-    expect(computed).not.toBe(wrongSig);
+  it('timingSafeEqualLowerHex rejects different lengths', () => {
+    expect(timingSafeEqualLowerHex('ab', 'abc')).toBe(false);
   });
 });

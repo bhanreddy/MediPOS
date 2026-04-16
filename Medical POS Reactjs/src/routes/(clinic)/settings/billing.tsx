@@ -4,16 +4,19 @@ import { Button } from '../../../components/ui/Button';
 import api from '../../../lib/api';
 import { Check } from 'lucide-react';
 import type { SubscriptionPlan, ClinicSubscription } from '../../../types';
+import {
+  clearPendingMerchantOrder,
+  formatPhonePeApiError,
+  PHONEPE_SESSION_PENDING_CLINIC,
+  readMerchantOrderIdFromSearchParams,
+  redirectToPhonePeCheckout,
+} from '../../../payment/phonePePG';
 
 export default function BillingSettings() {
   const [plans, setPlans] = useState<SubscriptionPlan[]>([]);
   const [currentSub, setCurrentSub] = useState<ClinicSubscription | null>(null);
   const [currentPlan, setCurrentPlan] = useState<SubscriptionPlan | null>(null);
   const [loading, setLoading] = useState(true);
-
-  useEffect(() => {
-    fetchBillingData();
-  }, []);
 
   const fetchBillingData = async () => {
     try {
@@ -31,30 +34,74 @@ export default function BillingSettings() {
     }
   };
 
+  const verifyPendingPhonePeReturn = async () => {
+    const fromUrl = readMerchantOrderIdFromSearchParams(window.location.search);
+    const fromStorage = sessionStorage.getItem(PHONEPE_SESSION_PENDING_CLINIC)?.trim();
+    const merchantOrderId = fromUrl || fromStorage;
+    if (!merchantOrderId) return;
+
+    try {
+      await api.post('/subscriptions/verify-payment', { merchant_order_id: merchantOrderId });
+    } catch (e: unknown) {
+      const msg = formatPhonePeApiError(e, 'Payment verification failed');
+      console.error(e);
+      alert(msg);
+    } finally {
+      clearPendingMerchantOrder(PHONEPE_SESSION_PENDING_CLINIC);
+      window.history.replaceState({}, '', `${window.location.pathname}${window.location.hash}`);
+    }
+  };
+
+  useEffect(() => {
+    void (async () => {
+      setLoading(true);
+      await verifyPendingPhonePeReturn();
+      await fetchBillingData();
+    })();
+  }, []);
+
   const handleSubscribe = async (plan: SubscriptionPlan) => {
     try {
       const { data } = await api.post('/subscriptions/create', {
         plan_name: plan.name,
         billing_cycle: 'monthly'
       });
-      
-      // Redirect to Razorpay hosted checkout short link
-      if (data.data.short_url) {
-        window.location.href = data.data.short_url;
+
+      const redirect = data.data.redirect_url as string | undefined;
+      const merchantOrderId = data.data.merchant_order_id as string | undefined;
+      if (!redirect || !merchantOrderId) {
+        throw new Error('Invalid response from payment server (missing redirect).');
       }
+      redirectToPhonePeCheckout(PHONEPE_SESSION_PENDING_CLINIC, merchantOrderId, redirect);
     } catch (err) {
       console.error('Subscription failed', err);
       alert('Failed to initiate subscription');
     }
   };
 
-  if (loading) return <div>Loading billing details...</div>;
+  const handleCancelSubscription = async () => {
+    if (!currentSub?.id || currentSub.status !== 'active') return;
+    if (!window.confirm('Cancel this subscription? You will keep access until the end of the current period.')) return;
+    try {
+      await api.post('/subscriptions/cancel', { subscription_id: currentSub.id });
+      await fetchBillingData();
+    } catch (err) {
+      console.error(err);
+      alert('Failed to cancel subscription');
+    }
+  };
+
+  if (loading) {
+    return (
+      <div className="p-8 max-w-7xl mx-auto text-muted text-sm">Loading billing details…</div>
+    );
+  }
 
   return (
-    <div className="space-y-6 animate-in slide-in-from-bottom-2 duration-300">
+    <div className="p-8 max-w-7xl mx-auto space-y-6 animate-slideIn">
       <div>
-        <h2 className="text-2xl font-bold tracking-tight">Billing & Plans</h2>
-        <p className="text-gray-500">Manage your subscription and billing details.</p>
+        <h1 className="text-2xl font-black text-foreground-strong tracking-tight">Billing & plans</h1>
+        <p className="text-sm text-muted">Manage your subscription and billing details.</p>
       </div>
 
       <Card className="border-indigo-100 bg-indigo-50/30">
@@ -72,7 +119,14 @@ export default function BillingSettings() {
               </p>
             </div>
             {currentSub?.status === 'active' && (
-              <Button variant="danger" className="text-red-600 border-red-200 hover:bg-red-50">Cancel Subscription</Button>
+              <Button
+                type="button"
+                variant="danger"
+                className="text-red-600 border-red-200 hover:bg-red-50"
+                onClick={() => void handleCancelSubscription()}
+              >
+                Cancel Subscription
+              </Button>
             )}
           </div>
         </CardContent>
