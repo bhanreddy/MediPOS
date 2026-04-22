@@ -9,7 +9,7 @@ dotenv.config({ path: path.resolve(process.cwd(), `.env.${nodeEnv}`) });
 dotenv.config();
 
 const envSchema = z.object({
-  PORT:                     z.string().default('5000'),
+  PORT:                     z.string().default('5001'),
   NODE_ENV:                 z.enum(['development', 'staging', 'production', 'test']).default('development'),
   SUPABASE_URL:             z.string().url(),
   SUPABASE_SERVICE_ROLE_KEY: z.string().min(1),

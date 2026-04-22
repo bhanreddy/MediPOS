@@ -2,10 +2,11 @@ import { Router } from 'express';
 import { requireAuth } from '../middleware/auth';
 import { requireRole } from '../middleware/rbac';
 import { supabaseAdmin } from '../config/supabase';
-import { 
-  createCustomerSchema, 
+import {
+  createCustomerSchema,
   updateCustomerSchema,
-  recordPaymentSchema
+  recordPaymentSchema,
+  createRefillReminderSchema,
 } from '../schemas/customer.schema';
 import { auditLog } from '../services/auditLog';
 
@@ -233,6 +234,79 @@ customersRouter.post('/:id/payment', requireAuth, async (req, res, next) => {
     next(err);
   }
 });
+
+// POST /api/customers/reminders
+customersRouter.post(
+  '/reminders',
+  requireAuth,
+  requireRole('PHARMACIST', 'OWNER'),
+  async (req, res, next) => {
+    try {
+      const parsed = createRefillReminderSchema.parse(req.body);
+      const clinicId = req.user!.clinic_id!;
+
+      const { data: cust, error: custErr } = await supabaseAdmin
+        .from('customers')
+        .select('id')
+        .eq('id', parsed.customer_id)
+        .eq('clinic_id', clinicId)
+        .eq('is_active', true)
+        .maybeSingle();
+
+      if (custErr) throw custErr;
+      if (!cust) return res.status(404).json({ error: 'Customer not found' });
+
+      const needle = `%${parsed.medicine_name.replace(/%/g, '\\%').replace(/_/g, '\\_')}%`;
+
+      const { data: meds, error: medErr } = await supabaseAdmin
+        .from('medicines')
+        .select('id')
+        .eq('clinic_id', clinicId)
+        .eq('is_active', true)
+        .ilike('name', needle)
+        .limit(2);
+
+      if (medErr) throw medErr;
+
+      if (!meds?.length) {
+        return res.status(404).json({ error: 'Medicine not found', detail: parsed.medicine_name });
+      }
+      if (meds.length > 1) {
+        return res.status(409).json({
+          error: 'Ambiguous medicine name — pick a medicine_id or narrow the search',
+          matches: meds.map((m) => m.id),
+        });
+      }
+
+      const medicineId = meds[0].id;
+
+      const { data: inserted, error: insertErr } = await supabaseAdmin
+        .from('refill_reminders')
+        .insert({
+          clinic_id: clinicId,
+          customer_id: parsed.customer_id,
+          medicine_id: medicineId,
+          remind_on: parsed.reminder_date,
+        })
+        .select()
+        .single();
+
+      if (insertErr) throw insertErr;
+
+      await auditLog({
+        clinicId,
+        userId: req.user!.id,
+        action: 'CREATE',
+        table: 'refill_reminders',
+        newData: inserted,
+      });
+
+      res.status(201).json({ data: inserted });
+    } catch (err) {
+      next(err);
+    }
+  },
+);
 
 // GET /api/customers/reminders/due
 customersRouter.get('/reminders/due', requireAuth, async (req, res, next) => {

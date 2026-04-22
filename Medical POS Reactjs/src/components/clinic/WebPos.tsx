@@ -23,8 +23,15 @@ export const WebPos = () => {
         queryKey: ['pos-search', debouncedSearch],
         queryFn: async () => {
             if (!debouncedSearch) return [];
-            const { data } = await api.get(`/inventory/search?q=${debouncedSearch}`);
-            return data.data;
+            const { data } = await api.get<{ results?: any[]; substitutes?: any[] }>(
+                '/inventory/medicines/search',
+                {
+                    params: { q: debouncedSearch },
+                },
+            );
+            const results = data.results ?? [];
+            const substitutes = data.substitutes ?? [];
+            return [...results, ...substitutes];
         },
         enabled: debouncedSearch.length > 1
     });
@@ -42,12 +49,13 @@ export const WebPos = () => {
     }, [store.cart]);
 
     const addToCart = (medicine: any) => {
-        if (!medicine.batches || medicine.batches.length === 0) {
+        const batches = medicine.medicine_batches ?? medicine.batches ?? [];
+        if (!batches.length) {
             toast.error('No stock available');
             return;
         }
         // Auto select FIFO batch
-        const batch = [...medicine.batches].sort((a: any, b: any) => new Date(a.expiry_date).getTime() - new Date(b.expiry_date).getTime())[0];
+        const batch = [...batches].sort((a: any, b: any) => new Date(a.expiry_date).getTime() - new Date(b.expiry_date).getTime())[0];
         
         store.addItem({
             medicine_id: medicine.id,
@@ -163,7 +171,8 @@ export const WebPos = () => {
                             {searchResults.length === 0 ? (
                                 <div className="p-4 text-center text-muted">No medicines found</div>
                             ) : searchResults.map((med: any) => {
-                                const stock = med.batches?.reduce((acc: number, b: any) => acc + b.quantity_remaining, 0) || 0;
+                                const batchList = med.medicine_batches ?? med.batches ?? [];
+                                const stock = batchList.reduce((acc: number, b: any) => acc + (b.quantity_remaining ?? 0), 0) || 0;
                                 return (
                                     <div 
                                         key={med.id} 
@@ -171,11 +180,12 @@ export const WebPos = () => {
                                         onClick={() => stock > 0 && addToCart(med)}
                                     >
                                         <div>
-                                            <p className="font-bold">{med.name} <span className="text-xs text-muted font-normal ml-2">{med.generic_name}</span></p>
+                                            <p className="font-bold">{med.name}{' '}
+                                                <span className="text-xs text-muted font-normal ml-2">{med.generic_name}</span></p>
                                             <p className="text-xs text-muted mt-1">{med.manufacturer}</p>
                                         </div>
                                         <div className="text-right">
-                                            <p className="font-bold text-accent-primary">₹{med.batches?.[0]?.mrp || '0.00'}</p>
+                                            <p className="font-bold text-accent-primary">₹{batchList[0]?.mrp ?? '0.00'}</p>
                                             <p className={`text-xs ${stock > 0 ? 'text-success' : 'text-danger'}`}>{stock} in stock</p>
                                         </div>
                                     </div>

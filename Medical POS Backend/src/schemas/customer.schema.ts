@@ -17,3 +17,11 @@ export const recordPaymentSchema = z.object({
   payment_mode: z.enum(['cash', 'upi', 'card', 'bank_transfer']),
   note: z.string().optional(),
 });
+
+/** POST /customers/reminders — refill_reminders uses medicine_id + remind_on */
+export const createRefillReminderSchema = z.object({
+  customer_id: z.string().uuid(),
+  medicine_name: z.string().trim().min(1).max(500),
+  reminder_date: z.string().regex(/^\d{4}-\d{2}-\d{2}$/),
+  notes: z.string().max(2000).optional(),
+});

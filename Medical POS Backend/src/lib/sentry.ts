@@ -1,12 +1,13 @@
 import * as Sentry from '@sentry/node';
 import { env } from '../config/env';
+import { formatSentryDisabled, formatSentryReady } from './consoleStyle';
 
 let initialized = false;
 
 export function initSentry() {
   if (initialized || !env.SENTRY_DSN) {
     if (!env.SENTRY_DSN) {
-      console.warn('[Sentry] SENTRY_DSN not set — error tracking disabled');
+      console.warn(formatSentryDisabled());
     }
     return;
   }
@@ -37,7 +38,7 @@ export function initSentry() {
   });
 
   initialized = true;
-  console.log(`[Sentry] Initialized for ${env.NODE_ENV}`);
+  console.log(formatSentryReady(env.NODE_ENV));
 }
 
 // Capture an exception with clinic context

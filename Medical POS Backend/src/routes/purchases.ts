@@ -40,7 +40,7 @@ purchasesRouter.get('/', requireAuth, async (req, res, next) => {
 
     res.json({
       data,
-      pagination: { Math, page, limit, total: count || 0, totalPages: Math.ceil((count || 0) / limit) }
+      pagination: { page, limit, total: count || 0, totalPages: Math.ceil((count || 0) / limit) },
     });
   } catch (err) {
     next(err);

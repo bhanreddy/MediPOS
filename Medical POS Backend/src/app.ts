@@ -23,18 +23,26 @@ export function createApp(): express.Application {
     next();
   });
 
-  const allowedOrigins = (process.env.ALLOWED_ORIGINS || '').split(',');
+  const allowedOrigins = (process.env.ALLOWED_ORIGINS || '')
+    .split(',')
+    .map((s) => s.trim())
+    .filter(Boolean);
+  const corsAllowAll = allowedOrigins.includes('*');
 
   app.use(
-    cors({
-      origin(origin, callback) {
-        if (!origin || allowedOrigins.includes(origin)) {
-          callback(null, true);
-        } else {
-          callback(new Error('Not allowed by CORS'));
-        }
-      },
-    })
+    cors(
+      corsAllowAll
+        ? { origin: true }
+        : {
+            origin(origin, callback) {
+              if (!origin || allowedOrigins.includes(origin)) {
+                callback(null, true);
+              } else {
+                callback(new Error('Not allowed by CORS'));
+              }
+            },
+          },
+    ),
   );
 
   app.use(helmetConfig);
