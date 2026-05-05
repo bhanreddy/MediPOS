@@ -48,3 +48,6 @@ coverage/
 # Logs
 logs
 *.log
+
+# Local SQLite databases (dev / offline-first)
+*.db

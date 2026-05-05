@@ -1,5 +1,6 @@
-import { apiClient, extractPaginated, type ApiPagination } from './client';
-import type { AxiosResponse } from 'axios';
+import { queryAll, queryOne, queryRaw } from '../lib/localQuery';
+import { localMutate } from '../lib/localMutate';
+import type { ApiPagination } from './client';
 
 export type { ApiPagination };
 
@@ -95,10 +96,6 @@ export interface CreateReminderBody {
 
 /* ─── Helpers ───────────────────────────────────────── */
 
-function extract<T>(res: AxiosResponse<{ data: T }>): T {
-  return res.data.data;
-}
-
 export function normalizeCustomer(raw: Record<string, unknown>): Customer {
   const outstanding =
     raw.outstanding_balance != null
@@ -108,7 +105,7 @@ export function normalizeCustomer(raw: Record<string, unknown>): Customer {
         : 0;
 
   return {
-    id: String(raw.id ?? ''),
+    id: String(raw.id ?? raw._local_id ?? ''),
     name: String(raw.name ?? ''),
     phone: raw.phone != null ? String(raw.phone) : '',
     email: raw.email != null ? String(raw.email) : '',
@@ -127,7 +124,7 @@ export function normalizeCustomer(raw: Record<string, unknown>): Customer {
         : raw.importanceScore != null
           ? Number(raw.importanceScore)
           : undefined,
-    createdAt: String(raw.created_at ?? raw.createdAt ?? ''),
+    createdAt: String(raw.created_at ?? raw.createdAt ?? raw._updated_at ?? ''),
   };
 }
 
@@ -142,7 +139,7 @@ export function normalizeRecentSale(raw: Record<string, unknown>): RecentSaleSum
   const saleDate = String(raw.sale_date ?? raw.saleDate ?? '');
   const ps = raw.payment_status ?? raw.paymentStatus;
   return {
-    id: String(raw.id ?? ''),
+    id: String(raw.id ?? raw._local_id ?? ''),
     invoiceNumber: String(raw.invoice_number ?? raw.invoiceNumber ?? ''),
     saleDate,
     netAmount: Number(raw.net_amount ?? raw.netAmount ?? 0),
@@ -152,90 +149,123 @@ export function normalizeRecentSale(raw: Record<string, unknown>): RecentSaleSum
   };
 }
 
-interface OutstandingBackend {
-  outstanding_balance: number;
-  credit_sales?: Record<string, unknown>[];
-}
-
-function normalizeOutstanding(raw: OutstandingBackend): OutstandingData {
-  const rows = raw.credit_sales ?? [];
-  return {
-    totalOutstanding: Number(raw.outstanding_balance ?? 0),
-    invoices: rows.map((s) => ({
-      saleId: String(s.id ?? ''),
-      invoiceNumber: String(s.invoice_number ?? ''),
-      amount: Number(s.balance_due ?? s.net_amount ?? 0),
-      dueDate: String(s.sale_date ?? ''),
-      daysOverdue: 0,
-    })),
-  };
-}
-
 /* ─── API ───────────────────────────────────────────── */
 
 export const customersApi = {
   getCustomers: async (params?: CustomerParams): Promise<PaginatedCustomers> => {
-    const res = await apiClient.get<{ data: Record<string, unknown>[]; pagination: ApiPagination }>('/customers', {
-      params,
-    });
-    const { data, pagination } = extractPaginated(res);
+    const conditions: string[] = [];
+    const values: any[] = [];
+
+    if (params?.q) {
+      conditions.push('(name LIKE ? OR phone LIKE ?)');
+      values.push(`%${params.q}%`, `%${params.q}%`);
+    }
+
+    const where = conditions.length > 0 ? conditions.join(' AND ') : '';
+    const rows = await queryAll<Record<string, unknown>>('customers', where, values);
+
+    rows.sort((a, b) => String(b.created_at ?? b._updated_at ?? '').localeCompare(String(a.created_at ?? a._updated_at ?? '')));
+
+    const page = params?.page ?? 1;
+    const limit = params?.limit ?? 20;
+    const offset = (page - 1) * limit;
+    const paged = rows.slice(offset, offset + limit);
+
     return {
-      data: data.map((row) => normalizeCustomer(row as Record<string, unknown>)),
-      pagination,
+      data: paged.map(normalizeCustomer),
+      pagination: { page, limit, total: rows.length, totalPages: Math.ceil(rows.length / limit) },
     };
   },
 
   getCustomer: async (id: string): Promise<CustomerDetail> => {
-    const res = await apiClient.get<{ data: Record<string, unknown> }>(`/customers/${id}`);
-    const payload = res.data?.data ?? {};
+    const row = await queryOne<Record<string, unknown>>('customers', '_local_id=? OR id=?', [id, id]);
+    if (!row) throw new Error('Customer not found');
 
-    if (payload.customer && typeof payload.customer === 'object') {
-      const rs = payload.recent_sales;
-      const recent_sales = Array.isArray(rs)
-        ? rs.map((r) => normalizeRecentSale(r as Record<string, unknown>))
-        : [];
-      return {
-        customer: normalizeCustomer(payload.customer as Record<string, unknown>),
-        recent_sales,
-      };
-    }
+    const custId = row._local_id ?? row.id;
+    const salesRows = await queryAll<Record<string, unknown>>('sales', 'customer_id=?', [custId as string]);
+    salesRows.sort((a, b) => String(b.created_at ?? '').localeCompare(String(a.created_at ?? '')));
+    const recent = salesRows.slice(0, 10);
 
-    const { recent_sales: rsRaw, ...custFields } = payload;
-    const recent_sales = Array.isArray(rsRaw)
-      ? rsRaw.map((r) => normalizeRecentSale(r as Record<string, unknown>))
-      : [];
     return {
-      customer: normalizeCustomer(custFields as Record<string, unknown>),
-      recent_sales,
+      customer: normalizeCustomer(row),
+      recent_sales: recent.map(normalizeRecentSale),
     };
   },
 
   createCustomer: async (body: CreateCustomerBody): Promise<Customer> => {
-    const res = await apiClient.post<{ data: Record<string, unknown> }>('/customers', body);
-    return normalizeCustomer(extract(res) as Record<string, unknown>);
+    const record = await localMutate({ table: 'customers', operation: 'INSERT', data: body });
+    return normalizeCustomer(record as Record<string, unknown>);
   },
 
   updateCustomer: async (id: string, body: UpdateCustomerBody): Promise<Customer> => {
-    const res = await apiClient.put<{ data: Record<string, unknown> }>(`/customers/${id}`, body);
-    return normalizeCustomer(extract(res) as Record<string, unknown>);
+    const existing = await queryOne<Record<string, unknown>>('customers', '_local_id=? OR id=?', [id, id]);
+    const record = await localMutate({
+      table: 'customers',
+      operation: 'UPDATE',
+      data: { ...(existing ?? {}), ...body, _local_id: id }
+    });
+    return normalizeCustomer(record as Record<string, unknown>);
   },
 
   getOutstanding: async (id: string): Promise<OutstandingData> => {
-    const res = await apiClient.get<{ data: OutstandingBackend }>(`/customers/${id}/outstanding`);
-    return normalizeOutstanding(extract(res));
+    const cust = await queryOne<Record<string, unknown>>('customers', '_local_id=? OR id=?', [id, id]);
+    const totalOutstanding = Number(cust?.outstanding_balance ?? 0);
+
+    const custId = cust?._local_id ?? cust?.id ?? id;
+    const creditSales = await queryAll<Record<string, unknown>>(
+      'sales',
+      'customer_id=? AND payment_status IN (?,?)',
+      [custId as string, 'credit', 'partial']
+    );
+
+    return {
+      totalOutstanding,
+      invoices: creditSales.map(s => ({
+        saleId: String(s.id ?? s._local_id ?? ''),
+        invoiceNumber: String(s.invoice_number ?? ''),
+        amount: Number(s.balance_due ?? s.net_amount ?? 0),
+        dueDate: String(s.sale_date ?? s.created_at ?? ''),
+        daysOverdue: 0,
+      })),
+    };
   },
 
   recordPayment: async (id: string, body: RecordCustomerPaymentBody): Promise<Customer> => {
-    const res = await apiClient.post<{ data: Record<string, unknown> }>(`/customers/${id}/payment`, body);
-    return normalizeCustomer(extract(res) as Record<string, unknown>);
+    const existing = await queryOne<Record<string, unknown>>('customers', '_local_id=? OR id=?', [id, id]);
+    const currentBalance = Number(existing?.outstanding_balance ?? 0);
+    const record = await localMutate({
+      table: 'customers',
+      operation: 'UPDATE',
+      data: {
+        outstanding_balance: currentBalance - body.amount,
+        _local_id: id
+      }
+    });
+    return normalizeCustomer(record as Record<string, unknown>);
   },
 
   getDueReminders: async (): Promise<DueReminder[]> => {
-    const res = await apiClient.get<{ data: DueReminder[] }>('/customers/reminders/due');
-    return extract(res);
+    const rows = await queryRaw<Record<string, any>>(
+      `SELECT c._local_id as customerId, c.name as customerName, c.phone,
+              c.outstanding_balance as totalDue,
+              MIN(s.sale_date) as oldestDueDate,
+              COUNT(s._local_id) as invoiceCount
+       FROM customers c
+       LEFT JOIN sales s ON s.customer_id = c._local_id AND s.payment_status IN ('credit','partial') AND s._deleted=0
+       WHERE c._deleted=0 AND c.outstanding_balance > 0
+       GROUP BY c._local_id`
+    );
+    return rows.map(r => ({
+      customerId: String(r.customerId ?? ''),
+      customerName: String(r.customerName ?? ''),
+      phone: String(r.phone ?? ''),
+      totalDue: Number(r.totalDue ?? 0),
+      oldestDueDate: String(r.oldestDueDate ?? ''),
+      invoiceCount: Number(r.invoiceCount ?? 0),
+    }));
   },
 
   createReminder: async (body: CreateReminderBody): Promise<void> => {
-    await apiClient.post('/customers/reminders', body);
+    await localMutate({ table: 'refill_reminders', operation: 'INSERT', data: body });
   },
 } as const;

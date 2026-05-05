@@ -1,57 +1,30 @@
 import { Router } from 'express';
 import { requireAuth } from '../middleware/auth';
 import { requireRole } from '../middleware/rbac';
-import { supabaseAdmin } from '../config/supabase';
 import { addToShortbookSchema } from '../schemas/shortbook.schema';
-import { auditLog } from '../services/auditLog';
+import { localMutate } from '../lib/localMutate';
+import { queryAll } from '../lib/localQuery';
 
 export const shortbookRouter = Router();
 
 // GET /api/shortbook
-shortbookRouter.get('/', requireAuth, async (req, res, next) => {
+shortbookRouter.get('/', requireAuth, (req, res, next) => {
   try {
-    const { data, error } = await supabaseAdmin
-      .from('shortbook')
-      .select('*, medicines(name, generic_name, medicine_stock(total_stock))')
-      .eq('clinic_id', req.user!.clinic_id!)
-      .eq('is_ordered', false)
-      .order('created_at', { ascending: false });
-
-    if (error) throw error;
-    res.json({ data: data || [] });
+    const data = queryAll('shortbook', 'is_ordered=0');
+    data.sort((a: any, b: any) => String(b.created_at ?? '').localeCompare(String(a.created_at ?? '')));
+    res.json({ data });
   } catch (err) {
     next(err);
   }
 });
 
 // POST /api/shortbook
-shortbookRouter.post('/', requireAuth, async (req, res, next) => {
+shortbookRouter.post('/', requireAuth, (req, res, next) => {
   try {
     const parsed = addToShortbookSchema.parse(req.body);
-
-    const { data: existing } = await supabaseAdmin
-      .from('shortbook')
-      .select('id')
-      .eq('clinic_id', req.user!.clinic_id!)
-      .eq('medicine_id', parsed.medicine_id)
-      .eq('is_ordered', false)
-      .single();
-
-    if (existing) {
-      return res.status(400).json({ error: 'Item already exists in shortbook and is not ordered' });
-    }
-
     const payload = { ...parsed, clinic_id: req.user!.clinic_id! };
 
-    const { data, error } = await supabaseAdmin
-      .from('shortbook')
-      .insert(payload)
-      .select()
-      .single();
-
-    if (error) throw error;
-
-    await auditLog({ clinicId: req.user!.clinic_id!, userId: req.user!.id, action: 'CREATE', table: 'shortbook', newData: data });
+    const data = localMutate({ table: 'shortbook', operation: 'INSERT', data: payload });
 
     res.status(201).json({ data });
   } catch (err) {
@@ -60,19 +33,13 @@ shortbookRouter.post('/', requireAuth, async (req, res, next) => {
 });
 
 // PATCH /api/shortbook/:id/ordered
-shortbookRouter.patch('/:id/ordered', requireAuth, requireRole('OWNER'), async (req, res, next) => {
+shortbookRouter.patch('/:id/ordered', requireAuth, requireRole('OWNER'), (req, res, next) => {
   try {
-    const { data, error } = await supabaseAdmin
-      .from('shortbook')
-      .update({ is_ordered: true, ordered_at: new Date().toISOString() })
-      .eq('id', req.params.id)
-      .eq('clinic_id', req.user!.clinic_id!)
-      .select()
-      .single();
-
-    if (error) throw error;
-
-    await auditLog({ clinicId: req.user!.clinic_id!, userId: req.user!.id, action: 'UPDATE', table: 'shortbook', newData: data, recordId: req.params.id });
+    const data = localMutate({
+      table: 'shortbook',
+      operation: 'UPDATE',
+      data: { is_ordered: true, ordered_at: new Date().toISOString(), _local_id: req.params.id }
+    });
 
     res.json({ data });
   } catch (err) {
@@ -81,17 +48,9 @@ shortbookRouter.patch('/:id/ordered', requireAuth, requireRole('OWNER'), async (
 });
 
 // DELETE /api/shortbook/:id
-shortbookRouter.delete('/:id', requireAuth, requireRole('OWNER'), async (req, res, next) => {
+shortbookRouter.delete('/:id', requireAuth, requireRole('OWNER'), (req, res, next) => {
   try {
-    const { error } = await supabaseAdmin
-      .from('shortbook')
-      .delete()
-      .eq('id', req.params.id)
-      .eq('clinic_id', req.user!.clinic_id!);
-
-    if (error) throw error;
-
-    await auditLog({ clinicId: req.user!.clinic_id!, userId: req.user!.id, action: 'DELETE', table: 'shortbook', recordId: req.params.id });
+    localMutate({ table: 'shortbook', operation: 'DELETE', data: { _local_id: req.params.id } });
 
     res.json({ success: true });
   } catch (err) {

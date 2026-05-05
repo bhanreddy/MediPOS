@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { create } from 'zustand';
 
 export type ThemeMode = 'light' | 'dark';
 
@@ -32,24 +32,37 @@ const withNoThemeTransition = (fn: () => void) => {
     }, 0);
 };
 
-export const useTheme = () => {
-    const initial = useMemo<ThemeMode>(() => getInitialTheme(), []);
+type ThemeStore = {
+    theme: ThemeMode;
+    setTheme: (theme: ThemeMode) => void;
+    toggleTheme: () => void;
+};
 
-    const [theme, setTheme] = useState<ThemeMode>(initial);
+export const useThemeStore = create<ThemeStore>((set, get) => ({
+    theme: getInitialTheme(),
 
-    useEffect(() => {
-        applyThemeToDocument(theme);
-        try {
-            localStorage.setItem(STORAGE_KEY, theme);
-        } catch {
-        }
-    }, [theme]);
-
-    const toggleTheme = useCallback(() => {
+    setTheme: (theme: ThemeMode) => {
+        if (get().theme === theme) return;
         withNoThemeTransition(() => {
-            setTheme(prev => (prev === 'dark' ? 'light' : 'dark'));
+            applyThemeToDocument(theme);
+            try {
+                localStorage.setItem(STORAGE_KEY, theme);
+            } catch {
+                /* ignore */
+            }
+            set({ theme });
         });
-    }, []);
+    },
 
-    return { theme, toggleTheme };
+    toggleTheme: () => {
+        const next = get().theme === 'dark' ? 'light' : 'dark';
+        get().setTheme(next);
+    },
+}));
+
+export const useTheme = () => {
+    const theme = useThemeStore((s) => s.theme);
+    const toggleTheme = useThemeStore((s) => s.toggleTheme);
+    const setTheme = useThemeStore((s) => s.setTheme);
+    return { theme, toggleTheme, setTheme };
 };

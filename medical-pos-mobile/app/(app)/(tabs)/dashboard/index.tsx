@@ -38,6 +38,7 @@ import { useDashboardData } from '@/hooks/useDashboard';
 import { useRevenueTrend } from '@/hooks/useAnalytics';
 import { formatCurrency, formatRelative, getInitials } from '@/utils/format';
 import type { RevenueTrendPoint } from '@/api/analytics';
+import { runSyncCycle } from '@/sync/syncEngine';
 import { useTheme } from '@/hooks/useTheme';
 
 /* ═══════════════════════════════════════════════════════
@@ -413,10 +414,11 @@ function KpiCard({ icon, gradientColors, value, label, sub, subIcon, accentColor
 
   return (
     <Animated.View
-      style={[animStyle, { marginRight: 14 }]}
+      style={{ marginRight: 14 }}
       entering={FadeInRight.delay(index * 80).springify().damping(18)}
     >
-      <Pressable
+      <Animated.View style={animStyle}>
+        <Pressable
         onPressIn={() => {
           scale.value = withSpring(0.96, { damping: 15 });
           Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
@@ -474,6 +476,7 @@ function KpiCard({ icon, gradientColors, value, label, sub, subIcon, accentColor
           <View style={styles.kpiDecorRing} />
         </LinearGradient>
       </Pressable>
+      </Animated.View>
     </Animated.View>
   );
 }
@@ -731,10 +734,10 @@ function ActivityItem({ item, index }: { item: ActivityItemData; index: number }
 
   return (
     <Animated.View
-      style={animStyle}
       entering={FadeInDown.delay(index * 40).springify().damping(20)}
     >
-      <Pressable
+      <Animated.View style={animStyle}>
+        <Pressable
         onPressIn={() => { scale.value = withSpring(0.985); }}
         onPressOut={() => { scale.value = withSpring(1); }}
         onPress={() => Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light)}
@@ -773,6 +776,7 @@ function ActivityItem({ item, index }: { item: ActivityItemData; index: number }
           </View>
         </View>
       </Pressable>
+      </Animated.View>
     </Animated.View>
   );
 }
@@ -902,10 +906,20 @@ export default function DashboardScreen() {
   }, [dashboard]);
   const hasAlerts = alertCount > 0;
 
-  const onRefresh = useCallback(() => {
-    void Promise.all([refetchDashboard(), refetchTrend()]);
+  const [isRefreshing, setIsRefreshing] = useState(false);
+
+  const onRefresh = useCallback(async () => {
+    setIsRefreshing(true);
+    try {
+      await runSyncCycle();
+    } catch (e) {
+      console.error('Manual sync from dashboard failed:', e);
+    } finally {
+      await Promise.all([refetchDashboard(), refetchTrend()]);
+      setIsRefreshing(false);
+    }
   }, [refetchDashboard, refetchTrend]);
-  const refreshing = isRefetchingDashboard || isRefetchingTrend;
+  const refreshing = isRefreshing || isRefetchingDashboard || isRefetchingTrend;
 
   const chartWidth = screenWidth - 80;
 

@@ -1,46 +1,41 @@
 import { Router } from 'express';
 import { requireAuth } from '../middleware/auth';
 import { requireRole } from '../middleware/rbac';
-import { supabaseAdmin } from '../config/supabase';
 import { 
   createSupplierSchema, 
   updateSupplierSchema 
 } from '../schemas/supplier.schema';
-import { auditLog } from '../services/auditLog';
+import { localMutate } from '../lib/localMutate';
+import { queryAll, queryOne } from '../lib/localQuery';
 
 export const suppliersRouter = Router();
 
 // GET /api/suppliers
-suppliersRouter.get('/', requireAuth, async (req, res, next) => {
+suppliersRouter.get('/', requireAuth, (req, res, next) => {
   try {
     const page = parseInt(req.query.page as string) || 1;
     const limit = Math.min(parseInt(req.query.limit as string) || 20, 100);
     const q = req.query.q as string;
+
+    const conditions: string[] = [];
+    const values: any[] = [];
+    if (q) { conditions.push('name LIKE ?'); values.push(`%${q}%`); }
+
+    const where = conditions.length > 0 ? conditions.join(' AND ') : '';
+    const all = queryAll('suppliers', where, values);
+
+    all.sort((a: any, b: any) => String(a.name ?? '').localeCompare(String(b.name ?? '')));
+
     const offset = (page - 1) * limit;
-
-    let query = supabaseAdmin
-      .from('suppliers')
-      .select('*', { count: 'exact' })
-      .eq('clinic_id', req.user!.clinic_id!)
-      .eq('is_active', true)
-      .range(offset, offset + limit - 1)
-      .order('name', { ascending: true });
-
-    if (q) {
-      query = query.ilike('name', `%${q}%`);
-    }
-
-    const { data, error, count } = await query;
-
-    if (error) throw error;
+    const data = all.slice(offset, offset + limit);
 
     res.json({
       data,
       pagination: { 
         page, 
         limit, 
-        total: count || 0, 
-        totalPages: Math.ceil((count || 0) / limit) 
+        total: all.length, 
+        totalPages: Math.ceil(all.length / limit) 
       }
     });
   } catch (err) {
@@ -49,17 +44,10 @@ suppliersRouter.get('/', requireAuth, async (req, res, next) => {
 });
 
 // GET /api/suppliers/:id
-suppliersRouter.get('/:id', requireAuth, async (req, res, next) => {
+suppliersRouter.get('/:id', requireAuth, (req, res, next) => {
   try {
-    const { data, error } = await supabaseAdmin
-      .from('suppliers')
-      .select('*')
-      .eq('id', req.params.id)
-      .eq('clinic_id', req.user!.clinic_id!)
-      .eq('is_active', true)
-      .single();
-
-    if (error) throw error;
+    const data = queryOne('suppliers', '_local_id=? OR id=?', [req.params.id, req.params.id]);
+    if (!data) return res.status(404).json({ error: 'Supplier not found' });
     res.json({ data });
   } catch (err) {
     next(err);
@@ -67,26 +55,12 @@ suppliersRouter.get('/:id', requireAuth, async (req, res, next) => {
 });
 
 // POST /api/suppliers
-suppliersRouter.post('/', requireAuth, requireRole('OWNER'), async (req, res, next) => {
+suppliersRouter.post('/', requireAuth, requireRole('OWNER'), (req, res, next) => {
   try {
     const parsed = createSupplierSchema.parse(req.body);
     const payload = { ...parsed, clinic_id: req.user!.clinic_id! };
 
-    const { data, error } = await supabaseAdmin
-      .from('suppliers')
-      .insert(payload)
-      .select()
-      .single();
-
-    if (error) throw error;
-
-    await auditLog({ 
-      clinicId: req.user!.clinic_id!, 
-      userId: req.user!.id, 
-      action: 'CREATE', 
-      table: 'suppliers', 
-      newData: data 
-    });
+    const data = localMutate({ table: 'suppliers', operation: 'INSERT', data: payload });
 
     res.status(201).json({ data });
   } catch (err) {
@@ -95,30 +69,12 @@ suppliersRouter.post('/', requireAuth, requireRole('OWNER'), async (req, res, ne
 });
 
 // PUT /api/suppliers/:id
-suppliersRouter.put('/:id', requireAuth, requireRole('OWNER'), async (req, res, next) => {
+suppliersRouter.put('/:id', requireAuth, requireRole('OWNER'), (req, res, next) => {
   try {
     const parsed = updateSupplierSchema.parse(req.body);
     const payload = { ...parsed, clinic_id: req.user!.clinic_id! };
 
-    const { data, error } = await supabaseAdmin
-      .from('suppliers')
-      .update(payload)
-      .eq('id', req.params.id)
-      .eq('clinic_id', req.user!.clinic_id!)
-      .eq('is_active', true)
-      .select()
-      .single();
-
-    if (error) throw error;
-
-    await auditLog({ 
-      clinicId: req.user!.clinic_id!, 
-      userId: req.user!.id, 
-      action: 'UPDATE', 
-      table: 'suppliers', 
-      newData: data,
-      recordId: req.params.id
-    });
+    const data = localMutate({ table: 'suppliers', operation: 'UPDATE', data: { ...payload, _local_id: req.params.id } });
 
     res.json({ data });
   } catch (err) {
@@ -127,26 +83,9 @@ suppliersRouter.put('/:id', requireAuth, requireRole('OWNER'), async (req, res, 
 });
 
 // DELETE /api/suppliers/:id
-suppliersRouter.delete('/:id', requireAuth, requireRole('OWNER'), async (req, res, next) => {
+suppliersRouter.delete('/:id', requireAuth, requireRole('OWNER'), (req, res, next) => {
   try {
-    const { data, error } = await supabaseAdmin
-      .from('suppliers')
-      .update({ is_active: false })
-      .eq('id', req.params.id)
-      .eq('clinic_id', req.user!.clinic_id!)
-      .select()
-      .single();
-
-    if (error) throw error;
-
-    await auditLog({ 
-      clinicId: req.user!.clinic_id!, 
-      userId: req.user!.id, 
-      action: 'DELETE', 
-      table: 'suppliers', 
-      newData: data,
-      recordId: req.params.id
-    });
+    const data = localMutate({ table: 'suppliers', operation: 'DELETE', data: { _local_id: req.params.id } });
 
     res.json({ data });
   } catch (err) {
@@ -155,35 +94,23 @@ suppliersRouter.delete('/:id', requireAuth, requireRole('OWNER'), async (req, re
 });
 
 // GET /api/suppliers/:id/outstanding
-suppliersRouter.get('/:id/outstanding', requireAuth, async (req, res, next) => {
+suppliersRouter.get('/:id/outstanding', requireAuth, (req, res, next) => {
   try {
-    const { data: supplier, error: suppErr } = await supabaseAdmin
-      .from('suppliers')
-      .select('outstanding_balance')
-      .eq('id', req.params.id)
-      .eq('clinic_id', req.user!.clinic_id!)
-      .single();
+    const supplier = queryOne('suppliers', '_local_id=? OR id=?', [req.params.id, req.params.id]);
+    if (!supplier) return res.status(404).json({ error: 'Supplier not found' });
 
-    if (suppErr) throw suppErr;
+    const suppId = (supplier as any)._local_id || (supplier as any).id;
+    const purchases = queryAll('purchases', "supplier_id=? AND payment_status!='paid'", [suppId]);
+    purchases.sort((a: any, b: any) => String(b.created_at ?? '').localeCompare(String(a.created_at ?? '')));
 
-    const { data: purchases, error: purchErr } = await supabaseAdmin
-      .from('purchases')
-      .select('id, invoice_number, invoice_date, net_amount, payment_status, paid_amount')
-      .eq('supplier_id', req.params.id)
-      .eq('clinic_id', req.user!.clinic_id!)
-      .order('invoice_date', { ascending: false })
-      .limit(10);
-
-    if (purchErr) throw purchErr;
-
-    res.json({ data: { outstanding_balance: supplier.outstanding_balance, purchases } });
+    res.json({ data: { outstanding_balance: (supplier as any).outstanding_balance, purchases: purchases.slice(0, 10) } });
   } catch (err) {
     next(err);
   }
 });
 
 // POST /api/suppliers/:id/payment
-suppliersRouter.post('/:id/payment', requireAuth, requireRole('OWNER'), async (req, res, next) => {
+suppliersRouter.post('/:id/payment', requireAuth, requireRole('OWNER'), (req, res, next) => {
   try {
     const amountStr = req.body.amount;
     const amount = Number(amountStr);
@@ -191,38 +118,12 @@ suppliersRouter.post('/:id/payment', requireAuth, requireRole('OWNER'), async (r
       return res.status(400).json({ error: 'Valid positive amount required' });
     }
 
-    const { data: supplier, error: suppErr } = await supabaseAdmin
-      .from('suppliers')
-      .select('outstanding_balance')
-      .eq('id', req.params.id)
-      .eq('clinic_id', req.user!.clinic_id!)
-      .single();
-
-    if (suppErr || !supplier) throw suppErr || new Error('Supplier not found');
-
-    const newOutstanding = Number(supplier.outstanding_balance) - amount;
-
-    const { data, error } = await supabaseAdmin
-      .from('suppliers')
-      .update({ outstanding_balance: newOutstanding })
-      .eq('id', req.params.id)
-      .eq('clinic_id', req.user!.clinic_id!)
-      .select()
-      .single();
-
-    if (error) throw error;
-
-    await auditLog({ 
-      clinicId: req.user!.clinic_id!, 
-      userId: req.user!.id, 
-      action: 'PAYMENT', 
-      table: 'suppliers', 
-      newData: { payment_amount: amount, new_balance: newOutstanding },
-      oldData: { balance: supplier.outstanding_balance },
-      recordId: req.params.id
+    const data = localMutate({
+      table: 'suppliers',
+      operation: 'UPDATE',
+      data: { payment_amount: amount, _local_id: req.params.id }
     });
 
-    // Option to record in unified ledger / accounting later
     res.json({ data });
   } catch (err) {
     next(err);

@@ -329,17 +329,17 @@ export default function LoginScreen() {
           </View>
 
           {/* ─── White Card ──────────────────────────── */}
-          <Animated.View
-            style={[
-              styles.card,
-              cardAnimStyle,
-              {
-                backgroundColor: theme.colors.surface,
-                ...theme.shadow.card,
-              },
-            ]}
-            entering={SlideInDown.duration(400).delay(200).springify().damping(18)}
-          >
+          <Animated.View style={styles.flex} entering={SlideInDown.duration(400).delay(200).springify().damping(18)}>
+            <Animated.View
+              style={[
+                styles.card,
+                cardAnimStyle,
+                {
+                  backgroundColor: theme.colors.surface,
+                  ...theme.shadow.card,
+                },
+              ]}
+            >
             <Text
               style={[
                 styles.cardTitle,
@@ -512,6 +512,7 @@ export default function LoginScreen() {
                 Use Biometrics
               </Text>
             </Pressable>
+            </Animated.View>
           </Animated.View>
         </ScrollView>
       </KeyboardAvoidingView>

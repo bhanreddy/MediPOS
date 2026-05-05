@@ -53,12 +53,59 @@ adminRouter.get('/clinics', async (req, res, next) => {
   }
 });
 
-adminRouter.get('/clinics/:id', async (req, res, next) => {
+adminRouter.get('/clinics/:medical_id', async (req, res, next) => {
   try {
-    const { id } = req.params;
-    const { data: clinic, error } = await supabaseAdmin.from('clinics').select('*').eq('id', id).single();
+    const { medical_id } = req.params;
+    const { data: clinic, error } = await supabaseAdmin.from('clinics').select('*').eq('id', medical_id).single();
     if (error) throw error;
     res.json({ data: clinic });
+  } catch (err) {
+    next(err);
+  }
+});
+
+adminRouter.get('/clinics/:medical_id/profile', async (req, res, next) => {
+  try {
+    const { medical_id } = req.params;
+    const { data: clinic, error } = await supabaseAdmin.from('clinics').select('*').eq('id', medical_id).single();
+    if (error) throw error;
+    res.json({ data: clinic });
+  } catch (err) {
+    next(err);
+  }
+});
+
+adminRouter.put('/clinics/:medical_id/profile', async (req, res, next) => {
+  try {
+    const { medical_id } = req.params;
+    const { name, owner_name, address, phone, email, gstin, drug_licence_number, logo_url, signature_url, invoice_footer } = req.body;
+    
+    const payload = {
+      name, owner_name, address, phone, email, gstin, drug_licence_number, logo_url, signature_url, invoice_footer
+    };
+    
+    // Remove undefined
+    Object.keys(payload).forEach(key => payload[key as keyof typeof payload] === undefined && delete payload[key as keyof typeof payload]);
+
+    const { data, error } = await supabaseAdmin
+      .from('clinics')
+      .update(payload)
+      .eq('id', medical_id)
+      .select()
+      .single();
+
+    if (error) throw error;
+
+    await supabaseAdmin.from('audit_logs').insert([{ 
+      action: 'UPDATE_PROFILE', 
+      table_name: 'clinics', 
+      record_id: medical_id, 
+      new_data: payload, 
+      clinic_id: medical_id, 
+      user_id: req.user?.id 
+    }]);
+
+    res.json({ data });
   } catch (err) {
     next(err);
   }

@@ -36,6 +36,7 @@
     "dexie-export-import": "^4.1.4",
     "dexie-react-hooks": "^4.2.0",
     "html2canvas": "^1.4.1",
+    "idb": "^8.0.3",
     "jspdf": "^4.2.1",
     "lucide-react": "^1.8.0",
     "papaparse": "^5.5.3",

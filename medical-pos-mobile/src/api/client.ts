@@ -18,7 +18,7 @@ export function extractPaginated<T>(
   };
 }
 import axiosRetry, { exponentialDelay, isNetworkError } from 'axios-retry';
-import { Platform } from 'react-native';
+import { Platform, DeviceEventEmitter } from 'react-native';
 import { refreshSupabaseAccessToken } from '@/auth/supabaseSessionRefresh';
 import { useAuthStore } from '@/stores/authStore';
 import { getSecureAuthToken } from '@/utils/secureAuthToken';
@@ -82,10 +82,7 @@ apiClient.interceptors.response.use(
 
     if (status === 401) {
       useAuthStore.getState().logout();
-      if (typeof globalThis !== 'undefined') {
-        const event = new Event('AUTH_LOGOUT');
-        globalThis.dispatchEvent?.(event);
-      }
+      DeviceEventEmitter.emit('AUTH_LOGOUT');
     }
     return Promise.reject(error);
   },

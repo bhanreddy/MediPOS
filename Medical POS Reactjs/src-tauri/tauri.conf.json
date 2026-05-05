@@ -37,6 +37,7 @@
   },
   "bundle": {
     "active": true,
+    "externalBin": ["binaries/node", "binaries/server"],
     "targets": [
       "msi",
       "nsis"

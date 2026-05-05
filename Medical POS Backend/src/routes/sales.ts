@@ -1,21 +1,14 @@
 import { Router } from 'express';
 import { requireAuth } from '../middleware/auth';
 import { requireRole } from '../middleware/rbac';
-import { supabaseAdmin } from '../config/supabase';
 import { createSaleSchema, saleReturnSchema } from '../schemas/sale.schema';
-import { deductStock, restoreStock, checkAndAutoShortbook } from '../services/stockLedger';
-import { generateInvoiceNumber } from '../services/invoiceNumber';
-import { recalculateImportanceScore } from '../services/importanceScore';
-import { scheduleRefillReminders } from '../services/refillReminder';
-import { auditLog } from '../services/auditLog';
-import { sendInvoiceWhatsApp } from '../services/whatsapp';
-import { env } from '../config/env';
-import { AppError } from '../lib/appError';
+import { localMutate } from '../lib/localMutate';
+import { queryAll, queryOne, queryRaw } from '../lib/localQuery';
 
 export const salesRouter = Router();
 
 // GET /api/sales
-salesRouter.get('/', requireAuth, async (req, res, next) => {
+salesRouter.get('/', requireAuth, (req, res, next) => {
   try {
     const page = parseInt(req.query.page as string) || 1;
     const limit = Math.min(parseInt(req.query.limit as string) || 20, 100);
@@ -23,26 +16,34 @@ salesRouter.get('/', requireAuth, async (req, res, next) => {
     const from = req.query.from as string;
     const to = req.query.to as string;
     const payment_status = req.query.payment_status as string;
+
+    const conditions: string[] = [];
+    const values: any[] = [];
+
+    if (customer_id) { conditions.push('customer_id=?'); values.push(customer_id); }
+    if (payment_status) { conditions.push('payment_status=?'); values.push(payment_status); }
+    if (from) { conditions.push('created_at>=?'); values.push(from); }
+    if (to) { conditions.push('created_at<=?'); values.push(to); }
+
+    const where = conditions.length > 0 ? conditions.join(' AND ') : '';
+    const all = queryAll('sales', where, values);
+
+    all.sort((a: any, b: any) => String(b.created_at ?? '').localeCompare(String(a.created_at ?? '')));
+
     const offset = (page - 1) * limit;
+    const data = all.slice(offset, offset + limit);
 
-    let query = supabaseAdmin
-      .from('sales')
-      .select('*, customers(name)', { count: 'exact' })
-      .eq('clinic_id', req.user!.clinic_id!)
-      .range(offset, offset + limit - 1)
-      .order('sale_date', { ascending: false });
-
-    if (customer_id) query = query.eq('customer_id', customer_id);
-    if (payment_status) query = query.eq('payment_status', payment_status);
-    if (from) query = query.gte('sale_date', from);
-    if (to) query = query.lte('sale_date', to);
-
-    const { data, error, count } = await query;
-    if (error) throw error;
+    // Attach customer name
+    for (const sale of data) {
+      if ((sale as any).customer_id) {
+        const cust = queryOne('customers', '_local_id=? OR id=?', [(sale as any).customer_id, (sale as any).customer_id]);
+        (sale as any).customers = { name: (cust as any)?.name ?? '' };
+      }
+    }
 
     res.json({
       data,
-      pagination: { page, limit, total: count || 0, totalPages: Math.ceil((count || 0) / limit) }
+      pagination: { page, limit, total: all.length, totalPages: Math.ceil(all.length / limit) }
     });
   } catch (err) {
     next(err);
@@ -50,18 +51,28 @@ salesRouter.get('/', requireAuth, async (req, res, next) => {
 });
 
 // GET /api/sales/:id
-salesRouter.get('/:id', requireAuth, async (req, res, next) => {
+salesRouter.get('/:id', requireAuth, (req, res, next) => {
   if (req.params.id === 'returns') return next();
   try {
-    const { data: sale, error } = await supabaseAdmin
-      .from('sales')
-      .select('*, sale_items(*, medicines(name), medicine_batches(batch_number))')
-      .eq('id', req.params.id)
-      .eq('clinic_id', req.user!.clinic_id!)
-      .single();
+    const sale = queryOne('sales', '_local_id=? OR id=?', [req.params.id, req.params.id]);
+    if (!sale) return res.status(404).json({ error: 'Sale not found' });
 
-    if (error) throw error;
-    res.json({ data: sale });
+    const saleId = (sale as any)._local_id;
+    const saleItems = queryAll('sale_items', 'sale_id=?', [saleId]);
+
+    // Attach medicine names and batch numbers
+    for (const item of saleItems) {
+      if ((item as any).medicine_id) {
+        const med = queryOne('medicines', '_local_id=? OR id=?', [(item as any).medicine_id, (item as any).medicine_id]);
+        (item as any).medicines = { name: (med as any)?.name ?? '' };
+      }
+      if ((item as any).batch_id) {
+        const batch = queryOne('medicine_batches', '_local_id=? OR id=?', [(item as any).batch_id, (item as any).batch_id]);
+        (item as any).medicine_batches = { batch_number: (batch as any)?.batch_number ?? '', expiry_date: (batch as any)?.expiry_date ?? '' };
+      }
+    }
+
+    res.json({ data: { ...sale, sale_items: saleItems } });
   } catch (err) {
     next(err);
   }
@@ -70,15 +81,21 @@ salesRouter.get('/:id', requireAuth, async (req, res, next) => {
 import { enforcePlan } from '../middleware/planEnforcement';
 
 // POST /api/sales
-salesRouter.post('/', requireAuth, requireRole('PHARMACIST', 'CASHIER', 'OWNER'), enforcePlan, async (req, res, next) => {
+salesRouter.post('/', requireAuth, requireRole('PHARMACIST', 'CASHIER', 'OWNER'), enforcePlan, (req, res, next) => {
   try {
     const parsed = createSaleSchema.parse(req.body);
 
-    // 1. Stock Validation & Deduction
-    // Ensure the batch belongs to this clinic handled inside stockLedger
-    await deductStock(parsed.items, req.user!.clinic_id!, supabaseAdmin);
+    // Stock Validation
+    for (const item of parsed.items) {
+      const batch = queryOne('medicine_batches', '(_local_id=? OR id=?)', [item.batch_id, item.batch_id]);
+      if (!batch) throw new Error(`Batch not found: ${item.batch_id}`);
+      if (Number((batch as any).quantity_remaining ?? 0) < item.quantity) {
+        const med = queryOne('medicines', '_local_id=? OR id=?', [item.medicine_id, item.medicine_id]);
+        throw new Error(`Insufficient stock for ${(med as any)?.name ?? item.medicine_id}. Available: ${(batch as any).quantity_remaining}, Requested: ${item.quantity}`);
+      }
+    }
 
-    // 2. Calculations
+    // Calculations
     let subtotal = 0;
     let gst_amount = 0;
     const sItemsToInsert = [];
@@ -86,8 +103,6 @@ salesRouter.post('/', requireAuth, requireRole('PHARMACIST', 'CASHIER', 'OWNER')
     for (const item of parsed.items) {
       const itemTotal = item.quantity * item.mrp * (1 - item.discount_pct / 100);
       subtotal += itemTotal;
-      // GST is usually calculated on the discounted taxable value if inclusive vs exclusive.
-      // Assuming exclusive standard calculation:
       gst_amount += (item.quantity * item.mrp * item.gst_rate) / 100;
       
       sItemsToInsert.push({
@@ -105,16 +120,14 @@ salesRouter.post('/', requireAuth, requireRole('PHARMACIST', 'CASHIER', 'OWNER')
     const net_amount = subtotal - parsed.discount + gst_amount;
     const balance_due = Math.max(net_amount - parsed.paid_amount, 0);
 
-    // 3. Invoice Number
-    const invoice_number = await generateInvoiceNumber(req.user!.clinic_id!);
-
-    // 4. Insert Sale
-    const { data: sale, error: sErr } = await supabaseAdmin
-      .from('sales')
-      .insert({
+    // Insert Sale locally
+    const sale = localMutate({
+      table: 'sales',
+      operation: 'INSERT',
+      data: {
         clinic_id: req.user!.clinic_id!,
         customer_id: parsed.customer_id || null,
-        invoice_number,
+        invoice_number: `LOCAL-${Date.now()}`,
         subtotal,
         discount: parsed.discount,
         gst_amount,
@@ -124,146 +137,82 @@ salesRouter.post('/', requireAuth, requireRole('PHARMACIST', 'CASHIER', 'OWNER')
         paid_amount: parsed.paid_amount,
         balance_due,
         served_by: req.user!.id,
-      })
-      .select()
-      .single();
+      }
+    });
 
-    if (sErr) throw sErr;
+    // Insert Sale Items + deduct stock
+    const finalItems = sItemsToInsert.map(i => ({ ...i, sale_id: sale._local_id }));
+    for (const item of finalItems) {
+      localMutate({ table: 'sale_items', operation: 'INSERT', data: item });
 
-    // 5. Insert Sale Items
-    const finalItems = sItemsToInsert.map(i => ({ ...i, sale_id: sale.id }));
-    const { error: siErr } = await supabaseAdmin.from('sale_items').insert(finalItems);
-    if (siErr) throw siErr;
-
-    // 6. Update Customer Outstanding
-    if (parsed.customer_id && balance_due > 0) {
-      const { data: cust } = await supabaseAdmin.from('customers').select('outstanding_balance').eq('id', parsed.customer_id).single();
-      if (cust) {
-        await supabaseAdmin.from('customers').update({
-          outstanding_balance: Number(cust.outstanding_balance) + balance_due
-        }).eq('id', parsed.customer_id);
+      // Immediately deduct stock
+      const batch = queryOne('medicine_batches', '(_local_id=? OR id=?)', [item.batch_id, item.batch_id]);
+      if (batch) {
+        localMutate({
+          table: 'medicine_batches',
+          operation: 'UPDATE',
+          data: {
+            _local_id: (batch as any)._local_id,
+            quantity_remaining: Math.max(0, Number((batch as any).quantity_remaining) - item.quantity),
+          }
+        });
       }
     }
 
-    // 7. Background Tasks
-    if (parsed.customer_id) {
-      recalculateImportanceScore(parsed.customer_id, req.user!.clinic_id!, supabaseAdmin).catch(console.error);
-      scheduleRefillReminders(sale.id, req.user!.clinic_id!, supabaseAdmin).catch(console.error);
-    }
-
-    for (const item of parsed.items) {
-      checkAndAutoShortbook(item.medicine_id, req.user!.clinic_id!, supabaseAdmin).catch(console.error);
-    }
-
-    await auditLog({ clinicId: req.user!.clinic_id!, userId: req.user!.id, action: 'CREATE', table: 'sales', newData: sale });
-
-    // Fetch back fully eager loaded
-    const { data: fullSale } = await supabaseAdmin.from('sales')
-      .select('*, sale_items(*)').eq('id', sale.id).single();
-
-    res.status(201).json({ data: fullSale });
-
-    // --- PHASE 6 : WHATSAPP INVOICE ---
-    if (parsed.customer_id) {
-       const { data: customer } = await supabaseAdmin.from('customers').select('*').eq('id', parsed.customer_id).single();
-       if (customer?.phone) {
-           const { data: clinic } = await supabaseAdmin.from('clinics').select('name').eq('id', req.user!.clinic_id!).single();
-           const invoiceUrl = `${env.APP_URL || 'https://api.yourmedicalpos.com'}/public/invoice/${sale.id}`;
-           sendInvoiceWhatsApp({
-               customerPhone: customer.phone,
-               customerName: customer.name,
-               invoiceNumber: sale.invoice_number,
-               netAmount: sale.net_amount,
-               clinicName: clinic?.name || 'Clinic',
-               invoiceUrl
-           }).catch(console.error);
-       }
-    }
-
+    res.status(201).json({ data: { ...sale, sale_items: finalItems } });
   } catch (err) {
-    if (req.get('x-offline-sync') === '1' && err instanceof AppError && err.code === 'INSUFFICIENT_STOCK') {
-      return next(new AppError(400, err.message, 'STOCK_CHANGED_WHILE_OFFLINE'));
-    }
     next(err);
   }
 });
 
 // POST /api/sales/returns
-salesRouter.post('/returns', requireAuth, requireRole('PHARMACIST', 'OWNER'), async (req, res, next) => {
+salesRouter.post('/returns', requireAuth, requireRole('PHARMACIST', 'OWNER'), (req, res, next) => {
   try {
     const parsed = saleReturnSchema.parse(req.body);
 
-    const { data: originalSale, error: origErr } = await supabaseAdmin
-      .from('sales')
-      .select('*')
-      .eq('id', parsed.original_sale_id)
-      .eq('clinic_id', req.user!.clinic_id!)
-      .single();
-
-    if (origErr) throw origErr;
-
-    const { data: originalItems } = await supabaseAdmin
-      .from('sale_items')
-      .select('*')
-      .eq('sale_id', parsed.original_sale_id);
-
-    // Verify quantities
-    const restorePayload = [];
-    let returnSubtotal = 0;
-
-    for (const retItem of parsed.items) {
-      const origItem = originalItems?.find(i => i.id === retItem.sale_item_id);
-      if (!origItem) {
-        throw new AppError(400, `Item ${retItem.sale_item_id} not found in original sale.`, 'RETURN_ITEM_NOT_FOUND');
-      }
-      if (retItem.quantity > origItem.quantity) {
-        throw new AppError(
-          400,
-          `Return quantity exceeds original sold quantity for item ${origItem.medicine_id}`,
-          'RETURN_QTY_EXCEEDED'
-        );
-      }
-      restorePayload.push({ batch_id: origItem.batch_id, quantity: retItem.quantity });
-      returnSubtotal += origItem.mrp * retItem.quantity * (1 - origItem.discount_pct / 100);
-    }
-
-    await restoreStock(restorePayload, req.user!.clinic_id!, supabaseAdmin);
-
-    const invoice_number = await generateInvoiceNumber(req.user!.clinic_id!);
-
-    // net_amount is negative for returns usually or we just record it positive but is_return handles logic.
-    // Spec: "net_amount = negative (credit)"
-    const net_amount = -returnSubtotal; 
-
-    const { data: returnSale, error: retErr } = await supabaseAdmin
-      .from('sales')
-      .insert({
+    // Insert return sale locally
+    const returnSale = localMutate({
+      table: 'sales',
+      operation: 'INSERT',
+      data: {
         clinic_id: req.user!.clinic_id!,
-        customer_id: originalSale.customer_id,
-        invoice_number,
-        net_amount,
-        subtotal: net_amount,
+        invoice_number: `RET-LOCAL-${Date.now()}`,
         is_return: true,
-        return_of: originalSale.id,
+        return_of: parsed.original_sale_id,
         served_by: req.user!.id,
-        // Reset balances since it's a return
-      })
-      .select()
-      .single();
+      }
+    });
 
-    if (retErr) throw retErr;
+    // Insert return items + restore stock
+    for (const retItem of parsed.items) {
+      localMutate({
+        table: 'sale_items',
+        operation: 'INSERT',
+        data: {
+          clinic_id: req.user!.clinic_id!,
+          sale_id: returnSale._local_id,
+          sale_item_id: retItem.sale_item_id,
+          quantity: retItem.quantity,
+          reason: retItem.reason,
+        }
+      });
 
-    if (originalSale.customer_id && originalSale.balance_due > 0) {
-      // Logic to reduce outstanding
-      const { data: cust } = await supabaseAdmin.from('customers').select('outstanding_balance').eq('id', originalSale.customer_id).single();
-      if (cust) {
-        // Reduct min of the return value vs what they owe
-        const newBalance = Math.max(Number(cust.outstanding_balance) + net_amount, 0); // negative addition
-        await supabaseAdmin.from('customers').update({ outstanding_balance: newBalance }).eq('id', originalSale.customer_id);
+      // Restore batch stock
+      const origItem = queryOne('sale_items', '_local_id=? OR id=?', [retItem.sale_item_id, retItem.sale_item_id]);
+      if (origItem && (origItem as any).batch_id) {
+        const batch = queryOne('medicine_batches', '(_local_id=? OR id=?)', [(origItem as any).batch_id, (origItem as any).batch_id]);
+        if (batch) {
+          localMutate({
+            table: 'medicine_batches',
+            operation: 'UPDATE',
+            data: {
+              _local_id: (batch as any)._local_id,
+              quantity_remaining: Number((batch as any).quantity_remaining) + retItem.quantity,
+            }
+          });
+        }
       }
     }
-
-    await auditLog({ clinicId: req.user!.clinic_id!, userId: req.user!.id, action: 'RETURN', table: 'sales', newData: returnSale });
 
     res.json({ data: returnSale });
   } catch (err) {
@@ -272,24 +221,32 @@ salesRouter.post('/returns', requireAuth, requireRole('PHARMACIST', 'OWNER'), as
 });
 
 // GET /api/sales/:id/invoice
-salesRouter.get('/:id/invoice', requireAuth, async (req, res, next) => {
+salesRouter.get('/:id/invoice', requireAuth, (req, res, next) => {
   try {
-    const { data: sale, error } = await supabaseAdmin
-      .from('sales')
-      .select('*, customers(*), sale_items(*, medicines(name, hsn_code), medicine_batches(batch_number, expiry_date))')
-      .eq('id', req.params.id)
-      .eq('clinic_id', req.user!.clinic_id!)
-      .single();
+    const sale = queryOne('sales', '_local_id=? OR id=?', [req.params.id, req.params.id]) as any;
+    if (!sale) return res.status(404).json({ error: 'Sale not found' });
 
-    if (error) throw error;
+    const saleItems = queryAll('sale_items', 'sale_id=?', [sale._local_id]);
+    const clinic = queryOne('clinics', '1=1') as any;
 
-    const { data: clinic } = await supabaseAdmin
-      .from('clinics')
-      .select('*')
-      .eq('id', req.user!.clinic_id!)
-      .single();
+    // Attach medicine names
+    for (const item of saleItems) {
+      if ((item as any).medicine_id) {
+        const med = queryOne('medicines', '_local_id=? OR id=?', [(item as any).medicine_id, (item as any).medicine_id]);
+        (item as any).medicines = { name: (med as any)?.name ?? '' };
+      }
+      if ((item as any).batch_id) {
+        const batch = queryOne('medicine_batches', '_local_id=? OR id=?', [(item as any).batch_id, (item as any).batch_id]);
+        (item as any).medicine_batches = { batch_number: (batch as any)?.batch_number ?? '', expiry_date: (batch as any)?.expiry_date ?? '' };
+      }
+    }
 
-    // Basic HTML template for the PDF layout matching standard thermal/A4 logic
+    let customerName = 'Walk-in';
+    if (sale.customer_id) {
+      const cust = queryOne('customers', '_local_id=? OR id=?', [sale.customer_id, sale.customer_id]);
+      customerName = (cust as any)?.name ?? 'Walk-in';
+    }
+
     const html = `
       <html>
         <head>
@@ -301,18 +258,18 @@ salesRouter.get('/:id/invoice', requireAuth, async (req, res, next) => {
           </style>
         </head>
         <body>
-          <h2>${clinic?.name}</h2>
+          <h2>${clinic?.name ?? 'Medical Store'}</h2>
           <p>${clinic?.address || ''}<br/>GSTIN: ${clinic?.gstin || 'N/A'}<br/>DL No: ${clinic?.drug_licence_number || 'N/A'}</p>
           <hr />
           <h3>Invoice #${sale.invoice_number}</h3>
-          <p>Date: ${new Date(sale.sale_date).toLocaleString()}<br/>
-             Customer: ${sale.customers?.name || 'Walk-in'}</p>
+          <p>Date: ${sale.created_at}<br/>
+             Customer: ${customerName}</p>
           <table>
              <tr><th>Item</th><th>Batch/Exp</th><th>Qty</th><th>MRP</th><th>Total</th></tr>
-             ${sale.sale_items.map((i: any) => `
+             ${(saleItems as any[]).map(i => `
                 <tr>
-                  <td>${i.medicines?.name}</td>
-                  <td>${i.medicine_batches?.batch_number} / ${i.medicine_batches?.expiry_date}</td>
+                  <td>${i.medicines?.name ?? ''}</td>
+                  <td>${i.medicine_batches?.batch_number ?? ''} / ${i.medicine_batches?.expiry_date ?? ''}</td>
                   <td>${i.quantity}</td>
                   <td>${i.mrp}</td>
                   <td class="right">${i.total}</td>
@@ -328,7 +285,7 @@ salesRouter.get('/:id/invoice', requireAuth, async (req, res, next) => {
       </html>
     `;
 
-    res.json({ data: { html, sale, clinic } });
+    res.json({ data: { html, sale: { ...sale, sale_items: saleItems }, clinic } });
   } catch (err) {
     next(err);
   }

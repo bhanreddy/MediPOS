@@ -1,214 +1,218 @@
 import { Router } from 'express';
 import { requireAuth } from '../middleware/auth';
-import { supabaseAdmin } from '../config/supabase';
+import { queryAll, queryOne, queryRaw, queryCount } from '../lib/localQuery';
 import { buildGstr1Payload, SaleRowForGstr1 } from '../services/gstr1Builder';
 
 export const reportsRouter = Router();
 
 // GET /api/reports/dashboard
-reportsRouter.get('/dashboard', requireAuth, async (req, res, next) => {
+reportsRouter.get('/dashboard', requireAuth, (req, res, next) => {
   try {
-    const clinicId = req.user!.clinic_id!;
     const today = new Date().toISOString().split('T')[0];
-    
-    // Revenue today
-    const { data: salesToday } = await supabaseAdmin.from('sales')
-      .select('net_amount')
-      .eq('clinic_id', clinicId)
-      .gte('sale_date', today);
-
-    const today_revenue = salesToday?.reduce((acc, sale) => acc + Number(sale.net_amount), 0) || 0;
-    const today_bills = salesToday?.length || 0;
-
-    // Week revenue
     const weekAgo = new Date();
     weekAgo.setDate(weekAgo.getDate() - 7);
-    const { data: salesWeek } = await supabaseAdmin.from('sales')
-      .select('net_amount, sale_date')
-      .eq('clinic_id', clinicId)
-      .gte('sale_date', weekAgo.toISOString());
-    
-    const week_revenue = salesWeek?.reduce((acc, sale) => acc + Number(sale.net_amount), 0) || 0;
+    const weekStr = weekAgo.toISOString();
+
+    // Revenue today
+    const salesToday = queryRaw<{ net_amount: number }>(
+      `SELECT net_amount FROM sales WHERE _deleted=0 AND is_return=0 AND created_at>=?`,
+      [today]
+    );
+    const today_revenue = salesToday.reduce((acc, s) => acc + Number(s.net_amount), 0);
+    const today_bills = salesToday.length;
+
+    // Week revenue
+    const salesWeek = queryRaw<{ net_amount: number; created_at: string }>(
+      `SELECT net_amount, created_at FROM sales WHERE _deleted=0 AND is_return=0 AND created_at>=?`,
+      [weekStr]
+    );
+    const week_revenue = salesWeek.reduce((acc, s) => acc + Number(s.net_amount), 0);
 
     // Low stock count
-    const { count: low_stock_count } = await supabaseAdmin.from('low_stock_alerts').select('*', { count: 'exact', head: true }).eq('clinic_id', clinicId);
+    const lowRows = queryRaw<{ cnt: number }>(
+      `SELECT COUNT(*) as cnt FROM (
+        SELECT m._local_id, COALESCE(SUM(mb.quantity_remaining), 0) as stock, m.low_stock_threshold
+        FROM medicines m
+        LEFT JOIN medicine_batches mb ON mb.medicine_id = m._local_id AND mb._deleted=0
+        WHERE m._deleted=0 AND m.is_active=1
+        GROUP BY m._local_id
+        HAVING stock <= m.low_stock_threshold AND stock > 0
+      )`
+    );
+    const low_stock_count = Number(lowRows[0]?.cnt ?? 0);
 
-    // Expiry count
-    const { count: expiry_count_30d } = await supabaseAdmin.from('expiry_alerts').select('*', { count: 'exact', head: true }).eq('clinic_id', clinicId).eq('severity', 'critical');
+    // Expiry count (30 days)
+    const in30 = new Date();
+    in30.setDate(in30.getDate() + 30);
+    const expiryRows = queryRaw<{ cnt: number }>(
+      `SELECT COUNT(*) as cnt FROM medicine_batches
+       WHERE _deleted=0 AND quantity_remaining>0 AND expiry_date<=?`,
+      [in30.toISOString().split('T')[0]]
+    );
+    const expiry_count_30d = Number(expiryRows[0]?.cnt ?? 0);
 
     // Outstandings
-    const { data: customers } = await supabaseAdmin.from('customers').select('outstanding_balance').eq('clinic_id', clinicId);
-    const outstanding_receivable = customers?.reduce((acc, c) => acc + Number(c.outstanding_balance), 0) || 0;
+    const customers = queryAll('customers');
+    const outstanding_receivable = customers.reduce((acc: number, c: any) => acc + Number(c.outstanding_balance ?? 0), 0);
 
-    const { data: suppliers } = await supabaseAdmin.from('suppliers').select('outstanding_balance').eq('clinic_id', clinicId);
-    const outstanding_payable = suppliers?.reduce((acc, s) => acc + Number(s.outstanding_balance), 0) || 0;
+    const suppliers = queryAll('suppliers');
+    const outstanding_payable = suppliers.reduce((acc: number, s: any) => acc + Number(s.outstanding_balance ?? 0), 0);
 
     // Shortbook
-    const { count: shortbook_count } = await supabaseAdmin.from('shortbook').select('*', { count: 'exact', head: true }).eq('clinic_id', clinicId).eq('is_ordered', false);
+    const shortbook_count = queryCount('shortbook', 'is_ordered=0');
 
-    // Daily chart (last 7 days grouped)
+    // Daily chart (last 7 days)
     const dailyMap: Record<string, { revenue: number, bills: number }> = {};
     for (let i = 6; i >= 0; i--) {
       const d = new Date();
       d.setDate(d.getDate() - i);
       dailyMap[d.toISOString().split('T')[0]] = { revenue: 0, bills: 0 };
     }
-
-    salesWeek?.forEach(sale => {
-      const date = sale.sale_date.split('T')[0];
+    salesWeek.forEach(sale => {
+      const date = String(sale.created_at ?? '').split('T')[0];
       if (dailyMap[date]) {
         dailyMap[date].revenue += Number(sale.net_amount);
         dailyMap[date].bills += 1;
       }
     });
-
     const daily_chart = Object.entries(dailyMap).map(([date, metrics]) => ({ date, ...metrics }));
 
     res.json({
       data: {
-        today_revenue,
-        today_bills,
-        week_revenue,
-        low_stock_count: low_stock_count || 0,
-        expiry_count_30d: expiry_count_30d || 0,
-        outstanding_receivable,
-        outstanding_payable,
-        shortbook_count: shortbook_count || 0,
-        daily_chart
+        today_revenue, today_bills, week_revenue,
+        low_stock_count, expiry_count_30d,
+        outstanding_receivable, outstanding_payable,
+        shortbook_count, daily_chart
       }
     });
-
   } catch (err) {
     next(err);
   }
 });
 
 // GET /api/reports/gst-sales
-reportsRouter.get('/gst-sales', requireAuth, async (req, res, next) => {
+reportsRouter.get('/gst-sales', requireAuth, (req, res, next) => {
   try {
     const { from, to } = req.query;
     if (!from || !to) return res.status(400).json({ error: 'from and to dates required' });
 
-    const { data } = await supabaseAdmin.from('sale_items')
-      .select('total, gst_rate, sales!inner(sale_date)')
-      .eq('clinic_id', req.user!.clinic_id!)
-      .gte('sales.sale_date', from)
-      .lte('sales.sale_date', to);
+    const rows = queryRaw<{ gst_rate: number; total: number }>(
+      `SELECT si.gst_rate, SUM(si.total) as total
+       FROM sale_items si
+       JOIN sales s ON s._local_id = si.sale_id
+       WHERE si._deleted=0 AND s._deleted=0 AND s.created_at>=? AND s.created_at<=?
+       GROUP BY si.gst_rate`,
+      [from, to]
+    );
 
-    const grouped: Record<string, any> = {};
-    data?.forEach((item: any) => {
-      const rate = item.gst_rate;
-      if (!grouped[rate]) grouped[rate] = { taxable_amount: 0, cgst: 0, sgst: 0, total_gst: 0, gross_amount: 0 };
-      grouped[rate].taxable_amount += item.total;
-      const gst = (item.total * rate) / 100;
-      grouped[rate].cgst += gst / 2;
-      grouped[rate].sgst += gst / 2;
-      grouped[rate].total_gst += gst;
-      grouped[rate].gross_amount += (item.total + gst);
+    const data = rows.map(r => {
+      const taxable = Number(r.total ?? 0);
+      const rate = Number(r.gst_rate ?? 0);
+      const gst = (taxable * rate) / 100;
+      return { gst_rate: rate, taxable_amount: taxable, cgst: gst / 2, sgst: gst / 2, total_gst: gst, gross_amount: taxable + gst };
     });
 
-    res.json({ data: Object.keys(grouped).map(rate => ({ gst_rate: Number(rate), ...grouped[rate] })) });
+    res.json({ data });
   } catch (err) {
     next(err);
   }
 });
 
 // GET /api/reports/gst-purchases
-reportsRouter.get('/gst-purchases', requireAuth, async (req, res, next) => {
+reportsRouter.get('/gst-purchases', requireAuth, (req, res, next) => {
   try {
     const { from, to } = req.query;
     if (!from || !to) return res.status(400).json({ error: 'from and to dates required' });
 
-    const { data } = await supabaseAdmin.from('purchase_items')
-      .select('total, gst_rate, purchases!inner(invoice_date)')
-      .eq('clinic_id', req.user!.clinic_id!)
-      .gte('purchases.invoice_date', from)
-      .lte('purchases.invoice_date', to);
+    const rows = queryRaw<{ gst_rate: number; total: number }>(
+      `SELECT pi.gst_rate, SUM(pi.total) as total
+       FROM purchase_items pi
+       JOIN purchases p ON p._local_id = pi.purchase_id
+       WHERE pi._deleted=0 AND p._deleted=0 AND p.created_at>=? AND p.created_at<=?
+       GROUP BY pi.gst_rate`,
+      [from, to]
+    );
 
-    const grouped: Record<string, any> = {};
-    data?.forEach((item: any) => {
-      const rate = item.gst_rate;
-      if (!grouped[rate]) grouped[rate] = { taxable_amount: 0, cgst: 0, sgst: 0, total_gst: 0, gross_amount: 0 };
-      grouped[rate].taxable_amount += item.total;
-      const gst = (item.total * rate) / 100;
-      grouped[rate].cgst += gst / 2;
-      grouped[rate].sgst += gst / 2;
-      grouped[rate].total_gst += gst;
-      grouped[rate].gross_amount += (item.total + gst);
+    const data = rows.map(r => {
+      const taxable = Number(r.total ?? 0);
+      const rate = Number(r.gst_rate ?? 0);
+      const gst = (taxable * rate) / 100;
+      return { gst_rate: rate, taxable_amount: taxable, cgst: gst / 2, sgst: gst / 2, total_gst: gst, gross_amount: taxable + gst };
     });
 
-    res.json({ data: Object.keys(grouped).map(rate => ({ gst_rate: Number(rate), ...grouped[rate] })) });
+    res.json({ data });
   } catch (err) {
     next(err);
   }
 });
 
 // GET /api/reports/schedule-h1
-reportsRouter.get('/schedule-h1', requireAuth, async (req, res, next) => {
+reportsRouter.get('/schedule-h1', requireAuth, (req, res, next) => {
   try {
     const { from, to } = req.query;
-    let query = supabaseAdmin.from('sale_items')
-      .select(`
-        quantity, total, 
-        sales!inner(sale_date, invoice_number, customers(name)), 
-        medicines!inner(name, is_schedule_h1),
-        medicine_batches!inner(batch_number)
-      `)
-      .eq('clinic_id', req.user!.clinic_id!)
-      .eq('medicines.is_schedule_h1', true);
+    const conditions = ['si._deleted=0', 's._deleted=0', 'm.is_schedule_h1=1'];
+    const values: any[] = [];
 
-    if (from) query = query.gte('sales.sale_date', from);
-    if (to) query = query.lte('sales.sale_date', to);
+    if (from) { conditions.push('s.created_at>=?'); values.push(from); }
+    if (to) { conditions.push('s.created_at<=?'); values.push(to); }
 
-    const { data, error } = await query;
-    if (error) throw error;
+    const rows = queryRaw<Record<string, any>>(
+      `SELECT si.quantity, si.total, s.created_at as sale_date, s.invoice_number,
+              m.name as medicine_name, c.name as customer_name, mb.batch_number
+       FROM sale_items si
+       JOIN sales s ON s._local_id = si.sale_id
+       JOIN medicines m ON m._local_id = si.medicine_id
+       LEFT JOIN medicine_batches mb ON mb._local_id = si.batch_id
+       LEFT JOIN customers c ON c._local_id = s.customer_id
+       WHERE ${conditions.join(' AND ')}
+       ORDER BY s.created_at`,
+      values
+    );
 
-    const mapped = data.map((item: any) => ({
-      date: item.sales.sale_date,
-      invoice_number: item.sales.invoice_number,
-      customer_name: item.sales.customers?.name || 'Walk-in',
-      medicine_name: item.medicines.name,
-      batch: item.medicine_batches.batch_number,
-      qty: item.quantity,
-      amount: item.total
+    const data = rows.map(r => ({
+      date: r.sale_date,
+      invoice_number: r.invoice_number,
+      customer_name: r.customer_name || 'Walk-in',
+      medicine_name: r.medicine_name,
+      batch: r.batch_number ?? '',
+      qty: r.quantity,
+      amount: r.total
     }));
 
-    res.json({ data: mapped });
+    res.json({ data });
   } catch(err) {
     next(err);
   }
 });
 
 // GET /api/reports/product-wise
-reportsRouter.get('/product-wise', requireAuth, async (req, res, next) => {
+reportsRouter.get('/product-wise', requireAuth, (req, res, next) => {
   try {
     const { from, to } = req.query;
-    
-    let saleQuery = supabaseAdmin.from('sale_items')
-      .select('medicine_id, quantity, total, medicines(name), sales!inner(sale_date)')
-      .eq('clinic_id', req.user!.clinic_id!);
-    if (from) saleQuery = saleQuery.gte('sales.sale_date', from);
-    if (to) saleQuery = saleQuery.lte('sales.sale_date', to);
+    const conditions = ['si._deleted=0', 's._deleted=0'];
+    const values: any[] = [];
 
-    const { data: sales, error: saleErr } = await saleQuery;
-    if (saleErr) throw saleErr;
+    if (from) { conditions.push('s.created_at>=?'); values.push(from); }
+    if (to) { conditions.push('s.created_at<=?'); values.push(to); }
 
-    const grouped: Record<string, any> = {};
-    sales?.forEach((s: any) => {
-      const id = s.medicine_id;
-      if (!grouped[id]) grouped[id] = { medicine_name: s.medicines.name, total_qty_sold: 0, total_revenue: 0, total_purchases: 0 };
-      grouped[id].total_qty_sold += s.quantity;
-      grouped[id].total_revenue += s.total;
-    });
+    const rows = queryRaw<Record<string, any>>(
+      `SELECT si.medicine_id, m.name as medicine_name, SUM(si.quantity) as total_qty_sold, SUM(si.total) as total_revenue
+       FROM sale_items si
+       JOIN sales s ON s._local_id = si.sale_id
+       LEFT JOIN medicines m ON m._local_id = si.medicine_id
+       WHERE ${conditions.join(' AND ')}
+       GROUP BY si.medicine_id ORDER BY total_revenue DESC`,
+      values
+    );
 
-    res.json({ data: Object.values(grouped) });
+    res.json({ data: rows });
   } catch(err) {
     next(err);
   }
 });
 
 // GET /api/reports/party-wise
-reportsRouter.get('/party-wise', requireAuth, async (req, res, next) => {
+reportsRouter.get('/party-wise', requireAuth, (req, res, next) => {
   try {
     const { type, id } = req.query;
     if (type !== 'customer' && type !== 'supplier') {
@@ -216,14 +220,18 @@ reportsRouter.get('/party-wise', requireAuth, async (req, res, next) => {
     }
 
     if (type === 'customer') {
-      let query = supabaseAdmin.from('sales').select('id, sale_date, invoice_number, net_amount, payment_mode').eq('clinic_id', req.user!.clinic_id!);
-      if (id) query = query.eq('customer_id', id);
-      const { data } = await query;
+      const conditions: string[] = [];
+      const values: any[] = [];
+      if (id) { conditions.push('customer_id=?'); values.push(id); }
+      const where = conditions.length > 0 ? conditions.join(' AND ') : '';
+      const data = queryAll('sales', where, values);
       res.json({ data });
     } else {
-      let query = supabaseAdmin.from('purchases').select('id, invoice_date, invoice_number, net_amount').eq('clinic_id', req.user!.clinic_id!);
-      if (id) query = query.eq('supplier_id', id);
-      const { data } = await query;
+      const conditions: string[] = [];
+      const values: any[] = [];
+      if (id) { conditions.push('supplier_id=?'); values.push(id); }
+      const where = conditions.length > 0 ? conditions.join(' AND ') : '';
+      const data = queryAll('purchases', where, values);
       res.json({ data });
     }
   } catch(err) {
@@ -232,45 +240,48 @@ reportsRouter.get('/party-wise', requireAuth, async (req, res, next) => {
 });
 
 // GET /api/reports/profit-loss
-reportsRouter.get('/profit-loss', requireAuth, async (req, res, next) => {
+reportsRouter.get('/profit-loss', requireAuth, (req, res, next) => {
   try {
     const { from, to } = req.query;
-    const cid = req.user!.clinic_id!;
 
-    let saleQ = supabaseAdmin.from('sales').select('net_amount, is_return').eq('clinic_id', cid);
-    let expQ = supabaseAdmin.from('expenses').select('amount').eq('clinic_id', cid);
-    let cogsQ = supabaseAdmin.from('sale_items').select('quantity, medicine_batches!inner(purchase_price), sales!inner(sale_date)').eq('clinic_id', cid);
+    const salesConds = ['_deleted=0'];
+    const expConds = ['_deleted=0'];
+    const sValues: any[] = [];
+    const eValues: any[] = [];
 
-    if (from) {
-      saleQ = saleQ.gte('sale_date', from);
-      expQ = expQ.gte('expense_date', from);
-      cogsQ = cogsQ.gte('sales.sale_date', from);
-    }
-    if (to) {
-      saleQ = saleQ.lte('sale_date', to);
-      expQ = expQ.lte('expense_date', to);
-      cogsQ = cogsQ.lte('sales.sale_date', to);
-    }
+    if (from) { salesConds.push('created_at>=?'); sValues.push(from); expConds.push('expense_date>=?'); eValues.push(from); }
+    if (to) { salesConds.push('created_at<=?'); sValues.push(to); expConds.push('expense_date<=?'); eValues.push(to); }
 
-    const [ { data: sales }, { data: exps }, { data: cogsData } ] = await Promise.all([saleQ, expQ, cogsQ]);
+    const sales = queryRaw<{ net_amount: number; is_return: number }>(
+      `SELECT net_amount, is_return FROM sales WHERE ${salesConds.join(' AND ')}`,
+      sValues
+    );
 
     let gross_revenue = 0;
     let total_returns = 0;
-    sales?.forEach(s => {
+    sales.forEach(s => {
       if (s.is_return) total_returns += Math.abs(Number(s.net_amount));
       else gross_revenue += Number(s.net_amount);
     });
-
     const net_revenue = gross_revenue - total_returns;
 
-    let cogs = 0;
-    cogsData?.forEach((c: any) => {
-       cogs += c.quantity * c.medicine_batches.purchase_price;
-    });
-
+    // COGS
+    const cogsRows = queryRaw<{ qty: number; pp: number }>(
+      `SELECT si.quantity as qty, mb.purchase_price as pp
+       FROM sale_items si
+       JOIN medicine_batches mb ON mb._local_id = si.batch_id
+       JOIN sales s ON s._local_id = si.sale_id
+       WHERE si._deleted=0 AND s._deleted=0${from ? ' AND s.created_at>=?' : ''}${to ? ' AND s.created_at<=?' : ''}`,
+      [...(from ? [from] : []), ...(to ? [to] : [])]
+    );
+    const cogs = cogsRows.reduce((a, r) => a + Number(r.qty) * Number(r.pp), 0);
     const gross_profit = net_revenue - cogs;
 
-    const total_expenses = exps?.reduce((a, b) => a + Number(b.amount), 0) || 0;
+    const exps = queryRaw<{ total: number }>(
+      `SELECT SUM(amount) as total FROM expenses WHERE ${expConds.join(' AND ')}`,
+      eValues
+    );
+    const total_expenses = Number(exps[0]?.total ?? 0);
 
     const net_profit = gross_profit - total_expenses;
     const gross_margin_pct = net_revenue > 0 ? (gross_profit / net_revenue) * 100 : 0;
@@ -284,20 +295,33 @@ reportsRouter.get('/profit-loss', requireAuth, async (req, res, next) => {
 });
 
 // GET /api/reports/expiry-report
-reportsRouter.get('/expiry-report', requireAuth, async (req, res, next) => {
+reportsRouter.get('/expiry-report', requireAuth, (req, res, next) => {
   try {
     const days = parseInt(req.query.days as string) || 90;
-    const { data, error } = await supabaseAdmin.from('expiry_alerts').select('*').eq('clinic_id', req.user!.clinic_id!);
-    if (error) throw error;
-    
-    // Server filter
     const targetDate = new Date();
     targetDate.setDate(targetDate.getDate() + days);
-    const filtered = data.filter(d => new Date(d.expiry_date) <= targetDate);
+    const targetStr = targetDate.toISOString().split('T')[0];
 
-    const grouped = { critical: [], warning: [], watch: [] } as Record<string, any[]>;
-    filtered.forEach(item => {
-       if (grouped[item.severity]) grouped[item.severity].push(item);
+    const data = queryRaw(
+      `SELECT mb.*, m.name as medicine_name
+       FROM medicine_batches mb
+       LEFT JOIN medicines m ON m._local_id = mb.medicine_id
+       WHERE mb._deleted=0 AND mb.quantity_remaining>0 AND mb.expiry_date<=?
+       ORDER BY mb.expiry_date ASC`,
+      [targetStr]
+    );
+
+    // Group by severity
+    const now = new Date();
+    const in30 = new Date(); in30.setDate(now.getDate() + 30);
+    const in60 = new Date(); in60.setDate(now.getDate() + 60);
+
+    const grouped = { critical: [] as any[], warning: [] as any[], watch: [] as any[] };
+    (data as any[]).forEach(item => {
+      const exp = new Date(item.expiry_date);
+      if (exp <= in30) grouped.critical.push(item);
+      else if (exp <= in60) grouped.warning.push(item);
+      else grouped.watch.push(item);
     });
 
     res.json({ data: grouped });
@@ -307,36 +331,35 @@ reportsRouter.get('/expiry-report', requireAuth, async (req, res, next) => {
 });
 
 // GET /api/reports/slow-moving
-reportsRouter.get('/slow-moving', requireAuth, async (req, res, next) => {
+reportsRouter.get('/slow-moving', requireAuth, (req, res, next) => {
   try {
     const days = parseInt(req.query.days as string) || 60;
     const threshold = new Date();
     threshold.setDate(threshold.getDate() - days);
-    const fromStr = threshold.toISOString().split('T')[0];
+    const fromStr = threshold.toISOString();
 
-    const { data: salesData } = await supabaseAdmin.from('sale_items')
-      .select('medicine_id, quantity, sales!inner(sale_date)')
-      .eq('clinic_id', req.user!.clinic_id!)
-      .gte('sales.sale_date', fromStr);
-
+    // Get medicines that had zero sales in the period
     const solMap: Record<string, number> = {};
-    salesData?.forEach((s: any) => {
-       solMap[s.medicine_id] = (solMap[s.medicine_id] || 0) + s.quantity;
-    });
+    const salesData = queryRaw<{ medicine_id: string; quantity: number }>(
+      `SELECT si.medicine_id, si.quantity
+       FROM sale_items si
+       JOIN sales s ON s._local_id = si.sale_id
+       WHERE si._deleted=0 AND s._deleted=0 AND s.created_at>=?`,
+      [fromStr]
+    );
+    salesData.forEach(s => { solMap[s.medicine_id] = (solMap[s.medicine_id] || 0) + s.quantity; });
 
-    const { data: medicines } = await supabaseAdmin.from('medicines')
-      .select('id, name, medicine_stock(total_stock)')
-      .eq('clinic_id', req.user!.clinic_id!)
-      .eq('is_active', true);
+    const medicines = queryRaw<Record<string, any>>(
+      `SELECT m._local_id as id, m.name, COALESCE(SUM(mb.quantity_remaining), 0) as current_stock
+       FROM medicines m
+       LEFT JOIN medicine_batches mb ON mb.medicine_id = m._local_id AND mb._deleted=0
+       WHERE m._deleted=0 AND m.is_active=1
+       GROUP BY m._local_id`
+    );
 
-    const slow = [];
-    for (const m of (medicines || [])) {
-       const sold = solMap[m.id] || 0;
-       if (sold === 0) { // defined as zero or very low sales
-           const stock = m.medicine_stock?.[0]?.total_stock || 0;
-           slow.push({ id: m.id, name: m.name, sold, current_stock: stock });
-       }
-    }
+    const slow = medicines
+      .filter(m => (solMap[m.id] || 0) === 0 && Number(m.current_stock) > 0)
+      .map(m => ({ id: m.id, name: m.name, sold: 0, current_stock: Number(m.current_stock) }));
 
     res.json({ data: slow });
   } catch(err) {
@@ -345,7 +368,7 @@ reportsRouter.get('/slow-moving', requireAuth, async (req, res, next) => {
 });
 
 // GET /api/reports/gstr1-export?month=1&year=2025
-reportsRouter.get('/gstr1-export', requireAuth, async (req, res, next) => {
+reportsRouter.get('/gstr1-export', requireAuth, (req, res, next) => {
   try {
     const month = parseInt(req.query.month as string, 10);
     const year = parseInt(req.query.year as string, 10);
@@ -353,44 +376,42 @@ reportsRouter.get('/gstr1-export', requireAuth, async (req, res, next) => {
       return res.status(400).json({ error: { message: 'Valid month (1-12) and year required' } });
     }
 
-    const clinicId = req.user!.clinic_id!;
-    const start = new Date(Date.UTC(year, month - 1, 1, 0, 0, 0));
-    const end = new Date(Date.UTC(year, month, 0, 23, 59, 59, 999));
+    const start = new Date(Date.UTC(year, month - 1, 1, 0, 0, 0)).toISOString();
+    const end = new Date(Date.UTC(year, month, 0, 23, 59, 59, 999)).toISOString();
 
-    const { data: clinic, error: cErr } = await supabaseAdmin
-      .from('clinics')
-      .select('gstin')
-      .eq('id', clinicId)
-      .single();
-    if (cErr) throw cErr;
+    const clinic = queryOne('clinics', '1=1') as any;
 
-    const { data: salesRaw, error } = await supabaseAdmin
-      .from('sales')
-      .select(
-        `invoice_number, sale_date, net_amount,
-         customers(gstin),
-         sale_items(total, gst_rate, quantity, medicines(hsn_code, name))`
-      )
-      .eq('clinic_id', clinicId)
-      .eq('is_return', false)
-      .gte('sale_date', start.toISOString())
-      .lte('sale_date', end.toISOString());
+    const salesRaw = queryRaw<Record<string, any>>(
+      `SELECT s._local_id, s.invoice_number, s.created_at as sale_date, s.net_amount, c.gstin as customer_gstin
+       FROM sales s
+       LEFT JOIN customers c ON c._local_id = s.customer_id
+       WHERE s._deleted=0 AND s.is_return=0 AND s.created_at>=? AND s.created_at<=?`,
+      [start, end]
+    );
 
-    if (error) throw error;
+    const sales: SaleRowForGstr1[] = salesRaw.map(s => {
+      const items = queryRaw<Record<string, any>>(
+        `SELECT si.total, si.gst_rate, si.quantity, m.hsn_code, m.name as medicine_name
+         FROM sale_items si
+         LEFT JOIN medicines m ON m._local_id = si.medicine_id
+         WHERE si._deleted=0 AND si.sale_id=?`,
+        [s._local_id]
+      );
 
-    const sales: SaleRowForGstr1[] = (salesRaw || []).map((s: any) => ({
-      invoice_number: s.invoice_number,
-      sale_date: s.sale_date,
-      net_amount: Number(s.net_amount),
-      customer_gstin: s.customers?.gstin || null,
-      items: (s.sale_items || []).map((it: any) => ({
-        total: Number(it.total),
-        gst_rate: Number(it.gst_rate),
-        quantity: it.quantity,
-        hsn_code: it.medicines?.hsn_code || null,
-        medicine_name: it.medicines?.name || '',
-      })),
-    }));
+      return {
+        invoice_number: s.invoice_number,
+        sale_date: s.sale_date,
+        net_amount: Number(s.net_amount),
+        customer_gstin: s.customer_gstin || null,
+        items: items.map(it => ({
+          total: Number(it.total),
+          gst_rate: Number(it.gst_rate),
+          quantity: it.quantity,
+          hsn_code: it.hsn_code || null,
+          medicine_name: it.medicine_name || '',
+        })),
+      };
+    });
 
     const payload = buildGstr1Payload(clinic?.gstin || '', month, year, sales);
     res.json({ data: payload });

@@ -1,72 +1,61 @@
 import { Router } from 'express';
 import { requireAuth } from '../middleware/auth';
 import { requireRole } from '../middleware/rbac';
-import { supabaseAdmin } from '../config/supabase';
 import { createExpenseSchema, updateExpenseSchema } from '../schemas/expense.schema';
-import { auditLog } from '../services/auditLog';
+import { localMutate } from '../lib/localMutate';
+import { queryAll, queryRaw } from '../lib/localQuery';
 
 export const expensesRouter = Router();
 
 // GET /api/expenses/summary
-expensesRouter.get('/summary', requireAuth, async (req, res, next) => {
+expensesRouter.get('/summary', requireAuth, (req, res, next) => {
   try {
     const from = req.query.from as string;
     const to = req.query.to as string;
 
-    let query = supabaseAdmin
-      .from('expenses')
-      .select('category, amount')
-      .eq('clinic_id', req.user!.clinic_id!);
+    const conditions = ['_deleted=0'];
+    const values: any[] = [];
+    if (from) { conditions.push('expense_date>=?'); values.push(from); }
+    if (to) { conditions.push('expense_date<=?'); values.push(to); }
 
-    if (from) query = query.gte('expense_date', from);
-    if (to) query = query.lte('expense_date', to);
+    const rows = queryRaw<{ category: string; total: number; cnt: number }>(
+      `SELECT category, SUM(amount) as total, COUNT(*) as cnt FROM expenses WHERE ${conditions.join(' AND ')} GROUP BY category`,
+      values
+    );
 
-    const { data, error } = await query;
-    if (error) throw error;
+    const grand_total = rows.reduce((a, r) => a + Number(r.total), 0);
 
-    const grouped: Record<string, { category: string, total: number, count: number }> = {};
-    let grand_total = 0;
-
-    data?.forEach(e => {
-      if (!grouped[e.category]) {
-        grouped[e.category] = { category: e.category, total: 0, count: 0 };
-      }
-      grouped[e.category].total += Number(e.amount);
-      grouped[e.category].count += 1;
-      grand_total += Number(e.amount);
-    });
-
-    res.json({ data: { summary: Object.values(grouped), grand_total } });
+    res.json({ data: { summary: rows.map(r => ({ category: r.category, total: Number(r.total), count: Number(r.cnt) })), grand_total } });
   } catch (err) {
     next(err);
   }
 });
 
 // GET /api/expenses
-expensesRouter.get('/', requireAuth, async (req, res, next) => {
+expensesRouter.get('/', requireAuth, (req, res, next) => {
   try {
     const page = parseInt(req.query.page as string) || 1;
     const limit = Math.min(parseInt(req.query.limit as string) || 20, 100);
+
+    const conditions: string[] = [];
+    const values: any[] = [];
+    if (req.query.category) { conditions.push('category=?'); values.push(req.query.category); }
+    if (req.query.from) { conditions.push('expense_date>=?'); values.push(req.query.from); }
+    if (req.query.to) { conditions.push('expense_date<=?'); values.push(req.query.to); }
+    if (req.query.payment_mode) { conditions.push('payment_mode=?'); values.push(req.query.payment_mode); }
+
+    const where = conditions.length > 0 ? conditions.join(' AND ') : '';
+    const all = queryAll('expenses', where, values);
+
+    // Sort by date descending
+    all.sort((a: any, b: any) => String(b.expense_date ?? '').localeCompare(String(a.expense_date ?? '')));
+
     const offset = (page - 1) * limit;
-
-    let query = supabaseAdmin
-      .from('expenses')
-      .select('*', { count: 'exact' })
-      .eq('clinic_id', req.user!.clinic_id!)
-      .range(offset, offset + limit - 1)
-      .order('expense_date', { ascending: false });
-
-    if (req.query.category) query = query.eq('category', req.query.category);
-    if (req.query.from) query = query.gte('expense_date', req.query.from);
-    if (req.query.to) query = query.lte('expense_date', req.query.to);
-    if (req.query.payment_mode) query = query.eq('payment_mode', req.query.payment_mode);
-
-    const { data, error, count } = await query;
-    if (error) throw error;
+    const data = all.slice(offset, offset + limit);
 
     res.json({
       data,
-      pagination: { page, limit, total: count || 0, totalPages: Math.ceil((count || 0) / limit) }
+      pagination: { page, limit, total: all.length, totalPages: Math.ceil(all.length / limit) }
     });
   } catch (err) {
     next(err);
@@ -74,20 +63,12 @@ expensesRouter.get('/', requireAuth, async (req, res, next) => {
 });
 
 // POST /api/expenses
-expensesRouter.post('/', requireAuth, requireRole('OWNER', 'PHARMACIST'), async (req, res, next) => {
+expensesRouter.post('/', requireAuth, requireRole('OWNER', 'PHARMACIST'), (req, res, next) => {
   try {
     const parsed = createExpenseSchema.parse(req.body);
     const payload = { ...parsed, clinic_id: req.user!.clinic_id!, recorded_by: req.user!.id };
 
-    const { data, error } = await supabaseAdmin
-      .from('expenses')
-      .insert(payload)
-      .select()
-      .single();
-
-    if (error) throw error;
-
-    await auditLog({ clinicId: req.user!.clinic_id!, userId: req.user!.id, action: 'CREATE', table: 'expenses', newData: data });
+    const data = localMutate({ table: 'expenses', operation: 'INSERT', data: payload });
 
     res.status(201).json({ data });
   } catch (err) {
@@ -96,21 +77,11 @@ expensesRouter.post('/', requireAuth, requireRole('OWNER', 'PHARMACIST'), async 
 });
 
 // PUT /api/expenses/:id
-expensesRouter.put('/:id', requireAuth, requireRole('OWNER'), async (req, res, next) => {
+expensesRouter.put('/:id', requireAuth, requireRole('OWNER'), (req, res, next) => {
   try {
     const parsed = updateExpenseSchema.parse(req.body);
 
-    const { data, error } = await supabaseAdmin
-      .from('expenses')
-      .update(parsed)
-      .eq('id', req.params.id)
-      .eq('clinic_id', req.user!.clinic_id!)
-      .select()
-      .single();
-
-    if (error) throw error;
-
-    await auditLog({ clinicId: req.user!.clinic_id!, userId: req.user!.id, action: 'UPDATE', table: 'expenses', newData: data, recordId: req.params.id });
+    const data = localMutate({ table: 'expenses', operation: 'UPDATE', data: { ...parsed, _local_id: req.params.id } });
 
     res.json({ data });
   } catch (err) {
@@ -119,17 +90,9 @@ expensesRouter.put('/:id', requireAuth, requireRole('OWNER'), async (req, res, n
 });
 
 // DELETE /api/expenses/:id
-expensesRouter.delete('/:id', requireAuth, requireRole('OWNER'), async (req, res, next) => {
+expensesRouter.delete('/:id', requireAuth, requireRole('OWNER'), (req, res, next) => {
   try {
-    const { error } = await supabaseAdmin
-      .from('expenses')
-      .delete()
-      .eq('id', req.params.id)
-      .eq('clinic_id', req.user!.clinic_id!);
-
-    if (error) throw error;
-
-    await auditLog({ clinicId: req.user!.clinic_id!, userId: req.user!.id, action: 'DELETE', table: 'expenses', recordId: req.params.id });
+    localMutate({ table: 'expenses', operation: 'DELETE', data: { _local_id: req.params.id } });
 
     res.json({ success: true });
   } catch (err) {

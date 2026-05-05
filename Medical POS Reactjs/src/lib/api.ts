@@ -36,10 +36,18 @@ api.interceptors.response.use(
   (res) => res,
   async (err: AxiosError) => {
     if (err.response?.status === 401) {
-      await supabase.auth.signOut();
-      if (typeof window !== 'undefined' && !window.location.pathname.startsWith('/login')) {
-        window.location.href = '/login';
+      console.warn('Backend returned 401 Unauthorized. Auto-logout disabled to prevent login loops.');
+      // Ignore 401s from subscription or auth/me endpoints to prevent sign-out loops
+      const url = err.config?.url || '';
+      if (url.includes('/subscriptions/current') || url.includes('/auth/me')) {
+        return Promise.reject(err);
       }
+
+      // TEMPORARY: Disabled hard logout on 401 to prevent login loops when backend auth is out of sync.
+      // await supabase.auth.signOut();
+      // if (typeof window !== 'undefined' && !window.location.pathname.startsWith('/login')) {
+      //   window.location.href = '/login';
+      // }
     }
     return Promise.reject(err);
   },

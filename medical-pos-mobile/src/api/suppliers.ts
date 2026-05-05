@@ -1,5 +1,6 @@
-import { apiClient, extractPaginated, type ApiPagination } from './client';
-import type { AxiosResponse } from 'axios';
+import { queryAll, queryOne } from '../lib/localQuery';
+import { localMutate } from '../lib/localMutate';
+import type { ApiPagination } from './client';
 
 export type { ApiPagination };
 
@@ -51,13 +52,9 @@ export interface SupplierOutstandingData {
 
 /* ─── Helpers ───────────────────────────────────────── */
 
-function extract<T>(res: AxiosResponse<{ data: T }>): T {
-  return res.data.data;
-}
-
 function normalizeSupplierRow(raw: Record<string, unknown>): Supplier {
   return {
-    id: String(raw.id ?? ''),
+    id: String(raw.id ?? raw._local_id ?? ''),
     name: String(raw.name ?? ''),
     phone: raw.phone != null ? String(raw.phone) : '',
     email: raw.email != null ? String(raw.email) : '',
@@ -65,30 +62,7 @@ function normalizeSupplierRow(raw: Record<string, unknown>): Supplier {
     drugLicenceNumber: raw.drug_licence_number != null ? String(raw.drug_licence_number) : '',
     address: raw.address != null ? String(raw.address) : '',
     outstandingBalance: Number(raw.outstanding_balance ?? 0),
-    createdAt: String(raw.created_at ?? ''),
-  };
-}
-
-interface OutstandingBackend {
-  outstanding_balance: number;
-  purchases?: Array<{
-    id: string;
-    invoice_number?: string | null;
-    invoice_date?: string | null;
-    net_amount?: number | string | null;
-  }>;
-}
-
-function normalizeOutstanding(raw: OutstandingBackend): SupplierOutstandingData {
-  const purchases = raw.purchases ?? [];
-  return {
-    totalOutstanding: Number(raw.outstanding_balance ?? 0),
-    bills: purchases.map((p) => ({
-      purchaseId: String(p.id ?? ''),
-      billNumber: String(p.invoice_number ?? ''),
-      amount: Number(p.net_amount ?? 0),
-      dueDate: String(p.invoice_date ?? ''),
-    })),
+    createdAt: String(raw.created_at ?? raw._updated_at ?? ''),
   };
 }
 
@@ -96,35 +70,77 @@ function normalizeOutstanding(raw: OutstandingBackend): SupplierOutstandingData 
 
 export const suppliersApi = {
   getSuppliers: async (params?: SupplierParams): Promise<PaginatedSuppliers> => {
-    const res = await apiClient.get<{ data: Record<string, unknown>[]; pagination: ApiPagination }>('/suppliers', {
-      params,
-    });
-    const { data, pagination } = extractPaginated(res);
-    return { data: data.map((row) => normalizeSupplierRow(row as Record<string, unknown>)), pagination };
+    const conditions: string[] = [];
+    const values: any[] = [];
+
+    if (params?.q) {
+      conditions.push('name LIKE ?');
+      values.push(`%${params.q}%`);
+    }
+
+    const where = conditions.length > 0 ? conditions.join(' AND ') : '';
+    const rows = await queryAll<Record<string, unknown>>('suppliers', where, values);
+
+    rows.sort((a, b) => String(a.name ?? '').localeCompare(String(b.name ?? '')));
+
+    const page = params?.page ?? 1;
+    const limit = 20;
+    const offset = (page - 1) * limit;
+    const paged = rows.slice(offset, offset + limit);
+
+    return {
+      data: paged.map(normalizeSupplierRow),
+      pagination: { page, limit, total: rows.length, totalPages: Math.ceil(rows.length / limit) },
+    };
   },
 
   getSupplier: async (id: string): Promise<Supplier> => {
-    const res = await apiClient.get<{ data: Record<string, unknown> }>(`/suppliers/${id}`);
-    return normalizeSupplierRow(extract(res) as Record<string, unknown>);
+    const row = await queryOne<Record<string, unknown>>('suppliers', '_local_id=? OR id=?', [id, id]);
+    if (!row) throw new Error('Supplier not found');
+    return normalizeSupplierRow(row);
   },
 
   createSupplier: async (body: CreateSupplierBody): Promise<Supplier> => {
-    const res = await apiClient.post<{ data: Record<string, unknown> }>('/suppliers', body);
-    return normalizeSupplierRow(extract(res) as Record<string, unknown>);
+    const record = await localMutate({ table: 'suppliers', operation: 'INSERT', data: body });
+    return normalizeSupplierRow(record as Record<string, unknown>);
   },
 
   updateSupplier: async (id: string, body: UpdateSupplierBody): Promise<Supplier> => {
-    const res = await apiClient.put<{ data: Record<string, unknown> }>(`/suppliers/${id}`, body);
-    return normalizeSupplierRow(extract(res) as Record<string, unknown>);
+    const existing = await queryOne<Record<string, unknown>>('suppliers', '_local_id=? OR id=?', [id, id]);
+    const record = await localMutate({ table: 'suppliers', operation: 'UPDATE', data: { ...(existing ?? {}), ...body, _local_id: id } });
+    return normalizeSupplierRow(record as Record<string, unknown>);
   },
 
   getSupplierOutstanding: async (id: string): Promise<SupplierOutstandingData> => {
-    const res = await apiClient.get<{ data: OutstandingBackend }>(`/suppliers/${id}/outstanding`);
-    return normalizeOutstanding(extract(res));
+    const supp = await queryOne<Record<string, unknown>>('suppliers', '_local_id=? OR id=?', [id, id]);
+    const totalOutstanding = Number(supp?.outstanding_balance ?? 0);
+
+    const suppId = supp?._local_id ?? supp?.id ?? id;
+    const purchases = await queryAll<Record<string, unknown>>(
+      'purchases',
+      'supplier_id=? AND payment_status!=?',
+      [suppId as string, 'paid']
+    );
+
+    return {
+      totalOutstanding,
+      bills: purchases.map(p => ({
+        purchaseId: String(p.id ?? p._local_id ?? ''),
+        billNumber: String(p.invoice_number ?? ''),
+        amount: Number(p.net_amount ?? 0),
+        dueDate: String(p.invoice_date ?? ''),
+      })),
+    };
   },
 
   recordSupplierPayment: async (id: string, amount: number): Promise<Supplier> => {
-    const res = await apiClient.post<{ data: Record<string, unknown> }>(`/suppliers/${id}/payment`, { amount });
-    return normalizeSupplierRow(extract(res) as Record<string, unknown>);
+    const existing = await queryOne<Record<string, unknown>>('suppliers', '_local_id=? OR id=?', [id, id]);
+    const currentBalance = Number(existing?.outstanding_balance ?? 0);
+    const record = await localMutate({
+      table: 'suppliers',
+      operation: 'UPDATE',
+      data: { outstanding_balance: currentBalance - amount, _local_id: id }
+    });
+    return normalizeSupplierRow(record as Record<string, unknown>);
   },
 } as const;

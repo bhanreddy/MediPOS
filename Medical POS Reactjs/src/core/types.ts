@@ -4,10 +4,16 @@ export type ISODateTime = string; // ISO 8601
 
 // Common interface for ALL mutable tables
 export interface BaseEntity {
-    id: UUID;
+    id: UUID;                // Also serves as _local_id (client-generated UUID)
     created_at: ISODateTime;
     updated_at: ISODateTime;
-    last_modified: number; // For sync tracking
+    last_modified: number;   // Legacy — kept for backward compat
+    // ── Offline-First Sync Columns ──
+    _local_id?: UUID;         // Client-generated UUID, primary key for local ops
+    _synced?: 0 | 1;          // 0 = unsynced, 1 = synced
+    _deleted?: 0 | 1;         // Soft-delete flag (NEVER hard delete)
+    _updated_at?: ISODateTime; // ISO timestamp of last local mutation
+    server_id?: UUID | null;  // Server-side UUID (from Supabase)
 }
 
 // 1. users
@@ -179,14 +185,16 @@ export interface AppSetting extends BaseEntity {
     group: string;
 }
 
-// 14. sync_queue
-export interface SyncQueueItem extends BaseEntity {
+// 14. sync_queue (offline-first mutation queue)
+export interface SyncQueueItem {
+    id: UUID;                // Queue entry ID
     table_name: string;
-    record_id: UUID;
-    action: 'CREATE' | 'UPDATE' | 'DELETE';
-    status: 'PENDING' | 'SYNCED' | 'FAILED';
+    record_id: UUID;         // _local_id of the mutated record
+    operation: 'INSERT' | 'UPDATE' | 'DELETE';
+    payload: string;         // JSON stringified row data
     retry_count: number;
-    error_message?: string;
+    created_at: ISODateTime;
+    status: 'pending' | 'failed' | 'done' | 'manual_review';
 }
 
 // 15. shop_profile (Local Cache of Online Identity)

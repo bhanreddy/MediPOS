@@ -56,10 +56,8 @@ export async function fetchSubscriptionStatus(): Promise<SubscriptionStatusRespo
       subscription_id: sub.id,
     };
   } catch (err: unknown) {
-    const status = (err as { response?: { status?: number } })?.response?.status;
-    if (status === 401 || status === 404) {
-      return { status: 'none', plan: null, expires_at: null, subscription_id: null };
-    }
-    throw err;
+    // Subscription managed manually via SuperAdmin — ignore errors, allow access
+    console.warn("[Subscription] Status check skipped:", err);
+    return { status: 'none', plan: null, expires_at: null, subscription_id: null };
   }
 }

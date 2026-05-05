@@ -4,6 +4,7 @@ import morgan from 'morgan';
 import dotenv from 'dotenv';
 import { routes } from './routes';
 import { v1Router } from './v1';
+import { localDb } from './local-db';
 import { publicRouter } from './routes/public';
 import { errorHandler } from './middleware/errorHandler';
 import { helmetConfig, authRateLimit, apiRateLimit, sanitizeInput, validateUUID } from './middleware/security';
@@ -62,3 +63,5 @@ export function createApp(): express.Application {
 
   return app;
 }
+
+export { localDb };

@@ -3,8 +3,8 @@ import { requireAuth } from '../middleware/auth';
 import { requireRole } from '../middleware/rbac';
 import { supabaseAdmin } from '../config/supabase';
 import { createPurchaseSchema, updatePaymentSchema, csvRowSchema } from '../schemas/purchase.schema';
-import { restockBatch } from '../services/stockLedger';
-import { auditLog } from '../services/auditLog';
+import { localMutate } from '../lib/localMutate';
+import { queryAll, queryOne } from '../lib/localQuery';
 import multer from 'multer';
 import Anthropic from '@anthropic-ai/sdk';
 import { parse as parseCsv } from 'csv-parse/sync';
@@ -13,7 +13,7 @@ export const purchasesRouter = Router();
 const upload = multer({ storage: multer.memoryStorage() });
 
 // GET /api/purchases
-purchasesRouter.get('/', requireAuth, async (req, res, next) => {
+purchasesRouter.get('/', requireAuth, (req, res, next) => {
   try {
     const page = parseInt(req.query.page as string) || 1;
     const limit = Math.min(parseInt(req.query.limit as string) || 20, 100);
@@ -21,26 +21,34 @@ purchasesRouter.get('/', requireAuth, async (req, res, next) => {
     const from = req.query.from as string;
     const to = req.query.to as string;
     const status = req.query.status as string;
+
+    const conditions: string[] = [];
+    const values: any[] = [];
+
+    if (supplier_id) { conditions.push('supplier_id=?'); values.push(supplier_id); }
+    if (status) { conditions.push('payment_status=?'); values.push(status); }
+    if (from) { conditions.push('created_at>=?'); values.push(from); }
+    if (to) { conditions.push('created_at<=?'); values.push(to); }
+
+    const where = conditions.length > 0 ? conditions.join(' AND ') : '';
+    const all = queryAll('purchases', where, values);
+
+    all.sort((a: any, b: any) => String(b.created_at ?? '').localeCompare(String(a.created_at ?? '')));
+
+    // Attach supplier name
+    for (const p of all) {
+      if ((p as any).supplier_id) {
+        const supp = queryOne('suppliers', '_local_id=? OR id=?', [(p as any).supplier_id, (p as any).supplier_id]);
+        (p as any).suppliers = { name: (supp as any)?.name ?? '' };
+      }
+    }
+
     const offset = (page - 1) * limit;
-
-    let query = supabaseAdmin
-      .from('purchases')
-      .select('*, suppliers(name)', { count: 'exact' })
-      .eq('clinic_id', req.user!.clinic_id!)
-      .range(offset, offset + limit - 1)
-      .order('created_at', { ascending: false });
-
-    if (supplier_id) query = query.eq('supplier_id', supplier_id);
-    if (status) query = query.eq('payment_status', status);
-    if (from) query = query.gte('invoice_date', from);
-    if (to) query = query.lte('invoice_date', to);
-
-    const { data, error, count } = await query;
-    if (error) throw error;
+    const data = all.slice(offset, offset + limit);
 
     res.json({
       data,
-      pagination: { page, limit, total: count || 0, totalPages: Math.ceil((count || 0) / limit) },
+      pagination: { page, limit, total: all.length, totalPages: Math.ceil(all.length / limit) },
     });
   } catch (err) {
     next(err);
@@ -48,24 +56,30 @@ purchasesRouter.get('/', requireAuth, async (req, res, next) => {
 });
 
 // GET /api/purchases/:id
-purchasesRouter.get('/:id', requireAuth, async (req, res, next) => {
+purchasesRouter.get('/:id', requireAuth, (req, res, next) => {
   try {
-    const { data: purchase, error } = await supabaseAdmin
-      .from('purchases')
-      .select('*, purchase_items(*, medicines(name, generic_name))')
-      .eq('id', req.params.id)
-      .eq('clinic_id', req.user!.clinic_id!)
-      .single();
+    const purchase = queryOne('purchases', '_local_id=? OR id=?', [req.params.id, req.params.id]);
+    if (!purchase) return res.status(404).json({ error: 'Purchase not found' });
 
-    if (error) throw error;
-    res.json({ data: purchase });
+    const purchaseId = (purchase as any)._local_id;
+    const purchaseItems = queryAll('purchase_items', 'purchase_id=?', [purchaseId]);
+
+    // Attach medicine names
+    for (const item of purchaseItems) {
+      if ((item as any).medicine_id) {
+        const med = queryOne('medicines', '_local_id=? OR id=?', [(item as any).medicine_id, (item as any).medicine_id]);
+        (item as any).medicines = { name: (med as any)?.name ?? '', generic_name: (med as any)?.generic_name ?? '' };
+      }
+    }
+
+    res.json({ data: { ...purchase, purchase_items: purchaseItems } });
   } catch (err) {
     next(err);
   }
 });
 
 // POST /api/purchases
-purchasesRouter.post('/', requireAuth, requireRole('OWNER'), async (req, res, next) => {
+purchasesRouter.post('/', requireAuth, requireRole('OWNER'), (req, res, next) => {
   try {
     const parsed = createPurchaseSchema.parse(req.body);
     
@@ -78,12 +92,13 @@ purchasesRouter.post('/', requireAuth, requireRole('OWNER'), async (req, res, ne
       gst_amount += (item.quantity * item.purchase_price * item.gst_rate) / 100;
     }
 
-    const net_amount = subtotal - 0 + gst_amount; // assuming no bill-level discount field on schema, fallback to 0
+    const net_amount = subtotal - 0 + gst_amount;
 
-    // Insert purchase
-    const { data: purchase, error: pErr } = await supabaseAdmin
-      .from('purchases')
-      .insert({
+    // Insert purchase locally
+    const purchase = localMutate({
+      table: 'purchases',
+      operation: 'INSERT',
+      data: {
         clinic_id: req.user!.clinic_id!,
         supplier_id: parsed.supplier_id || null,
         invoice_number: parsed.invoice_number,
@@ -97,61 +112,58 @@ purchasesRouter.post('/', requireAuth, requireRole('OWNER'), async (req, res, ne
         payment_status: 'unpaid',
         paid_amount: 0,
         created_by: req.user!.id
-      })
-      .select()
-      .single();
+      }
+    });
 
-    if (pErr) throw pErr;
-
-    // Process items & restock
-    const pItemsToInsert = [];
+    // Insert purchase items + update batch stock
     for (const item of parsed.items) {
-      const batchId = await restockBatch({
-        medicine_id: item.medicine_id,
-        supplier_id: parsed.supplier_id,
-        purchase_id: purchase.id,
-        batch_number: item.batch_number,
-        expiry_date: item.expiry_date,
-        quantity: item.quantity,
-        purchase_price: item.purchase_price,
-        mrp: item.mrp
-      }, req.user!.clinic_id!, supabaseAdmin);
-
-      pItemsToInsert.push({
-        clinic_id: req.user!.clinic_id!,
-        purchase_id: purchase.id,
-        medicine_id: item.medicine_id,
-        batch_id: batchId,
-        batch_number: item.batch_number,
-        expiry_date: item.expiry_date,
-        quantity: item.quantity,
-        purchase_price: item.purchase_price,
-        mrp: item.mrp,
-        gst_rate: item.gst_rate,
-        discount: item.discount,
-        total: item.quantity * item.purchase_price * (1 - item.discount / 100)
+      localMutate({
+        table: 'purchase_items',
+        operation: 'INSERT',
+        data: {
+          clinic_id: req.user!.clinic_id!,
+          purchase_id: purchase._local_id,
+          medicine_id: item.medicine_id,
+          batch_number: item.batch_number,
+          expiry_date: item.expiry_date,
+          quantity: item.quantity,
+          purchase_price: item.purchase_price,
+          mrp: item.mrp,
+          gst_rate: item.gst_rate,
+          discount: item.discount,
+          total: item.quantity * item.purchase_price * (1 - item.discount / 100)
+        }
       });
-    }
 
-    const { error: piErr } = await supabaseAdmin.from('purchase_items').insert(pItemsToInsert);
-    if (piErr) throw piErr;
-
-    // Update supplier
-    if (parsed.supplier_id) {
-      const { data: supp } = await supabaseAdmin
-        .from('suppliers')
-        .select('outstanding_balance')
-        .eq('id', parsed.supplier_id)
-        .single();
-      
-      if (supp) {
-        await supabaseAdmin.from('suppliers')
-          .update({ outstanding_balance: Number(supp.outstanding_balance) + net_amount })
-          .eq('id', parsed.supplier_id);
+      // Increment stock on batch
+      const existingBatch = queryOne('medicine_batches', 'medicine_id=? AND batch_number=?', [item.medicine_id, item.batch_number]);
+      if (existingBatch) {
+        localMutate({
+          table: 'medicine_batches',
+          operation: 'UPDATE',
+          data: {
+            _local_id: (existingBatch as any)._local_id,
+            quantity_remaining: Number((existingBatch as any).quantity_remaining ?? 0) + item.quantity,
+          }
+        });
+      } else {
+        localMutate({
+          table: 'medicine_batches',
+          operation: 'INSERT',
+          data: {
+            clinic_id: req.user!.clinic_id!,
+            medicine_id: item.medicine_id,
+            purchase_id: purchase._local_id,
+            batch_number: item.batch_number,
+            expiry_date: item.expiry_date,
+            quantity_in: item.quantity,
+            quantity_remaining: item.quantity,
+            purchase_price: item.purchase_price,
+            mrp: item.mrp,
+          }
+        });
       }
     }
-
-    await auditLog({ clinicId: req.user!.clinic_id!, userId: req.user!.id, action: 'CREATE', table: 'purchases', newData: purchase });
 
     res.status(201).json({ data: purchase });
   } catch (err) {
@@ -160,20 +172,15 @@ purchasesRouter.post('/', requireAuth, requireRole('OWNER'), async (req, res, ne
 });
 
 // PUT /api/purchases/:id
-purchasesRouter.put('/:id', requireAuth, requireRole('OWNER'), async (req, res, next) => {
+purchasesRouter.put('/:id', requireAuth, requireRole('OWNER'), (req, res, next) => {
   try {
     const { invoice_number, invoice_date, notes } = req.body;
     
-    const { data, error } = await supabaseAdmin
-      .from('purchases')
-      .update({ invoice_number, invoice_date, notes })
-      .eq('id', req.params.id)
-      .eq('clinic_id', req.user!.clinic_id!)
-      .select()
-      .single();
-
-    if (error) throw error;
-    await auditLog({ clinicId: req.user!.clinic_id!, userId: req.user!.id, action: 'UPDATE', table: 'purchases', newData: data, recordId: req.params.id });
+    const data = localMutate({
+      table: 'purchases',
+      operation: 'UPDATE',
+      data: { invoice_number, invoice_date, notes, _local_id: req.params.id }
+    });
 
     res.json({ data });
   } catch (err) {
@@ -182,47 +189,23 @@ purchasesRouter.put('/:id', requireAuth, requireRole('OWNER'), async (req, res, 
 });
 
 // PATCH /api/purchases/:id/payment
-purchasesRouter.patch('/:id/payment', requireAuth, requireRole('OWNER'), async (req, res, next) => {
+purchasesRouter.patch('/:id/payment', requireAuth, requireRole('OWNER'), (req, res, next) => {
   try {
     const parsed = updatePaymentSchema.parse(req.body);
 
-    const { data: oldPurchase, error: oldPErr } = await supabaseAdmin
-      .from('purchases')
-      .select('paid_amount, net_amount, supplier_id')
-      .eq('id', req.params.id)
-      .eq('clinic_id', req.user!.clinic_id!)
-      .single();
+    const data = localMutate({
+      table: 'purchases',
+      operation: 'UPDATE',
+      data: { paid_amount: parsed.paid_amount, payment_status: parsed.payment_status, _local_id: req.params.id }
+    });
 
-    if (oldPErr) throw oldPErr;
-
-    const { data, error } = await supabaseAdmin
-      .from('purchases')
-      .update({ paid_amount: parsed.paid_amount, payment_status: parsed.payment_status })
-      .eq('id', req.params.id)
-      .select()
-      .single();
-
-    if (error) throw error;
-
-    // Recalculate supplier delta if supplier exists
-    if (oldPurchase.supplier_id) {
-      const differencePaid = parsed.paid_amount - Number(oldPurchase.paid_amount);
-      const { data: supp } = await supabaseAdmin.from('suppliers').select('outstanding_balance').eq('id', oldPurchase.supplier_id).single();
-      if (supp) {
-        await supabaseAdmin.from('suppliers')
-          .update({ outstanding_balance: Number(supp.outstanding_balance) - differencePaid })
-          .eq('id', oldPurchase.supplier_id);
-      }
-    }
-
-    await auditLog({ clinicId: req.user!.clinic_id!, userId: req.user!.id, action: 'PAYMENT_UPDATE', table: 'purchases', newData: data, oldData: oldPurchase, recordId: req.params.id });
     res.json({ data });
   } catch (err) {
     next(err);
   }
 });
 
-// POST /api/purchases/bill-scan
+// POST /api/purchases/bill-scan (requires network — Anthropic AI)
 purchasesRouter.post('/bill-scan', requireAuth, async (req, res, next) => {
   try {
     const { imageBase64, mimeType } = req.body;
@@ -280,7 +263,7 @@ purchasesRouter.post('/bill-scan', requireAuth, async (req, res, next) => {
 });
 
 // POST /api/purchases/import-csv
-purchasesRouter.post('/import-csv', requireAuth, requireRole('OWNER'), upload.single('file'), async (req, res, next) => {
+purchasesRouter.post('/import-csv', requireAuth, requireRole('OWNER'), upload.single('file'), (req, res, next) => {
   try {
     if (!req.file) return res.status(400).json({ error: 'No CSV file uploaded' });
 
@@ -299,38 +282,35 @@ purchasesRouter.post('/import-csv', requireAuth, requireRole('OWNER'), upload.si
         const lastDay = new Date(Number(yyyy), Number(mm), 0).getDate();
         const expiryIso = `${yyyy}-${mm.padStart(2, '0')}-${lastDay.toString().padStart(2, '0')}`;
 
-        // Find or create medicine
-        let medicineId;
-        const { data: existMed } = await supabaseAdmin.from('medicines').select('id').eq('clinic_id', req.user!.clinic_id!).ilike('name', validated.medicine_name).single();
-        
-        if (existMed) {
-          medicineId = existMed.id;
-        } else {
-          const { data: newMed, error: mErr } = await supabaseAdmin.from('medicines').insert({
+        // Create medicine locally
+        const med = localMutate({
+          table: 'medicines',
+          operation: 'INSERT',
+          data: {
             clinic_id: req.user!.clinic_id!,
             name: validated.medicine_name,
             generic_name: validated.generic_name || null,
             manufacturer: validated.manufacturer || null,
-            gst_rate: validated.gst_rate
-          }).select('id').single();
-          if (mErr) throw mErr;
-          medicineId = newMed.id;
-        }
+            gst_rate: validated.gst_rate,
+            is_active: 1,
+          }
+        });
 
-        // Dummy insert into purchases or use a default CSV imported purchase ID
-        // Note: The spec asks to find/create medicine, restock batch.
-        // Restocking a batch without a purchase requires purchase_id to be nullable or create a generic one.
-        // Assuming we just append to generic import.
-        
-        await restockBatch({
-          medicine_id: medicineId,
-          purchase_id: null as any, // Warning: DB enforces FK or nullable. The schema says purchase_id FK but can we skip? Schema says purchase_id `uuid` (no NOT NULL). So null is fine!
-          batch_number: validated.batch_number,
-          expiry_date: expiryIso,
-          quantity: validated.quantity,
-          purchase_price: validated.purchase_price,
-          mrp: validated.mrp
-        }, req.user!.clinic_id!, supabaseAdmin);
+        // Create batch locally
+        localMutate({
+          table: 'medicine_batches',
+          operation: 'INSERT',
+          data: {
+            clinic_id: req.user!.clinic_id!,
+            medicine_id: med._local_id,
+            batch_number: validated.batch_number,
+            expiry_date: expiryIso,
+            quantity_received: validated.quantity,
+            quantity_remaining: validated.quantity,
+            purchase_price: validated.purchase_price,
+            mrp: validated.mrp,
+          }
+        });
 
         success++;
       } catch (e: any) {

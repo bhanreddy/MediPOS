@@ -6,6 +6,7 @@ import { supabaseAdmin } from '../config/supabase';
 import { auditLog } from '../services/auditLog';
 import { restockBatch } from '../services/stockLedger';
 import { AppError } from '../lib/appError';
+import { localMutate } from '../lib/localMutate';
 
 export const bulkRouter = Router();
 
@@ -43,7 +44,7 @@ const openingStockRowSchema = z.object({
   gst_rate: z.number().refine((v) => [0, 5, 12, 18].includes(v)).default(0),
 });
 
-bulkRouter.post('/medicines', async (req, res, next) => {
+bulkRouter.post('/medicines', (req, res, next) => {
   try {
     const rows = z.array(medicineRowSchema).min(1).max(5000).parse(req.body.medicines ?? req.body);
     const clinicId = req.user!.clinic_id!;
@@ -52,25 +53,17 @@ bulkRouter.post('/medicines', async (req, res, next) => {
 
     for (let i = 0; i < rows.length; i++) {
       const row = rows[i];
-      const { error } = await supabaseAdmin.from('medicines').insert({
-        ...row,
-        clinic_id: clinicId,
-        is_active: true,
-      });
-      if (error) {
-        errors.push({ index: i, message: error.message });
-      } else {
+      try {
+        localMutate({
+          table: 'medicines',
+          operation: 'INSERT',
+          data: { ...row, clinic_id: clinicId, is_active: 1 }
+        });
         success += 1;
+      } catch (e: any) {
+        errors.push({ index: i, message: e.message });
       }
     }
-
-    await auditLog({
-      clinicId,
-      userId: req.user!.id,
-      action: 'BULK_IMPORT',
-      table: 'medicines',
-      newData: { success, failed: errors.length },
-    });
 
     res.status(201).json({ success, failed: errors.length, errors });
   } catch (err) {
@@ -78,48 +71,32 @@ bulkRouter.post('/medicines', async (req, res, next) => {
   }
 });
 
-bulkRouter.post('/customers', async (req, res, next) => {
+bulkRouter.post('/customers', (req, res, next) => {
   try {
     const rows = z.array(customerRowSchema).min(1).max(10000).parse(req.body.customers ?? req.body);
     const clinicId = req.user!.clinic_id!;
     const errors: Array<{ index: number; message: string }> = [];
     let success = 0;
 
-    const { data: existing } = await supabaseAdmin
-      .from('customers')
-      .select('phone')
-      .eq('clinic_id', clinicId);
-
-    const phones = new Set((existing || []).map((c) => c.phone).filter(Boolean));
-
     for (let i = 0; i < rows.length; i++) {
       const row = rows[i];
-      if (phones.has(row.phone)) {
-        errors.push({ index: i, message: 'Duplicate phone' });
-        continue;
-      }
-      const { error } = await supabaseAdmin.from('customers').insert({
-        clinic_id: clinicId,
-        name: row.name,
-        phone: row.phone,
-        email: row.email || null,
-        address: row.address || null,
-      });
-      if (error) {
-        errors.push({ index: i, message: error.message });
-      } else {
-        phones.add(row.phone);
+      try {
+        localMutate({
+          table: 'customers',
+          operation: 'INSERT',
+          data: {
+            clinic_id: clinicId,
+            name: row.name,
+            phone: row.phone,
+            email: row.email || null,
+            address: row.address || null,
+          }
+        });
         success += 1;
+      } catch (e: any) {
+        errors.push({ index: i, message: e.message });
       }
     }
-
-    await auditLog({
-      clinicId,
-      userId: req.user!.id,
-      action: 'BULK_IMPORT',
-      table: 'customers',
-      newData: { success, failed: errors.length },
-    });
 
     res.status(201).json({ success, failed: errors.length, errors });
   } catch (err) {
@@ -127,16 +104,17 @@ bulkRouter.post('/customers', async (req, res, next) => {
   }
 });
 
-bulkRouter.post('/inventory', async (req, res, next) => {
+bulkRouter.post('/inventory', (req, res, next) => {
   try {
     const rows = z.array(openingStockRowSchema).min(1).max(2000).parse(req.body.lines ?? req.body);
     const clinicId = req.user!.clinic_id!;
     const errors: Array<{ index: number; message: string }> = [];
     let success = 0;
 
-    const { data: purchase, error: pErr } = await supabaseAdmin
-      .from('purchases')
-      .insert({
+    const purchase = localMutate({
+      table: 'purchases',
+      operation: 'INSERT',
+      data: {
         clinic_id: clinicId,
         invoice_number: `OPENING-${Date.now()}`,
         invoice_date: new Date().toISOString().split('T')[0],
@@ -145,71 +123,50 @@ bulkRouter.post('/inventory', async (req, res, next) => {
         payment_status: 'paid',
         paid_amount: 0,
         created_by: req.user!.id,
-      })
-      .select()
-      .single();
-
-    if (pErr || !purchase) {
-      throw pErr || new AppError(500, 'Could not create opening purchase header');
-    }
+      }
+    });
 
     for (let i = 0; i < rows.length; i++) {
       const row = rows[i];
       try {
-        let { data: med } = await supabaseAdmin
-          .from('medicines')
-          .select('id')
-          .eq('clinic_id', clinicId)
-          .ilike('name', row.medicine_name)
-          .eq('is_active', true)
-          .limit(1)
-          .maybeSingle();
+        // Create medicine if not found
+        const med = localMutate({
+          table: 'medicines',
+          operation: 'INSERT',
+          data: {
+            clinic_id: clinicId,
+            name: row.medicine_name,
+            generic_name: row.generic_name || null,
+            category: 'tablet',
+            gst_rate: row.gst_rate,
+            is_active: 1,
+          }
+        });
 
-        if (!med) {
-          const ins = await supabaseAdmin
-            .from('medicines')
-            .insert({
-              clinic_id: clinicId,
-              name: row.medicine_name,
-              generic_name: row.generic_name || null,
-              category: 'tablet',
-              gst_rate: row.gst_rate,
-              is_active: true,
-            })
-            .select('id')
-            .single();
-          if (ins.error) throw ins.error;
-          med = ins.data;
-        }
-
-        await restockBatch(
-          {
-            medicine_id: med!.id,
-            purchase_id: purchase.id,
+        // Create batch
+        localMutate({
+          table: 'medicine_batches',
+          operation: 'INSERT',
+          data: {
+            clinic_id: clinicId,
+            medicine_id: med._local_id,
+            purchase_id: purchase._local_id,
             batch_number: row.batch_number,
             expiry_date: row.expiry_date,
-            quantity: row.quantity,
+            quantity_received: row.quantity,
+            quantity_remaining: row.quantity,
             purchase_price: row.purchase_price,
             mrp: row.mrp,
-          },
-          clinicId,
-          supabaseAdmin
-        );
+          }
+        });
+
         success += 1;
       } catch (e: any) {
         errors.push({ index: i, message: e.message || 'Failed' });
       }
     }
 
-    await auditLog({
-      clinicId,
-      userId: req.user!.id,
-      action: 'BULK_IMPORT',
-      table: 'medicine_batches',
-      newData: { success, failed: errors.length, purchase_id: purchase.id },
-    });
-
-    res.status(201).json({ success, failed: errors.length, errors, purchase_id: purchase.id });
+    res.status(201).json({ success, failed: errors.length, errors, purchase_id: purchase._local_id });
   } catch (err) {
     next(err);
   }

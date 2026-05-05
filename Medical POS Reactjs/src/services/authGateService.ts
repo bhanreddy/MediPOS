@@ -15,9 +15,6 @@ async function tryOnline<T>(fn: () => Promise<T>): Promise<T | null> {
   }
 }
 
-/**
- * Cold start routing: subscription cache + Supabase session + optional online reconciliation.
- */
 export async function resolveColdStartGate(): Promise<AuthGate> {
   const hydrated = await CloudAuthService.hydrateSupabaseFromStore();
   const { data: supa } = await supabase.auth.getSession();
@@ -37,46 +34,23 @@ export async function resolveColdStartGate(): Promise<AuthGate> {
     return 'app';
   }
 
-  const remote = await tryOnline(() => fetchSubscriptionStatus());
-  if (remote) {
-    await CloudAuthService.applySubscriptionCacheFromServer().catch(() => undefined);
+  // Fetch subscription but ignore the result for gating purposes
+  void tryOnline(() => fetchSubscriptionStatus())
+    .then(() => CloudAuthService.applySubscriptionCacheFromServer())
+    .catch((err) => console.warn("[Subscription] Status check skipped:", err));
 
-    if (remote.status === 'active') {
-      const ok = await CloudAuthService.ensurePosSessionFromCloud();
-      return ok ? 'app' : 'login';
-    }
-
-    if (remote.status === 'expired') {
-      return 'renewal';
-    }
-
-    return 'payment';
-  }
-
-  return 'payment';
+  const ok = await CloudAuthService.ensurePosSessionFromCloud();
+  return ok ? 'app' : 'login';
 }
 
 export async function routeAfterPasswordLogin(): Promise<AuthGate> {
-  let remote;
   try {
-    remote = await fetchSubscriptionStatus();
-  } catch {
-    remote = { status: 'none' as const, plan: null, expires_at: null, subscription_id: null };
+    await fetchSubscriptionStatus();
+  } catch (err) {
+    console.warn("[Subscription] Status check skipped:", err);
   }
   await CloudAuthService.applySubscriptionCacheFromServer().catch(() => undefined);
 
-  if (remote.status === 'active') {
-    const ok = await CloudAuthService.ensurePosSessionFromCloud();
-    return ok ? 'app' : 'login';
-  }
-  if (remote.status === 'expired') {
-    return 'renewal';
-  }
-
-  if (remote.status === 'none') {
-    const ok = await CloudAuthService.ensurePosSessionFromCloud();
-    if (ok) return 'app';
-  }
-
-  return 'payment';
+  const ok = await CloudAuthService.ensurePosSessionFromCloud();
+  return ok ? 'app' : 'login';
 }

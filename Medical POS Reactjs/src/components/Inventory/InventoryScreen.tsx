@@ -1,9 +1,10 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useMemo } from 'react';
+import { Link, useSearchParams } from 'react-router-dom';
 import { Button } from '../ui/Button';
 import { Input } from '../ui/Input';
 import { Badge } from '../ui/Badge';
 import { Table } from '../ui/Table';
-import { useInventoryRadar } from '../../hooks/useInventoryRadar';
+import { useInventoryRadar, type InventoryAttentionFilter } from '../../hooks/useInventoryRadar';
 import { AddBatchModal } from './AddBatchModal';
 import { INVENTORY_PAGE_COPY } from '../../config/appContent';
 
@@ -11,9 +12,22 @@ import { INVENTORY_PAGE_COPY } from '../../config/appContent';
  * PHASE 12: INVENTORY ATTENTION MODEL
  * Prioritizes: Priority sorting, Visual de-emphasis, Actionable intelligence
  */
+const FOCUS_PARAM = 'focus';
+
+function parseInventoryFocus(raw: string | null): InventoryAttentionFilter | null {
+    if (raw === 'low_stock' || raw === 'expiring') return raw;
+    return null;
+}
+
 export const InventoryScreen: React.FC = () => {
+    const [searchParams] = useSearchParams();
+    const attentionFilter = useMemo(
+        () => parseInventoryFocus(searchParams.get(FOCUS_PARAM)),
+        [searchParams],
+    );
+
     const [searchTerm, setSearchTerm] = useState('');
-    const { items: processedInventory, stats, isLoading, refresh } = useInventoryRadar(searchTerm);
+    const { items: processedInventory, stats, isLoading, refresh } = useInventoryRadar(searchTerm, attentionFilter);
     const [isAddBatchModalOpen, setIsAddBatchModalOpen] = useState(false);
 
     // Local Shortcuts
@@ -43,6 +57,22 @@ export const InventoryScreen: React.FC = () => {
                     <p className="text-muted text-sm font-black uppercase tracking-widest">
                         {isLoading ? INVENTORY_PAGE_COPY.subtitleScanning : INVENTORY_PAGE_COPY.subtitleActive(processedInventory.length)}
                     </p>
+                    {attentionFilter === 'low_stock' && (
+                        <p className="text-xs text-danger font-bold mt-2 flex flex-wrap items-center gap-2">
+                            Showing low-stock batches only.
+                            <Link to="/inventory" className="underline hover:text-foreground">
+                                Clear filter
+                            </Link>
+                        </p>
+                    )}
+                    {attentionFilter === 'expiring' && (
+                        <p className="text-xs text-warning font-bold mt-2 flex flex-wrap items-center gap-2">
+                            Showing expiry-related batches (near due or already expired with stock).
+                            <Link to="/inventory" className="underline hover:text-foreground">
+                                Clear filter
+                            </Link>
+                        </p>
+                    )}
                 </div>
 
                 <div className="flex gap-4 items-center">

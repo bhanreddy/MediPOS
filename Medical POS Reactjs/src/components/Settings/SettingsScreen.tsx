@@ -156,13 +156,17 @@ export const SettingsScreen: React.FC = () => {
     };
 
     return (
-        <div className="p-8 max-w-7xl mx-auto space-y-6 animate-slideIn">
-            <div className="flex flex-col gap-4 sm:flex-row sm:items-end sm:justify-between">
-                <div>
-                    <h1 className="text-2xl font-black text-foreground-strong tracking-tight">{SETTINGS_SCREEN_COPY.title}</h1>
-                    <p className="text-sm text-muted mt-1">{SETTINGS_SCREEN_COPY.subtitle}</p>
+        <div className="w-full min-w-0 max-w-7xl mx-auto px-4 py-6 sm:px-6 sm:py-8 lg:px-8 space-y-5 sm:space-y-6 animate-slideIn box-border">
+            <div className="flex flex-col gap-3 sm:flex-row sm:items-end sm:justify-between sm:gap-4 min-w-0">
+                <div className="min-w-0">
+                    <h1 className="text-xl sm:text-2xl font-black text-foreground-strong tracking-tight break-words">
+                        {SETTINGS_SCREEN_COPY.title}
+                    </h1>
+                    <p className="text-sm text-muted mt-1 max-w-prose">{SETTINGS_SCREEN_COPY.subtitle}</p>
                 </div>
-                <Badge variant={session?.is_offline_session ? 'warning' : 'success'}>{sessionModeLabel}</Badge>
+                <Badge variant={session?.is_offline_session ? 'warning' : 'success'} className="shrink-0 self-start sm:self-auto">
+                    {sessionModeLabel}
+                </Badge>
             </div>
 
             {(error || status) && (
@@ -175,12 +179,12 @@ export const SettingsScreen: React.FC = () => {
                 </div>
             )}
 
-            <div className="grid grid-cols-1 xl:grid-cols-3 gap-6">
-                <Card className="p-6 flex flex-col gap-4 col-span-1 xl:col-span-2">
+            <div className="grid grid-cols-1 min-w-0 lg:grid-cols-3 gap-4 sm:gap-6 auto-rows-min">
+                <Card className="p-4 sm:p-6 flex flex-col gap-4 min-w-0 lg:col-span-2">
                     <MedicalProfileCard />
                 </Card>
 
-                <Card className="p-6 flex flex-col gap-4">
+                <Card className="p-4 sm:p-6 flex flex-col gap-4 min-w-0">
                     <div className="flex items-center justify-between gap-2">
                         <h2 className="text-sm font-bold text-muted uppercase tracking-wider">Sales rules</h2>
                         <Badge variant="primary">Live</Badge>
@@ -200,7 +204,7 @@ export const SettingsScreen: React.FC = () => {
                     </div>
                 </Card>
 
-                <Card className="p-6 flex flex-col gap-4">
+                <Card className="p-4 sm:p-6 flex flex-col gap-4 min-w-0">
                     <div className="flex items-center justify-between gap-2">
                         <h2 className="text-sm font-bold text-muted uppercase tracking-wider">Backup</h2>
                         <Badge variant="warning">Manual</Badge>
@@ -227,7 +231,7 @@ export const SettingsScreen: React.FC = () => {
                     </div>
                 </Card>
 
-                <Card className="p-6 flex flex-col gap-4 xl:col-span-3">
+                <Card className="p-4 sm:p-6 flex flex-col gap-4 min-w-0 lg:col-span-3">
                     <div className="flex items-center justify-between flex-wrap gap-2">
                         <h2 className="text-sm font-bold text-muted uppercase tracking-wider">Stock alerts</h2>
                         <Badge variant="primary">IndexedDB</Badge>
@@ -259,7 +263,7 @@ export const SettingsScreen: React.FC = () => {
                     </div>
                 </Card>
 
-                <Card className="p-6 flex flex-col gap-4 xl:col-span-3">
+                <Card className="p-4 sm:p-6 flex flex-col gap-4 min-w-0 lg:col-span-3">
                     <div className="flex items-center justify-between flex-wrap gap-2">
                         <h2 className="text-sm font-bold text-muted uppercase tracking-wider">Payment settings</h2>
                         <Badge variant="primary">UPI</Badge>
@@ -267,8 +271,8 @@ export const SettingsScreen: React.FC = () => {
                     <p className="text-xs text-muted leading-relaxed">
                         Store your VPA for customer UPI payments. Used on the billing screen to generate a dynamic pay QR per bill.
                     </p>
-                    <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
-                        <div className="rounded-lg border border-border bg-bg-primary p-4 space-y-3">
+                    <div className="grid grid-cols-1 min-w-0 lg:grid-cols-2 gap-4 sm:gap-6">
+                        <div className="rounded-lg border border-border bg-bg-primary p-4 space-y-3 min-w-0">
                             <Input
                                 label="UPI ID"
                                 placeholder="pharmacy@upi or 9876543210@paytm"
@@ -283,7 +287,7 @@ export const SettingsScreen: React.FC = () => {
                                 Save UPI ID
                             </Button>
                         </div>
-                        <div className="rounded-lg border border-border bg-bg-primary p-4 flex flex-col items-center justify-center gap-3 min-h-[200px]">
+                        <div className="rounded-lg border border-border bg-bg-primary p-4 flex flex-col items-center justify-center gap-3 min-h-[180px] sm:min-h-[200px] min-w-0 w-full">
                             <p className="text-xs font-bold text-muted uppercase tracking-wider">Live preview</p>
                             {UPI_PATTERN.test(upiDraft.trim()) ? (
                                 <>
@@ -302,7 +306,7 @@ export const SettingsScreen: React.FC = () => {
                     </div>
                 </Card>
 
-                <Card className="p-6 flex flex-col gap-3 xl:col-span-3 border-dashed opacity-95">
+                <Card className="p-4 sm:p-6 flex flex-col gap-3 min-w-0 lg:col-span-3 border-dashed opacity-95">
                     <div className="flex items-center justify-between flex-wrap gap-2">
                         <h2 className="text-sm font-bold text-muted uppercase tracking-wider">Cloud backup</h2>
                         <Badge variant="warning">Coming soon</Badge>
@@ -325,12 +329,26 @@ const MedicalProfileCard = () => {
     const logoInputRef = useRef<HTMLInputElement>(null);
 
     useEffect(() => {
+        setLoading(true);
+        // Try local first, then sync from online in the background
         ShopProfileService.getShopProfileLocal()
             .then(p => {
                 setProfile(p);
                 setPhoneDraft(p.phone_number);
             })
-            .catch(err => console.error("Profile load failed", err));
+            .catch(() => {
+                // No local data — proceed to sync
+            })
+            .finally(() => {
+                // Always attempt online sync to keep data fresh
+                ShopProfileService.syncShopProfile()
+                    .then(p => {
+                        setProfile(p);
+                        setPhoneDraft(p.phone_number || '');
+                    })
+                    .catch(err => console.error("[MedicalProfileCard] Sync failed:", err))
+                    .finally(() => setLoading(false));
+            });
     }, []);
 
     const handleSavePhone = async () => {
@@ -399,11 +417,11 @@ const MedicalProfileCard = () => {
     }
 
     return (
-        <div className="flex flex-col gap-6">
-            <div className="flex items-center justify-between">
-                <div className="flex items-center gap-4">
+        <div className="flex flex-col gap-6 min-w-0">
+            <div className="flex flex-col gap-4 sm:flex-row sm:items-start sm:justify-between min-w-0">
+                <div className="flex flex-col sm:flex-row items-start gap-4 min-w-0 flex-1">
                     <div
-                        className="relative w-16 h-16 rounded-full border-2 border-border bg-bg-primary overflow-hidden group cursor-pointer"
+                        className="relative w-16 h-16 shrink-0 rounded-full border-2 border-border bg-bg-primary overflow-hidden group cursor-pointer"
                         onClick={() => logoInputRef.current?.click()}
                     >
                         {profile.logo_url ? (
@@ -423,19 +441,19 @@ const MedicalProfileCard = () => {
                         onChange={(e) => handleLogoSelect(e.target.files?.[0] || null)}
                     />
 
-                    <div>
-                        <p className="text-lg font-black text-foreground-strong tracking-tight">{profile.medical_name}</p>
+                    <div className="min-w-0 flex-1">
+                        <p className="text-lg font-black text-foreground-strong tracking-tight break-words">{profile.medical_name}</p>
                         <p className="text-xs text-muted mt-1">
                             {profile.verified ? 'Verified business' : 'Unverified'}
                         </p>
                     </div>
                 </div>
-                <Badge variant={profile.verified ? 'success' : 'warning'}>
+                <Badge variant={profile.verified ? 'success' : 'warning'} className="shrink-0 self-start sm:self-center">
                     {profile.verified ? 'Online' : 'Offline Mode'}
                 </Badge>
             </div>
 
-            <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-6 min-w-0">
                 {/* LEGAL (LOCKED) */}
                 <div className="space-y-4">
                     <h4 className="text-xs font-bold text-muted uppercase tracking-wider border-b border-border pb-2">Legal identity (locked)</h4>
@@ -445,14 +463,14 @@ const MedicalProfileCard = () => {
                         <div className="font-bold text-foreground">{profile.owner_name}</div>
                     </div>
 
-                    <div className="grid grid-cols-2 gap-4">
+                    <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 min-w-0">
                         <div>
                             <div className="text-[10px] font-bold text-muted uppercase">GST Number</div>
-                            <div className="font-mono text-sm font-bold text-foreground">{profile.gst_number}</div>
+                            <div className="font-mono text-sm font-bold text-foreground break-all">{profile.gst_number}</div>
                         </div>
                         <div>
                             <div className="text-[10px] font-bold text-muted uppercase">Drug License</div>
-                            <div className="font-mono text-sm font-bold text-foreground">{profile.drug_license_number}</div>
+                            <div className="font-mono text-sm font-bold text-foreground break-all">{profile.drug_license_number}</div>
                         </div>
                     </div>
                 </div>
@@ -463,7 +481,7 @@ const MedicalProfileCard = () => {
 
                     <div>
                         <div className="text-[10px] font-bold text-muted uppercase">Registered Address</div>
-                        <div className="font-medium text-foreground text-sm opacity-80">
+                        <div className="font-medium text-foreground text-sm opacity-80 break-words">
                             {profile.address_line_1}<br />
                             {profile.address_line_2 && <>{profile.address_line_2}<br /></>}
                             {profile.city}, {profile.state} - {profile.pincode}
@@ -501,12 +519,12 @@ const MedicalProfileCard = () => {
 
                         {isEditingPhone ? (
                             <input
-                                className="w-full bg-bg-surface border border-border rounded-md px-2 py-1.5 font-mono font-bold text-sm"
+                                className="w-full min-w-0 max-w-full bg-bg-surface border border-border rounded-md px-2 py-1.5 font-mono font-bold text-sm sm:text-base"
                                 value={phoneDraft}
                                 onChange={e => setPhoneDraft(e.target.value)}
                             />
                         ) : (
-                            <div className="font-mono text-lg font-black text-foreground-strong tracking-wide">
+                            <div className="font-mono text-base sm:text-lg font-black text-foreground-strong tracking-wide break-all">
                                 {profile.phone_number}
                             </div>
                         )}

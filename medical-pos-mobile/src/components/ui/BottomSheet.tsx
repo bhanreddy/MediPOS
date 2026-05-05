@@ -26,6 +26,8 @@ export const BottomSheet = React.forwardRef<GorhomBottomSheet, BottomSheetProps>
         ref={ref}
         index={-1}
         snapPoints={snapPoints}
+        /* Dynamic sizing defaults to true in v5 and breaks fixed snapPoints + snapToIndex/expand from a closed sheet */
+        enableDynamicSizing={false}
         enablePanDownToClose
         backdropComponent={renderBackdrop}
         onClose={onClose}

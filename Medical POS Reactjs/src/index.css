@@ -5,6 +5,11 @@
   --color-surface: rgb(var(--surface));
   --color-surface-elevated: rgb(var(--surface-elevated));
   --color-surface-alt: rgb(var(--surface-alt));
+  /* Clinic UI aliases (bg-bg-*, accent-*) — required for Tailwind utilities to resolve */
+  --color-bg-primary: rgb(var(--surface-elevated));
+  --color-bg-surface: rgb(var(--surface));
+  --color-bg-card: rgb(var(--surface-alt));
+  --color-accent-primary: rgb(var(--primary));
   --color-border: rgb(var(--border));
   --color-foreground: rgb(var(--foreground));
   --color-foreground-strong: rgb(var(--foreground-strong));

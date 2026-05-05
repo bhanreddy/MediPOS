@@ -1,5 +1,5 @@
-import { apiClient } from './client';
-import type { AxiosResponse } from 'axios';
+import { queryAll, queryOne, queryRaw, queryCount } from '../lib/localQuery';
+import { localMutate } from '../lib/localMutate';
 
 /* ─── Types ─────────────────────────────────────────── */
 
@@ -135,7 +135,7 @@ export function buildMedicinePayloadFromUi(params: {
 export function normalizeBatchRow(raw: Record<string, unknown>): MedicineBatch {
   const r = raw as Record<string, unknown>;
   return {
-    id: String(r.id ?? ''),
+    id: String(r.id ?? r._local_id ?? ''),
     medicineId: String(r.medicine_id ?? r.medicineId ?? ''),
     batchNumber: String(r.batch_number ?? r.batchNumber ?? ''),
     expiryDate: String(r.expiry_date ?? r.expiryDate ?? ''),
@@ -148,11 +148,7 @@ export function normalizeBatchRow(raw: Record<string, unknown>): MedicineBatch {
 /** Clinic `medicines` row from API (snake_case + optional joins). */
 export function normalizeMedicineRow(raw: Record<string, unknown>): Medicine {
   const r = raw as Record<string, unknown>;
-  const stockJoined = Array.isArray(r.medicine_stock)
-    ? (r.medicine_stock as Record<string, unknown>[])[0]
-    : undefined;
-  const total_stock =
-    r.total_stock != null ? Number(r.total_stock) : stockJoined?.total_stock != null ? Number(stockJoined.total_stock) : undefined;
+  const total_stock = r.total_stock != null ? Number(r.total_stock) : undefined;
 
   const batchesRaw = r.medicine_batches;
   const medicine_batches =
@@ -161,7 +157,7 @@ export function normalizeMedicineRow(raw: Record<string, unknown>): Medicine {
       : undefined;
 
   return {
-    id: String(r.id ?? ''),
+    id: String(r.id ?? r._local_id ?? ''),
     name: String(r.name ?? ''),
     genericName: String(r.generic_name ?? r.genericName ?? ''),
     manufacturer: String(r.manufacturer ?? ''),
@@ -173,7 +169,7 @@ export function normalizeMedicineRow(raw: Record<string, unknown>): Medicine {
     hsnCode: String(r.hsn_code ?? r.hsnCode ?? ''),
     gstRate: Number(r.gst_rate ?? r.gstRate ?? 0),
     reorderLevel: Number(r.low_stock_threshold ?? r.reorderLevel ?? 10),
-    createdAt: String(r.created_at ?? r.createdAt ?? ''),
+    createdAt: String(r.created_at ?? r.createdAt ?? r._updated_at ?? ''),
     barcode: r.barcode != null ? String(r.barcode) : '',
     total_stock,
     medicine_batches,
@@ -202,139 +198,215 @@ export function normalizeMasterSuggestion(raw: Record<string, unknown>): Medicin
   };
 }
 
-function normalizeLowStockRow(raw: Record<string, unknown>): Medicine {
-  const r = raw as Record<string, unknown>;
-  return {
-    id: String(r.medicine_id ?? r.id ?? ''),
-    name: String(r.medicine_name ?? r.name ?? ''),
-    genericName: '',
-    manufacturer: '',
-    category: 'Tablet',
-    schedule: 'None',
-    hsnCode: '',
-    gstRate: 0,
-    reorderLevel: Number(r.low_stock_threshold ?? 10),
-    createdAt: '',
-    total_stock: r.total_stock != null ? Number(r.total_stock) : undefined,
-  };
-}
-
-function normalizeExpiryAlertRow(raw: Record<string, unknown>): MedicineBatch & { name?: string } {
-  const r = raw as Record<string, unknown>;
-  return {
-    id: String(r.batch_id ?? r.id ?? ''),
-    medicineId: String(r.medicine_id ?? ''),
-    batchNumber: String(r.batch_number ?? ''),
-    expiryDate: String(r.expiry_date ?? ''),
-    mrp: Number(r.mrp ?? 0),
-    purchasePrice: 0,
-    quantity: Number(r.quantity_remaining ?? r.quantity ?? 0),
-    name: r.medicine_name != null ? String(r.medicine_name) : undefined,
-  };
-}
-
-function normalizeMedicineDetailPayload(raw: Record<string, unknown>): MedicineDetail {
-  const batchesRaw = raw.batches;
-  const batches = Array.isArray(batchesRaw)
-    ? batchesRaw.map((b) => normalizeBatchRow(b as Record<string, unknown>))
-    : [];
-  const base = normalizeMedicineRow(raw);
-  const totalStock = batches.reduce((s, b) => s + b.quantity, 0);
-  return { ...base, batches, totalStock };
-}
-
-/* ─── Helpers ───────────────────────────────────────── */
-
-function extract<T>(res: AxiosResponse<{ data: T }>): T {
-  return res.data.data;
-}
-
 /* ─── API ───────────────────────────────────────────── */
 
 export const inventoryApi = {
   getMedicines: async (params?: MedicineSearchParams): Promise<Medicine[]> => {
-    const res = await apiClient.get<{ data: Record<string, unknown>[] }>('/inventory/medicines', { params });
-    return extract(res).map((row) => normalizeMedicineRow(row));
+    const conditions: string[] = [];
+    const values: any[] = [];
+
+    if (params?.q) {
+      conditions.push('(name LIKE ? OR generic_name LIKE ? OR manufacturer LIKE ?)');
+      values.push(`%${params.q}%`, `%${params.q}%`, `%${params.q}%`);
+    }
+    if (params?.category) { conditions.push('category=?'); values.push(params.category); }
+
+    const where = conditions.length > 0 ? conditions.join(' AND ') : '';
+    const rows = await queryAll<Record<string, unknown>>('medicines', where, values);
+
+    // Attach stock totals
+    for (const row of rows) {
+      const medId = row._local_id ?? row.id;
+      const batches = await queryAll<Record<string, unknown>>(
+        'medicine_batches',
+        'medicine_id=?',
+        [medId as string]
+      );
+      (row as any).total_stock = batches.reduce(
+        (sum, b) => sum + Number(b.quantity_remaining ?? 0), 0
+      );
+    }
+
+    // Filter low stock if requested
+    if (params?.low_stock) {
+      return rows
+        .filter(r => Number((r as any).total_stock ?? 0) <= Number(r.low_stock_threshold ?? 10))
+        .map(normalizeMedicineRow);
+    }
+
+    return rows.map(normalizeMedicineRow);
   },
 
   searchMedicines: async (q?: string, barcode?: string): Promise<MedicineSearchResult> => {
-    const res = await apiClient.get<{ data?: MedicineSearchResult; results?: unknown[]; substitutes?: unknown[] }>(
-      '/inventory/medicines/search',
-      {
-        params: { q, barcode },
-      },
-    );
-    const payload = res.data.data ?? res.data;
-    const rawResults = (payload as { results?: unknown[] }).results ?? [];
-    const rawSubs = (payload as { substitutes?: unknown[] }).substitutes ?? [];
-    const results = rawResults.map((row) => normalizeMedicineRow(row as Record<string, unknown>));
-    const substitutes = rawSubs.map((row) => normalizeMedicineRow(row as Record<string, unknown>));
+    const conditions: string[] = [];
+    const values: any[] = [];
+
+    if (barcode) { conditions.push('barcode=?'); values.push(barcode); }
+    else if (q) {
+      conditions.push('(name LIKE ? OR generic_name LIKE ?)');
+      values.push(`%${q}%`, `%${q}%`);
+    }
+
+    const where = conditions.length > 0 ? conditions.join(' AND ') : '';
+    const rows = await queryAll<Record<string, unknown>>('medicines', where, values);
+
+    // Attach batches to each medicine
+    for (const row of rows) {
+      const medId = row._local_id ?? row.id;
+      const batches = await queryAll<Record<string, unknown>>(
+        'medicine_batches',
+        'medicine_id=? AND quantity_remaining>0',
+        [medId as string]
+      );
+      (row as any).medicine_batches = batches;
+      (row as any).total_stock = batches.reduce(
+        (sum, b) => sum + Number(b.quantity_remaining ?? 0), 0
+      );
+    }
+
+    // Find substitutes by generic name
+    const results = rows.map(normalizeMedicineRow);
+    let substitutes: Medicine[] = [];
+    if (results.length > 0 && results[0].genericName) {
+      const subRows = await queryAll<Record<string, unknown>>(
+        'medicines',
+        'generic_name LIKE ? AND (_local_id!=? AND (id IS NULL OR id!=?))',
+        [`%${results[0].genericName}%`, String(results[0].id), String(results[0].id)]
+      );
+      substitutes = subRows.map(normalizeMedicineRow);
+    }
+
     return { results, substitutes };
   },
 
   getMedicine: async (id: string): Promise<MedicineDetail> => {
-    const res = await apiClient.get<{ data: Record<string, unknown> }>(`/inventory/medicines/${id}`);
-    return normalizeMedicineDetailPayload(extract(res));
+    const row = await queryOne<Record<string, unknown>>(
+      'medicines',
+      '_local_id=? OR id=?',
+      [id, id]
+    );
+    if (!row) throw new Error('Medicine not found');
+
+    const medId = row._local_id ?? row.id;
+    const batchRows = await queryAll<Record<string, unknown>>(
+      'medicine_batches',
+      'medicine_id=?',
+      [medId as string]
+    );
+    const batches = batchRows.map(normalizeBatchRow);
+    const totalStock = batches.reduce((s, b) => s + b.quantity, 0);
+    const base = normalizeMedicineRow({ ...row, total_stock: totalStock });
+    return { ...base, batches, totalStock };
   },
 
   createMedicine: async (body: CreateMedicineBody): Promise<Medicine> => {
-    const res = await apiClient.post<{ data: Record<string, unknown> }>('/inventory/medicines', body);
-    return normalizeMedicineRow(extract(res));
+    const record = await localMutate({ table: 'medicines', operation: 'INSERT', data: body });
+    return normalizeMedicineRow(record as Record<string, unknown>);
   },
 
   updateMedicine: async (id: string, body: UpdateMedicineBody): Promise<Medicine> => {
-    const res = await apiClient.put<{ data: Record<string, unknown> }>(`/inventory/medicines/${id}`, body);
-    return normalizeMedicineRow(extract(res));
+    const existing = await queryOne<Record<string, unknown>>('medicines', '_local_id=? OR id=?', [id, id]);
+    const record = await localMutate({
+      table: 'medicines',
+      operation: 'UPDATE',
+      data: { ...(existing ?? {}), ...body, _local_id: id }
+    });
+    return normalizeMedicineRow(record as Record<string, unknown>);
   },
 
   deleteMedicine: async (id: string): Promise<void> => {
-    await apiClient.delete(`/inventory/medicines/${id}`);
+    await localMutate({ table: 'medicines', operation: 'DELETE', data: { _local_id: id } });
   },
 
   getExpiringBatches: async (days: number): Promise<(MedicineBatch & { name?: string })[]> => {
-    const res = await apiClient.get<{ data: Record<string, unknown>[] }>('/inventory/batches/expiring', {
-      params: { days },
-    });
-    return extract(res).map((row) => normalizeExpiryAlertRow(row));
+    const targetDate = new Date();
+    targetDate.setDate(targetDate.getDate() + days);
+    const targetStr = targetDate.toISOString().split('T')[0];
+
+    const rows = await queryRaw<Record<string, unknown>>(
+      `SELECT mb.*, m.name as medicine_name
+       FROM medicine_batches mb
+       LEFT JOIN medicines m ON m._local_id = mb.medicine_id
+       WHERE mb._deleted=0 AND mb.quantity_remaining>0 AND mb.expiry_date<=?
+       ORDER BY mb.expiry_date ASC`,
+      [targetStr]
+    );
+
+    return rows.map(r => ({
+      id: String(r.id ?? r._local_id ?? ''),
+      medicineId: String(r.medicine_id ?? ''),
+      batchNumber: String(r.batch_number ?? ''),
+      expiryDate: String(r.expiry_date ?? ''),
+      mrp: Number(r.mrp ?? 0),
+      purchasePrice: Number(r.purchase_price ?? 0),
+      quantity: Number(r.quantity_remaining ?? 0),
+      name: r.medicine_name != null ? String(r.medicine_name) : undefined,
+    }));
   },
 
   getLowStock: async (): Promise<Medicine[]> => {
-    const res = await apiClient.get<{ data: Record<string, unknown>[] }>('/inventory/stock/low');
-    return extract(res).map((row) => normalizeLowStockRow(row));
+    const rows = await queryRaw<Record<string, unknown>>(
+      `SELECT m.*, COALESCE(SUM(mb.quantity_remaining), 0) as total_stock
+       FROM medicines m
+       LEFT JOIN medicine_batches mb ON mb.medicine_id = m._local_id AND mb._deleted=0
+       WHERE m._deleted=0 AND m.is_active=1
+       GROUP BY m._local_id
+       HAVING total_stock <= m.low_stock_threshold`
+    );
+    return rows.map(normalizeMedicineRow);
   },
 
   getStockSummary: async (): Promise<StockSummary> => {
-    const res = await apiClient.get<{
-      data: {
-        total_medicines?: number;
-        total_products?: number;
-        total_stock_value?: number;
-        low_stock_count?: number;
-        out_of_stock_count?: number;
-        expiring_within_30_days?: number;
-      };
-    }>('/inventory/stock/summary');
-    const d = extract(res);
+    const totalProducts = await queryCount('medicines', 'is_active=1');
+
+    const stockRows = await queryRaw<{ total_val: number; total_stock: number; med_id: string; threshold: number }>(
+      `SELECT m._local_id as med_id, m.low_stock_threshold as threshold,
+              COALESCE(SUM(mb.quantity_remaining * mb.mrp), 0) as total_val,
+              COALESCE(SUM(mb.quantity_remaining), 0) as total_stock
+       FROM medicines m
+       LEFT JOIN medicine_batches mb ON mb.medicine_id = m._local_id AND mb._deleted=0
+       WHERE m._deleted=0 AND m.is_active=1
+       GROUP BY m._local_id`
+    );
+
+    const totalStockValue = stockRows.reduce((a, r) => a + Number(r.total_val), 0);
+    const lowStockCount = stockRows.filter(r => Number(r.total_stock) > 0 && Number(r.total_stock) <= Number(r.threshold)).length;
+    const outOfStockCount = stockRows.filter(r => Number(r.total_stock) === 0).length;
+
+    const in30 = new Date();
+    in30.setDate(in30.getDate() + 30);
+    const in30Str = in30.toISOString().split('T')[0];
+    const expiringRows = await queryRaw<{ cnt: number }>(
+      `SELECT COUNT(DISTINCT medicine_id) as cnt FROM medicine_batches
+       WHERE _deleted=0 AND quantity_remaining>0 AND expiry_date<=?`,
+      [in30Str]
+    );
+
     return {
-      totalProducts: Number(d.total_medicines ?? d.total_products ?? 0),
-      totalStockValue: Number(d.total_stock_value ?? 0),
-      lowStockCount: Number(d.low_stock_count ?? 0),
-      outOfStockCount: Number(d.out_of_stock_count ?? 0),
-      expiringWithin30Days: Number(d.expiring_within_30_days ?? 0),
+      totalProducts,
+      totalStockValue,
+      lowStockCount,
+      outOfStockCount,
+      expiringWithin30Days: Number(expiringRows[0]?.cnt ?? 0),
     };
   },
 
   getBatches: async (medicineId: string): Promise<MedicineBatch[]> => {
-    const res = await apiClient.get<{ data: Record<string, unknown>[] }>('/inventory/batches', {
-      params: { medicine_id: medicineId },
-    });
-    return extract(res).map((row) => normalizeBatchRow(row));
+    const rows = await queryAll<Record<string, unknown>>(
+      'medicine_batches',
+      'medicine_id=?',
+      [medicineId]
+    );
+    return rows.map(normalizeBatchRow);
   },
 
   searchMasterMedicines: async (q: string): Promise<Medicine[]> => {
-    const res = await apiClient.get<{ data: Record<string, unknown>[] }>('/medicines/master/search', {
-      params: { q },
-    });
-    return extract(res).map((row) => normalizeMasterSuggestion(row));
+    // Master catalog search falls back to local medicines when offline
+    const rows = await queryAll<Record<string, unknown>>(
+      'medicines',
+      'name LIKE ? OR generic_name LIKE ?',
+      [`%${q}%`, `%${q}%`]
+    );
+    return rows.map(normalizeMasterSuggestion);
   },
 } as const;

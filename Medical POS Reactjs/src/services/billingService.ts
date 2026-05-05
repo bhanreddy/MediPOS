@@ -4,6 +4,7 @@ import { InventoryService, InsufficientStockError } from './inventoryService';
 import { AuditService } from './auditService';
 import { v4 as uuidv4 } from 'uuid';
 import { HydrationService } from '../state/hydration';
+import { insertBillWeb, addToWebSyncQueue } from '../db/webLocalDb';
 
 /**
  * PHASE 6: BILLING ENGINE
@@ -275,28 +276,21 @@ export const BillingService = {
                 await db.sale_items.add(msg);
             }
 
-            // Deduct Inventory (Manual logic here because we are ALREADY in a transaction)
-            // We cannot call InventoryService.adjustStock() because it starts a NEW transaction
-            // and Dexie transactions cannot intersect if handled naively. 
-            // We duplicate the atomic 'update' logic here for safety WITHIN the sale transaction.
+            // 4. LOCAL Inventory Deduction (optimistic)
+            // Deduct stock locally so the UI reflects updated quantities immediately.
+            // The server-side FIFO deduction remains the authoritative source of truth;
+            // pullDelta() will reconcile exact batch quantities from the server later.
             for (const adj of inventoryAdjustments) {
                 const invItems = await db.inventory.where('batch_id').equals(adj.batchId).toArray();
-                if (invItems.length === 0) throw new Error(`Inventory missing for batch ${adj.batchId}`);
-                const targetInv = invItems[0];
-
-                const newQty = targetInv.quantity + adj.delta;
-                if (newQty < 0) throw new Error('Negative stock detected during commit'); // Double safety
-
-                await db.inventory.update(targetInv.id, {
-                    quantity: newQty,
-                    updated_at: new Date().toISOString(),
-                    last_modified: Date.now()
-                });
-
-                await AuditService.log('inventory', targetInv.id, 'UPDATE',
-                    { qty: targetInv.quantity },
-                    { qty: newQty, reason: `Sale ${newSale.invoice_number}` }
-                );
+                if (invItems.length > 0) {
+                    const targetInv = invItems[0];
+                    const newQty = Math.max(0, targetInv.quantity + adj.delta);
+                    await db.inventory.update(targetInv.id, {
+                        quantity: newQty,
+                        updated_at: now,
+                        last_modified: Date.now()
+                    });
+                }
             }
 
             let dueAmount = 0;
@@ -327,8 +321,19 @@ export const BillingService = {
 
         // 4. Update Redux Mirror (Post-Commit)
         await HydrationService.hydrateSales();
-        await HydrationService.hydrateInventory();
         await HydrationService.hydrateCustomers();
+        await HydrationService.hydrateInventory();
+
+        // 5. Add to Offline Sync Queue (for server-side FIFO deduction)
+        const items = await db.sale_items.where('sale_id').equals(committedSale.id).toArray();
+        const syncPayload = {
+            ...committedSale,
+            clinic_id: 'LOCAL_CLINIC', // Re-validated on server
+            items: items
+        };
+
+        await insertBillWeb(syncPayload);
+        await addToWebSyncQueue('CREATE_BILL', syncPayload);
 
         return committedSale;
     },

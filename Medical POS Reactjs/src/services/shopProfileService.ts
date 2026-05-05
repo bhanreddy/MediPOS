@@ -19,12 +19,12 @@ export const ShopProfileService = {
      * Fetch from Supabase (Authoritative)
      */
     async fetchShopProfileOnline(): Promise<Partial<ShopProfile> | null> {
-        console.log(`[Online] Fetching shop profile...`);
+        console.log(`[Online] Fetching shop profile from /clinics/me ...`);
 
         try {
-            const { data } = await api.get('/clinics/me');
-            
-            // Assume the unified API maps data directly
+            const response = await api.get('/clinics/me');
+            const data = response.data;
+            console.log('[ShopProfile] API response:', JSON.stringify(data).slice(0, 300));
             
             if (data?.data) {
                 const profile = data.data;
@@ -44,9 +44,11 @@ export const ShopProfileService = {
                     verified: profile.is_active
                 };
             }
-        } catch (err) {
-            console.error('[ShopProfile] Online fetch failed:', err);
-            // NO MOCK FALLBACK - Must fail to enforce sync
+            console.warn('[ShopProfile] API returned OK but no data.data:', data);
+        } catch (err: any) {
+            const status = err?.response?.status;
+            const body = err?.response?.data;
+            console.error('[ShopProfile] Online fetch failed:', { status, body, message: err?.message });
         }
         return null;
     },

@@ -4,6 +4,7 @@ import { format } from 'date-fns';
 import { Plus, Eye, Printer } from 'lucide-react';
 import { db } from '../../db/index';
 import type { Sale } from '../../core/types';
+import { PrinterService } from '../../services/printerService';
 import { Card } from '../ui/Card';
 import { Input } from '../ui/Input';
 import { Badge } from '../ui/Badge';
@@ -65,6 +66,15 @@ export const BillingSalesListPage: React.FC = () => {
         const pending = rows.filter((r) => r.payment_mode === 'DUE' || r.status !== 'COMPLETED').reduce((a, r) => a + r.final_amount, 0);
         return { billed, received, pending };
     }, [rows]);
+
+    const handlePrint = async (sale: Sale) => {
+        try {
+            const items = await db.sale_items.where('sale_id').equals(sale.id).toArray();
+            await PrinterService.printBill(sale, items);
+        } catch (err) {
+            console.error('Failed to print:', err);
+        }
+    };
 
     return (
         <div className="p-8 max-w-7xl mx-auto space-y-6 animate-slideIn">
@@ -165,6 +175,7 @@ export const BillingSalesListPage: React.FC = () => {
                                                 type="button"
                                                 className="p-2 rounded-lg text-muted hover:bg-surface-elevated hover:text-primary"
                                                 title="Print"
+                                                onClick={() => void handlePrint(r)}
                                             >
                                                 <Printer className="w-4 h-4" />
                                             </button>

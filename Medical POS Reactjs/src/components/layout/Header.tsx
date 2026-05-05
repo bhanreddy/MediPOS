@@ -3,6 +3,7 @@ import { useSelector } from 'react-redux';
 import { type RootState } from '../../state/store';
 import { useTheme } from '../../hooks/useTheme';
 import { AuthService } from '../../services/authService';
+import { manualSync } from '../../sync/syncEngine';
 import { Badge } from '../ui/Badge';
 import { BRANDING, HEADER_COPY } from '../../config/appContent';
 
@@ -10,7 +11,20 @@ export const Header: React.FC = () => {
     const { user, session } = useSelector((state: RootState) => state.auth);
     const { alertExpiryCount, alertLowStockCount } = useSelector((state: RootState) => state.ui);
     const [time, setTime] = useState(new Date().toLocaleTimeString());
+    const [isSyncing, setIsSyncing] = useState(false);
     const { toggleTheme } = useTheme();
+
+    const handleSync = async () => {
+        if (isSyncing) return;
+        setIsSyncing(true);
+        try {
+            await manualSync();
+        } catch (error) {
+            console.error('Manual sync failed:', error);
+        } finally {
+            setIsSyncing(false);
+        }
+    };
 
     useEffect(() => {
         const timer = setInterval(() => setTime(new Date().toLocaleTimeString()), 1000);
@@ -68,6 +82,18 @@ export const Header: React.FC = () => {
                         {session?.is_offline_session ? HEADER_COPY.offlineMode : HEADER_COPY.stableConnect}
                     </span>
                 </div>
+                <button
+                    type="button"
+                    onClick={handleSync}
+                    disabled={isSyncing}
+                    className={`text-[10px] font-bold uppercase tracking-widest border border-border/80 rounded-lg px-3 py-2 transition-colors ${
+                        isSyncing 
+                            ? 'text-primary bg-primary/10 border-primary/30 cursor-wait' 
+                            : 'text-muted hover:text-primary bg-surface/50 hover:bg-primary/10 hover:border-primary/30'
+                    }`}
+                >
+                    {isSyncing ? 'Syncing...' : 'Sync Now'}
+                </button>
                 <button
                     type="button"
                     onClick={() => void AuthService.logout()}

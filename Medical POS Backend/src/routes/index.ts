@@ -19,6 +19,8 @@ import { bulkRouter } from './bulk';
 import { analyticsRouter } from './analytics';
 import { whatsappRouter } from './whatsapp';
 import { clinicsRouter } from './clinics';
+import syncRouter from './sync';
+import billsRouter from './bills';
 // medicalSuperadminRouter moved to SuperAdmin Backend (PORT 4000)
 
 export const routes = Router();
@@ -46,4 +48,6 @@ routes.use('/medicines', medicineMasterRouter);
 routes.use('/bulk', bulkRouter);
 routes.use('/analytics', analyticsRouter);
 routes.use('/whatsapp', whatsappRouter);
+routes.use('/sync', syncRouter);
+routes.use('/bills', billsRouter);
 // medicalSuperadmin routes now served by SuperAdmin Backend (PORT 4000)

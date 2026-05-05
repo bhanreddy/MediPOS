@@ -1,50 +1,53 @@
 import { Router } from 'express';
 import { requireAuth } from '../middleware/auth';
 import { requireRole } from '../middleware/rbac';
-import { supabaseAdmin } from '../config/supabase';
-import { auditLog } from '../services/auditLog';
+import { localMutate } from '../lib/localMutate';
+import { queryOne } from '../lib/localQuery';
 
 export const clinicsRouter = Router();
 
 // GET /api/clinics/me
-clinicsRouter.get('/me', requireAuth, async (req, res, next) => {
+clinicsRouter.get('/me', requireAuth, (req, res, next) => {
   try {
-    const { data, error } = await supabaseAdmin
-      .from('clinics')
-      .select('*')
-      .eq('id', req.user!.clinic_id!)
-      .single();
+    // Try fetching from local clinics table
+    let profileData = queryOne('clinics', '1=1') as any;
 
-    if (error) throw error;
-    res.json({ data });
+    if (!profileData) {
+      // Fallback: Return a temporary store if no record found
+      profileData = {
+        id: req.user?.clinic_id || 'temp-id',
+        name: req.user?.role === 'SUPER_ADMIN' ? 'Super Admin Dashboard' : 'My Medical Store',
+        owner_name: req.user?.email || 'Store Owner',
+        gstin: 'Not configured',
+        drug_licence_number: 'Not configured',
+        address: 'Not configured',
+        phone: 'Not configured',
+        email: req.user?.email || 'Not configured',
+        is_active: true,
+        logo_url: null
+      };
+    }
+
+    res.json({ data: profileData });
   } catch (err) {
     next(err);
   }
 });
 
 // PUT /api/clinics/me
-clinicsRouter.put('/me', requireAuth, requireRole('OWNER'), async (req, res, next) => {
+clinicsRouter.put('/me', requireAuth, requireRole('OWNER'), (req, res, next) => {
   try {
     const { name, address, phone, email, gstin, drug_licence_number, logo_url, signature_url, invoice_footer } = req.body;
     
     // Only allow specific fields to be updated
-    const payload = {
+    const payload: Record<string, any> = {
       name, address, phone, email, gstin, drug_licence_number, logo_url, signature_url, invoice_footer
     };
 
     // Remove undefined values
-    Object.keys(payload).forEach(key => payload[key as keyof typeof payload] === undefined && delete payload[key as keyof typeof payload]);
+    Object.keys(payload).forEach(key => payload[key] === undefined && delete payload[key]);
 
-    const { data, error } = await supabaseAdmin
-      .from('clinics')
-      .update(payload)
-      .eq('id', req.user!.clinic_id!)
-      .select()
-      .single();
-
-    if (error) throw error;
-
-    await auditLog({ clinicId: req.user!.clinic_id!, userId: req.user!.id, action: 'UPDATE', table: 'clinics', newData: data, recordId: req.user!.clinic_id! });
+    const data = localMutate({ table: 'clinics', operation: 'UPDATE', data: { ...payload, _local_id: req.user!.clinic_id! } });
 
     res.json({ data });
   } catch (err) {

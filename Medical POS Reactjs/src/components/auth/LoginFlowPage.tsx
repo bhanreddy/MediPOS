@@ -75,13 +75,15 @@ export function LoginFlowPage() {
 
   if (session) return null;
 
+  const SUBSCRIPTION_GATE_ENABLED = false;
+
   switch (gate) {
     case 'signup':
       return <SignupScreen onNavigate={onNavigate} />;
     case 'payment':
-      return <PaymentScreen onNavigate={onNavigate} />;
+      return SUBSCRIPTION_GATE_ENABLED ? <PaymentScreen onNavigate={onNavigate} /> : <LoginScreen onNavigate={onNavigate} />;
     case 'renewal':
-      return <RenewalScreen onNavigate={onNavigate} />;
+      return SUBSCRIPTION_GATE_ENABLED ? <RenewalScreen onNavigate={onNavigate} /> : <LoginScreen onNavigate={onNavigate} />;
     default:
       return <LoginScreen onNavigate={onNavigate} />;
   }

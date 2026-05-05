@@ -4,7 +4,7 @@ import api from '../../lib/api';
 import { Card } from '../ui/Card';
 import { Button } from '../ui/Button';
 import { Table, TableBody, TableCell, TableHeader, TableRow } from '../ui/Table';
-import { Search, Power, ShieldAlert } from 'lucide-react';
+import { Search, Power, ShieldAlert, Edit } from 'lucide-react';
 import { format } from 'date-fns';
 import toast from 'react-hot-toast';
 
@@ -111,6 +111,10 @@ export const AdminClinics = () => {
                                         <Button size="sm" variant="ghost" onClick={() => startImpersonating(clinic.id, clinic.name)}>
                                             <ShieldAlert className="w-4 h-4 mr-2" />
                                             Impersonate
+                                        </Button>
+                                        <Button size="sm" variant="ghost" onClick={() => window.location.href = `/admin/clinics/${clinic.id}/profile`}>
+                                            <Edit className="w-4 h-4 mr-2" />
+                                            Edit Profile
                                         </Button>
                                         <Button 
                                             size="sm" 

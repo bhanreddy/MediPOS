@@ -1,5 +1,8 @@
-import { apiClient, extractPaginated, type ApiPagination } from './client';
+import { apiClient } from './client';
 import type { AxiosResponse } from 'axios';
+import { queryAll, queryOne } from '../lib/localQuery';
+import { localMutate } from '../lib/localMutate';
+import type { ApiPagination } from './client';
 
 export type { ApiPagination };
 
@@ -233,13 +236,12 @@ function toNum(v: unknown): number {
  * Backend uses snake_case (`invoice_number`, `net_amount`, nested `suppliers`).
  */
 export function normalizePurchaseRow(raw: Record<string, unknown>): Purchase {
-  const suppliers = raw.suppliers as { name?: string | null } | undefined;
   const paymentStatus = String(raw.payment_status ?? '');
   return {
-    id: String(raw.id ?? ''),
+    id: String(raw.id ?? raw._local_id ?? ''),
     billNumber: String(raw.invoice_number ?? ''),
     supplierId: String(raw.supplier_id ?? ''),
-    supplierName: suppliers?.name != null ? String(suppliers.name) : '',
+    supplierName: String(raw.supplier_name ?? ''),
     items: [],
     subtotal: toNum(raw.subtotal),
     gstTotal: toNum(raw.gst_amount),
@@ -247,7 +249,7 @@ export function normalizePurchaseRow(raw: Record<string, unknown>): Purchase {
     amountPaid: toNum(raw.paid_amount),
     paymentStatus,
     status: paymentStatus || String(raw.status ?? ''),
-    createdAt: String(raw.created_at ?? ''),
+    createdAt: String(raw.created_at ?? raw._updated_at ?? ''),
   };
 }
 
@@ -255,32 +257,140 @@ export function normalizePurchaseRow(raw: Record<string, unknown>): Purchase {
 
 export const purchasesApi = {
   getPurchases: async (params?: PurchaseParams): Promise<PaginatedPurchases> => {
-    const res = await apiClient.get<{ data: Record<string, unknown>[]; pagination: ApiPagination }>('/purchases', {
-      params,
-    });
-    const { data, pagination } = extractPaginated(res);
+    const conditions: string[] = [];
+    const values: any[] = [];
+
+    if (params?.supplier_id) { conditions.push('supplier_id=?'); values.push(params.supplier_id); }
+    if (params?.status) { conditions.push('payment_status=?'); values.push(params.status); }
+
+    const where = conditions.length > 0 ? conditions.join(' AND ') : '';
+    const rows = await queryAll<Record<string, unknown>>('purchases', where, values);
+
+    // Attach supplier name
+    for (const row of rows) {
+      if (row.supplier_id) {
+        const supp = await queryOne<Record<string, unknown>>('suppliers', '_local_id=? OR id=?', [row.supplier_id as string, row.supplier_id as string]);
+        (row as any).supplier_name = supp?.name ?? '';
+      }
+    }
+
+    rows.sort((a, b) => String(b.created_at ?? b._updated_at ?? '').localeCompare(String(a.created_at ?? a._updated_at ?? '')));
+
+    const page = params?.page ?? 1;
+    const limit = params?.limit ?? 20;
+    const offset = (page - 1) * limit;
+    const paged = rows.slice(offset, offset + limit);
+
     return {
-      data: data.map((row) => normalizePurchaseRow(row as Record<string, unknown>)),
-      pagination,
+      data: paged.map(normalizePurchaseRow),
+      pagination: { page, limit, total: rows.length, totalPages: Math.ceil(rows.length / limit) },
     };
   },
 
   getPurchase: async (id: string): Promise<PurchaseDetail> => {
-    const res = await apiClient.get<{ data: PurchaseDetail }>(`/purchases/${id}`);
-    return extract(res);
+    const row = await queryOne<Record<string, unknown>>('purchases', '_local_id=? OR id=?', [id, id]);
+    if (!row) throw new Error('Purchase not found');
+
+    const purchaseId = row._local_id ?? row.id;
+    const itemRows = await queryAll<Record<string, unknown>>('purchase_items', 'purchase_id=?', [purchaseId as string]);
+
+    // Attach medicine names to items
+    const purchase_items: PurchaseLineItemRow[] = [];
+    for (const item of itemRows) {
+      let medicineName = '';
+      if (item.medicine_id) {
+        const med = await queryOne<Record<string, unknown>>('medicines', '_local_id=? OR id=?', [item.medicine_id as string, item.medicine_id as string]);
+        medicineName = String(med?.name ?? '');
+      }
+      purchase_items.push({
+        medicine_id: String(item.medicine_id ?? ''),
+        batch_number: String(item.batch_number ?? ''),
+        expiry_date: String(item.expiry_date ?? ''),
+        quantity: Number(item.quantity ?? 0),
+        purchase_price: Number(item.purchase_price ?? 0),
+        mrp: Number(item.mrp ?? 0),
+        gst_rate: Number(item.gst_rate ?? 0),
+        medicines: { name: medicineName },
+      });
+    }
+
+    let supplierName = '';
+    if (row.supplier_id) {
+      const supp = await queryOne<Record<string, unknown>>('suppliers', '_local_id=? OR id=?', [row.supplier_id as string, row.supplier_id as string]);
+      supplierName = String(supp?.name ?? '');
+    }
+
+    return {
+      id: String(row.id ?? row._local_id ?? ''),
+      invoice_number: row.invoice_number as string,
+      invoice_date: row.invoice_date as string,
+      subtotal: row.subtotal as number,
+      gst_amount: row.gst_amount as number,
+      net_amount: row.net_amount as number,
+      paid_amount: row.paid_amount as number,
+      payment_status: row.payment_status as string,
+      created_at: String(row.created_at ?? row._updated_at ?? ''),
+      supplier_id: row.supplier_id as string,
+      purchase_items,
+      suppliers: { name: supplierName },
+    };
   },
 
   createPurchase: async (body: CreatePurchaseBody): Promise<Purchase> => {
-    const res = await apiClient.post<{ data: Record<string, unknown> }>('/purchases', body);
-    return normalizePurchaseRow(extract(res) as Record<string, unknown>);
+    const { items, ...purchaseData } = body;
+    const purchase = await localMutate({ table: 'purchases', operation: 'INSERT', data: purchaseData });
+
+    for (const item of items) {
+      await localMutate({
+        table: 'purchase_items',
+        operation: 'INSERT',
+        data: { ...item, purchase_id: purchase._local_id }
+      });
+
+      // Increment stock on batch (create or update)
+      const existingBatch = await queryOne<Record<string, any>>(
+        'medicine_batches',
+        'medicine_id=? AND batch_number=?',
+        [item.medicine_id, item.batch_number]
+      );
+
+      if (existingBatch) {
+        await localMutate({
+          table: 'medicine_batches',
+          operation: 'UPDATE',
+          data: {
+            _local_id: existingBatch._local_id,
+            quantity_remaining: Number(existingBatch.quantity_remaining ?? 0) + item.quantity,
+          }
+        });
+      } else {
+        await localMutate({
+          table: 'medicine_batches',
+          operation: 'INSERT',
+          data: {
+            medicine_id: item.medicine_id,
+            purchase_id: purchase._local_id,
+            batch_number: item.batch_number,
+            expiry_date: item.expiry_date,
+            quantity_in: item.quantity,
+            quantity_remaining: item.quantity,
+            purchase_price: item.purchase_price,
+            mrp: item.mrp,
+          }
+        });
+      }
+    }
+
+    return normalizePurchaseRow(purchase as Record<string, unknown>);
   },
 
   updatePayment: async (id: string, body: UpdatePaymentBody): Promise<PurchaseDetail> => {
-    const res = await apiClient.patch<{ data: PurchaseDetail }>(`/purchases/${id}/payment`, body);
-    return extract(res);
+    const record = await localMutate({ table: 'purchases', operation: 'UPDATE', data: { ...body, _local_id: id } });
+    return record as unknown as PurchaseDetail;
   },
 
   scanBill: async (imageBase64: string, mimeType: string): Promise<BillScanResult> => {
+    // scanBill requires network — sends image to Claude AI on the server
     const res = await apiClient.post<{ data: BillScanResult }>('/purchases/bill-scan', {
       imageBase64,
       mimeType,

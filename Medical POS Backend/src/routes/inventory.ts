@@ -1,77 +1,46 @@
 import { Router } from 'express';
 import { requireAuth } from '../middleware/auth';
 import { requireRole } from '../middleware/rbac';
-import { supabaseAdmin } from '../config/supabase';
 import { createMedicineSchema, updateMedicineSchema } from '../schemas/medicine.schema';
-import { auditLog } from '../services/auditLog';
+import { localMutate } from '../lib/localMutate';
+import { queryAll, queryOne, queryRaw } from '../lib/localQuery';
 
 export const inventoryRouter = Router();
 
-// GET /api/inventory/medicines/search?q= &barcode=
-inventoryRouter.get('/medicines/search', requireAuth, async (req, res, next) => {
+// GET /api/inventory/medicines/search?q=&barcode=
+inventoryRouter.get('/medicines/search', requireAuth, (req, res, next) => {
   try {
     const q = (req.query.q as string) || '';
     const barcode = (req.query.barcode as string) || '';
 
+    let results: any[] = [];
+
     if (barcode) {
-      const { data: exact, error: e1 } = await supabaseAdmin
-        .from('medicines')
-        .select('*, medicine_stock(total_stock), medicine_batches(*)')
-        .eq('clinic_id', req.user!.clinic_id!)
-        .eq('is_active', true)
-        .eq('barcode', barcode)
-        .limit(5);
-
-      if (e1) throw e1;
-
-      const results = exact || [];
-      const matchedNames = results.map((r) => r.generic_name).filter(Boolean);
-      let substitutes: any[] = [];
-      if (matchedNames.length > 0) {
-        const { data: subsData } = await supabaseAdmin
-          .from('medicines')
-          .select('*, medicine_stock!inner(total_stock)')
-          .eq('clinic_id', req.user!.clinic_id!)
-          .eq('is_active', true)
-          .in('generic_name', matchedNames as string[])
-          .gt('medicine_stock.total_stock', 0);
-        if (subsData) {
-          const resultIds = results.map((r) => r.id);
-          substitutes = subsData.filter((sub) => !resultIds.includes(sub.id));
-        }
-      }
-      return res.json({ results, substitutes });
-    }
-
-    if (!q) {
+      results = queryAll('medicines', 'barcode=? AND is_active=1', [barcode]);
+    } else if (q) {
+      results = queryAll('medicines', '(name LIKE ? OR generic_name LIKE ?) AND is_active=1', [`%${q}%`, `%${q}%`]);
+    } else {
       return res.json({ results: [], substitutes: [] });
     }
 
-    const { data: results, error } = await supabaseAdmin
-      .from('medicines')
-      .select('*, medicine_stock(total_stock), medicine_batches(*)')
-      .eq('clinic_id', req.user!.clinic_id!)
-      .eq('is_active', true)
-      .or(`name.ilike.%${q}%,generic_name.ilike.%${q}%`);
+    // Attach batches to each result
+    for (const med of results) {
+      const batches = queryAll('medicine_batches', 'medicine_id=? AND quantity_remaining>0', [med._local_id]);
+      med.medicine_batches = batches;
+      med.total_stock = batches.reduce((s: number, b: any) => s + Number(b.quantity_remaining ?? 0), 0);
+    }
 
-    if (error) throw error;
-
-    const matchedNames = results.map(r => r.generic_name).filter(Boolean);
+    // Find substitutes by generic name
     let substitutes: any[] = [];
-
-    if (matchedNames.length > 0) {
-      const { data: subsData } = await supabaseAdmin
-        .from('medicines')
-        .select('*, medicine_stock!inner(total_stock)')
-        .eq('clinic_id', req.user!.clinic_id!)
-        .eq('is_active', true)
-        .in('generic_name', matchedNames)
-        .gt('medicine_stock.total_stock', 0);
-
-      if (subsData) {
-        const resultIds = results.map(r => r.id);
-        substitutes = subsData.filter(sub => !resultIds.includes(sub.id));
-      }
+    const genericNames = results.map((r: any) => r.generic_name).filter(Boolean);
+    if (genericNames.length > 0) {
+      const resultIds = results.map((r: any) => r._local_id);
+      const placeholders = genericNames.map(() => '?').join(',');
+      const allGeneric = queryRaw(
+        `SELECT * FROM medicines WHERE _deleted=0 AND is_active=1 AND generic_name IN (${placeholders})`,
+        genericNames
+      );
+      substitutes = (allGeneric as any[]).filter(s => !resultIds.includes(s._local_id));
     }
 
     res.json({ results, substitutes });
@@ -81,32 +50,31 @@ inventoryRouter.get('/medicines/search', requireAuth, async (req, res, next) => 
 });
 
 // GET /api/inventory/medicines
-inventoryRouter.get('/medicines', requireAuth, async (req, res, next) => {
+inventoryRouter.get('/medicines', requireAuth, (req, res, next) => {
   try {
     const q = req.query.q as string;
     const category = req.query.category as string;
     const lowStock = req.query.low_stock === 'true';
     const scheduleH1 = req.query.schedule_h1 === 'true';
 
-    let query = supabaseAdmin
-      .from('medicines')
-      .select('*, medicine_stock(total_stock)')
-      .eq('clinic_id', req.user!.clinic_id!)
-      .eq('is_active', true);
+    const conditions: string[] = ['is_active=1'];
+    const values: any[] = [];
 
-    if (q) query = query.or(`name.ilike.%${q}%,generic_name.ilike.%${q}%`);
-    if (category) query = query.eq('category', category);
-    if (scheduleH1) query = query.eq('is_schedule_h1', true);
+    if (q) { conditions.push('(name LIKE ? OR generic_name LIKE ?)'); values.push(`%${q}%`, `%${q}%`); }
+    if (category) { conditions.push('category=?'); values.push(category); }
+    if (scheduleH1) { conditions.push('is_schedule_h1=1'); }
 
-    const { data: rawData, error } = await query;
-    if (error) throw error;
+    const where = conditions.join(' AND ');
+    let data = queryAll('medicines', where, values);
 
-    let data = rawData;
+    // Attach stock totals
+    for (const med of data) {
+      const batches = queryAll('medicine_batches', 'medicine_id=?', [(med as any)._local_id]);
+      (med as any).total_stock = batches.reduce((s: number, b: any) => s + Number(b.quantity_remaining ?? 0), 0);
+    }
+
     if (lowStock) {
-      data = rawData.filter(d => {
-        const stock = d.medicine_stock?.[0]?.total_stock || 0;
-        return stock <= d.low_stock_threshold;
-      });
+      data = data.filter((d: any) => (d.total_stock ?? 0) <= (d.low_stock_threshold ?? 10));
     }
 
     res.json({ data });
@@ -116,55 +84,30 @@ inventoryRouter.get('/medicines', requireAuth, async (req, res, next) => {
 });
 
 // GET /api/inventory/medicines/:id
-inventoryRouter.get('/medicines/:id', requireAuth, async (req, res, next) => {
+inventoryRouter.get('/medicines/:id', requireAuth, (req, res, next) => {
   try {
-    const { data: medicine, error } = await supabaseAdmin
-      .from('medicines')
-      .select('*')
-      .eq('id', req.params.id)
-      .eq('clinic_id', req.user!.clinic_id!)
-      .eq('is_active', true)
-      .maybeSingle();
-
-    if (error) throw error;
+    const medicine = queryOne('medicines', '(_local_id=? OR id=?) AND is_active=1', [req.params.id, req.params.id]);
     if (!medicine) {
       return res.status(404).json({ error: { message: 'Medicine not found', code: 'NOT_FOUND' } });
     }
 
-    const { data: batches } = await supabaseAdmin
-      .from('medicine_batches')
-      .select('*')
-      .eq('medicine_id', req.params.id)
-      .eq('clinic_id', req.user!.clinic_id!)
-      .order('expiry_date', { ascending: true });
+    const medId = (medicine as any)._local_id;
+    const batches = queryAll('medicine_batches', 'medicine_id=?', [medId]);
+    batches.sort((a: any, b: any) => String(a.expiry_date ?? '').localeCompare(String(b.expiry_date ?? '')));
 
-    res.json({ data: { ...medicine, batches: batches || [] } });
+    res.json({ data: { ...medicine, batches } });
   } catch (err) {
     next(err);
   }
 });
 
 // POST /api/inventory/medicines
-inventoryRouter.post('/medicines', requireAuth, requireRole('OWNER'), async (req, res, next) => {
+inventoryRouter.post('/medicines', requireAuth, requireRole('OWNER'), (req, res, next) => {
   try {
     const parsed = createMedicineSchema.parse(req.body);
     const payload = { ...parsed, clinic_id: req.user!.clinic_id! };
 
-    const { data, error } = await supabaseAdmin
-      .from('medicines')
-      .insert(payload)
-      .select()
-      .single();
-
-    if (error) throw error;
-
-    await auditLog({ 
-      clinicId: req.user!.clinic_id!, 
-      userId: req.user!.id, 
-      action: 'CREATE', 
-      table: 'medicines', 
-      newData: data 
-    });
+    const data = localMutate({ table: 'medicines', operation: 'INSERT', data: payload });
 
     res.status(201).json({ data });
   } catch (err) {
@@ -173,30 +116,12 @@ inventoryRouter.post('/medicines', requireAuth, requireRole('OWNER'), async (req
 });
 
 // PUT /api/inventory/medicines/:id
-inventoryRouter.put('/medicines/:id', requireAuth, requireRole('OWNER'), async (req, res, next) => {
+inventoryRouter.put('/medicines/:id', requireAuth, requireRole('OWNER'), (req, res, next) => {
   try {
     const parsed = updateMedicineSchema.parse(req.body);
     const payload = { ...parsed, clinic_id: req.user!.clinic_id! };
 
-    const { data, error } = await supabaseAdmin
-      .from('medicines')
-      .update(payload)
-      .eq('id', req.params.id)
-      .eq('clinic_id', req.user!.clinic_id!)
-      .eq('is_active', true)
-      .select()
-      .single();
-
-    if (error) throw error;
-
-    await auditLog({ 
-      clinicId: req.user!.clinic_id!, 
-      userId: req.user!.id, 
-      action: 'UPDATE', 
-      table: 'medicines', 
-      newData: data,
-      recordId: req.params.id
-    });
+    const data = localMutate({ table: 'medicines', operation: 'UPDATE', data: { ...payload, _local_id: req.params.id } });
 
     res.json({ data });
   } catch (err) {
@@ -205,26 +130,9 @@ inventoryRouter.put('/medicines/:id', requireAuth, requireRole('OWNER'), async (
 });
 
 // DELETE /api/inventory/medicines/:id
-inventoryRouter.delete('/medicines/:id', requireAuth, requireRole('OWNER'), async (req, res, next) => {
+inventoryRouter.delete('/medicines/:id', requireAuth, requireRole('OWNER'), (req, res, next) => {
   try {
-    const { data, error } = await supabaseAdmin
-      .from('medicines')
-      .update({ is_active: false })
-      .eq('id', req.params.id)
-      .eq('clinic_id', req.user!.clinic_id!)
-      .select()
-      .single();
-
-    if (error) throw error;
-
-    await auditLog({ 
-      clinicId: req.user!.clinic_id!, 
-      userId: req.user!.id, 
-      action: 'DELETE', 
-      table: 'medicines', 
-      newData: data,
-      recordId: req.params.id
-    });
+    const data = localMutate({ table: 'medicines', operation: 'DELETE', data: { _local_id: req.params.id } });
 
     res.json({ data });
   } catch (err) {
@@ -233,21 +141,16 @@ inventoryRouter.delete('/medicines/:id', requireAuth, requireRole('OWNER'), asyn
 });
 
 // GET /api/inventory/batches
-inventoryRouter.get('/batches', requireAuth, async (req, res, next) => {
+inventoryRouter.get('/batches', requireAuth, (req, res, next) => {
   try {
     const medicineId = req.query.medicine_id as string;
     if (!medicineId) {
       return res.status(400).json({ error: 'medicine_id is required' });
     }
 
-    const { data, error } = await supabaseAdmin
-      .from('medicine_batches')
-      .select('*')
-      .eq('medicine_id', medicineId)
-      .eq('clinic_id', req.user!.clinic_id!)
-      .order('expiry_date', { ascending: true });
+    const data = queryAll('medicine_batches', 'medicine_id=?', [medicineId]);
+    data.sort((a: any, b: any) => String(a.expiry_date ?? '').localeCompare(String(b.expiry_date ?? '')));
 
-    if (error) throw error;
     res.json({ data });
   } catch (err) {
     next(err);
@@ -255,37 +158,34 @@ inventoryRouter.get('/batches', requireAuth, async (req, res, next) => {
 });
 
 // GET /api/inventory/batches/expiring
-inventoryRouter.get('/batches/expiring', requireAuth, async (req, res, next) => {
+inventoryRouter.get('/batches/expiring', requireAuth, (req, res, next) => {
   try {
     const days = parseInt(req.query.days as string) || 90;
-    const { data, error } = await supabaseAdmin
-      .from('expiry_alerts')
-      .select('*')
-      .eq('clinic_id', req.user!.clinic_id!);
-
-    if (error) throw error;
-    
-    // Filtering down by days locally if required, since view is 90 days
     const maxDate = new Date();
     maxDate.setDate(maxDate.getDate() + days);
+    const maxStr = maxDate.toISOString().split('T')[0];
 
-    const filtered = data.filter(r => new Date(r.expiry_date) <= maxDate);
-    
-    res.json({ data: filtered });
+    const data = queryAll('medicine_batches', 'quantity_remaining>0 AND expiry_date<=?', [maxStr]);
+    data.sort((a: any, b: any) => String(a.expiry_date ?? '').localeCompare(String(b.expiry_date ?? '')));
+
+    res.json({ data });
   } catch (err) {
     next(err);
   }
 });
 
 // GET /api/inventory/stock/low
-inventoryRouter.get('/stock/low', requireAuth, async (req, res, next) => {
+inventoryRouter.get('/stock/low', requireAuth, (req, res, next) => {
   try {
-    const { data, error } = await supabaseAdmin
-      .from('low_stock_alerts')
-      .select('*')
-      .eq('clinic_id', req.user!.clinic_id!);
+    const data = queryRaw(
+      `SELECT m.*, COALESCE(SUM(mb.quantity_remaining), 0) as total_stock
+       FROM medicines m
+       LEFT JOIN medicine_batches mb ON mb.medicine_id = m._local_id AND mb._deleted=0
+       WHERE m._deleted=0 AND m.is_active=1
+       GROUP BY m._local_id
+       HAVING total_stock <= m.low_stock_threshold`
+    );
 
-    if (error) throw error;
     res.json({ data });
   } catch (err) {
     next(err);
@@ -293,30 +193,22 @@ inventoryRouter.get('/stock/low', requireAuth, async (req, res, next) => {
 });
 
 // GET /api/inventory/stock/summary
-inventoryRouter.get('/stock/summary', requireAuth, async (req, res, next) => {
+inventoryRouter.get('/stock/summary', requireAuth, (req, res, next) => {
   try {
-    const { data: medicines } = await supabaseAdmin
-      .from('medicines')
-      .select('id')
-      .eq('clinic_id', req.user!.clinic_id!)
-      .eq('is_active', true);
+    const medCount = queryRaw<{ cnt: number }>(
+      `SELECT COUNT(*) as cnt FROM medicines WHERE _deleted=0 AND is_active=1`
+    );
 
-    const { data: batches } = await supabaseAdmin
-      .from('medicine_batches')
-      .select('quantity_remaining, purchase_price')
-      .eq('clinic_id', req.user!.clinic_id!)
-      .gt('quantity_remaining', 0);
-
-    let totalStockValue = 0;
-    if (batches) {
-      totalStockValue = batches.reduce((acc, b) => acc + (b.quantity_remaining * b.purchase_price), 0);
-    }
+    const batchStats = queryRaw<{ total_batches: number; total_stock_value: number }>(
+      `SELECT COUNT(*) as total_batches, COALESCE(SUM(quantity_remaining * purchase_price), 0) as total_stock_value
+       FROM medicine_batches WHERE _deleted=0 AND quantity_remaining>0`
+    );
 
     res.json({
       data: {
-        total_medicines: medicines?.length || 0,
-        total_batches: batches?.length || 0,
-        total_stock_value: totalStockValue
+        total_medicines: medCount[0]?.cnt ?? 0,
+        total_batches: batchStats[0]?.total_batches ?? 0,
+        total_stock_value: batchStats[0]?.total_stock_value ?? 0
       }
     });
   } catch (err) {

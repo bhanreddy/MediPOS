@@ -1,56 +1,66 @@
 import { Router } from 'express';
 import { requireAuth } from '../middleware/auth';
-import { supabaseAdmin } from '../config/supabase';
+import { queryAll, queryRaw } from '../lib/localQuery';
 
 export const accountingRouter = Router();
 
 // GET /api/accounting/summary
-accountingRouter.get('/summary', requireAuth, async (req, res, next) => {
+accountingRouter.get('/summary', requireAuth, (req, res, next) => {
   try {
     const { from, to } = req.query;
-    const cid = req.user!.clinic_id!;
 
-    let saleQ = supabaseAdmin.from('sales').select('net_amount, is_return').eq('clinic_id', cid);
-    let expQ = supabaseAdmin.from('expenses').select('amount, category').eq('clinic_id', cid);
-    let cogsQ = supabaseAdmin.from('sale_items').select('quantity, medicine_batches!inner(purchase_price), sales!inner(sale_date)').eq('clinic_id', cid);
-    let custQ = supabaseAdmin.from('customers').select('outstanding_balance').eq('clinic_id', cid);
-    let suppQ = supabaseAdmin.from('suppliers').select('outstanding_balance').eq('clinic_id', cid);
+    const salesConditions = ['_deleted=0'];
+    const expConditions = ['_deleted=0'];
+    const salesValues: any[] = [];
+    const expValues: any[] = [];
 
     if (from) {
-      saleQ = saleQ.gte('sale_date', from);
-      expQ = expQ.gte('expense_date', from);
-      cogsQ = cogsQ.gte('sales.sale_date', from);
+      salesConditions.push('created_at>=?'); salesValues.push(from);
+      expConditions.push('expense_date>=?'); expValues.push(from);
     }
     if (to) {
-      saleQ = saleQ.lte('sale_date', to);
-      expQ = expQ.lte('expense_date', to);
-      cogsQ = cogsQ.lte('sales.sale_date', to);
+      salesConditions.push('created_at<=?'); salesValues.push(to);
+      expConditions.push('expense_date<=?'); expValues.push(to);
     }
 
-    const [ { data: sales }, { data: exps }, { data: cogsData }, { data: customers }, { data: suppliers } ] = await Promise.all([saleQ, expQ, cogsQ, custQ, suppQ]);
+    const sales = queryRaw<{ net_amount: number; is_return: number }>(
+      `SELECT net_amount, is_return FROM sales WHERE ${salesConditions.join(' AND ')}`,
+      salesValues
+    );
 
     let gross_revenue = 0;
     let total_returns = 0;
-    sales?.forEach(s => {
+    sales.forEach(s => {
       if (s.is_return) total_returns += Math.abs(Number(s.net_amount));
       else gross_revenue += Number(s.net_amount);
     });
 
     const net_revenue = gross_revenue - total_returns;
 
-    let cogs = 0;
-    cogsData?.forEach((c: any) => {
-       cogs += c.quantity * c.medicine_batches.purchase_price;
-    });
+    // COGS from sale_items joined with medicine_batches
+    const cogsRows = queryRaw<{ qty: number; pp: number }>(
+      `SELECT si.quantity as qty, mb.purchase_price as pp
+       FROM sale_items si
+       JOIN medicine_batches mb ON mb._local_id = si.batch_id
+       JOIN sales s ON s._local_id = si.sale_id
+       WHERE si._deleted=0 AND s._deleted=0${from ? ' AND s.created_at>=?' : ''}${to ? ' AND s.created_at<=?' : ''}`,
+      [...(from ? [from] : []), ...(to ? [to] : [])]
+    );
+    const cogs = cogsRows.reduce((a, r) => a + Number(r.qty) * Number(r.pp), 0);
 
     const gross_profit = net_revenue - cogs;
     const gross_margin_pct = net_revenue > 0 ? (gross_profit / net_revenue) * 100 : 0;
 
+    const exps = queryRaw<{ amount: number; category: string }>(
+      `SELECT amount, category FROM expenses WHERE ${expConditions.join(' AND ')}`,
+      expValues
+    );
+
     let total = 0;
     const expMap: Record<string, number> = {};
-    exps?.forEach(e => {
-       expMap[e.category] = (expMap[e.category] || 0) + Number(e.amount);
-       total += Number(e.amount);
+    exps.forEach(e => {
+      expMap[e.category] = (expMap[e.category] || 0) + Number(e.amount);
+      total += Number(e.amount);
     });
 
     const total_expenses = {
@@ -60,8 +70,11 @@ accountingRouter.get('/summary', requireAuth, async (req, res, next) => {
 
     const net_profit = gross_profit - total;
 
-    const outstanding_receivable = customers?.reduce((acc, c) => acc + Number(c.outstanding_balance), 0) || 0;
-    const outstanding_payable = suppliers?.reduce((acc, s) => acc + Number(s.outstanding_balance), 0) || 0;
+    const customers = queryAll('customers');
+    const outstanding_receivable = customers.reduce((acc: number, c: any) => acc + Number(c.outstanding_balance ?? 0), 0);
+
+    const suppliers = queryAll('suppliers');
+    const outstanding_payable = suppliers.reduce((acc: number, s: any) => acc + Number(s.outstanding_balance ?? 0), 0);
 
     const net_cash_position = net_profit - outstanding_payable + outstanding_receivable;
 
@@ -78,19 +91,26 @@ accountingRouter.get('/summary', requireAuth, async (req, res, next) => {
 });
 
 // GET /api/accounting/transactions
-accountingRouter.get('/transactions', requireAuth, async (req, res, next) => {
+accountingRouter.get('/transactions', requireAuth, (req, res, next) => {
   try {
-    const { from, to, type } = req.query;
-    const page = parseInt(req.query.page as string) || 1;
-    const limit = Math.min(parseInt(req.query.limit as string) || 50, 100);
-    const cid = req.user!.clinic_id!;
+    // Unified ledger — implemented as local union query
+    const sales = queryRaw<Record<string, any>>(
+      `SELECT _local_id as id, 'sale' as type, invoice_number as ref, net_amount as amount, created_at as date
+       FROM sales WHERE _deleted=0 ORDER BY created_at DESC LIMIT 50`
+    );
+    const expenses = queryRaw<Record<string, any>>(
+      `SELECT _local_id as id, 'expense' as type, category as ref, amount, expense_date as date
+       FROM expenses WHERE _deleted=0 ORDER BY expense_date DESC LIMIT 50`
+    );
+    const purchases = queryRaw<Record<string, any>>(
+      `SELECT _local_id as id, 'purchase' as type, invoice_number as ref, net_amount as amount, created_at as date
+       FROM purchases WHERE _deleted=0 ORDER BY created_at DESC LIMIT 50`
+    );
 
-    // A unified ledger requires a SQL view or complex union. Supabase doesn't natively union over REST effortlessly.
-    // For scaffolding, we will simulate the union by querying individual tables and paginating on sorted combined array.
-    
-    // In actual production, create a view 'unified_ledger' and REST over it.
+    const all = [...sales, ...expenses, ...purchases];
+    all.sort((a, b) => String(b.date ?? '').localeCompare(String(a.date ?? '')));
 
-    res.status(501).json({ error: "Unified ledger view requires a SQL VIEW 'transactions' across sales, expenses, and purchases. Implement DB viewpoint via Supabase dashboard." });
+    res.json({ data: all.slice(0, 50) });
   } catch (err) {
     next(err);
   }

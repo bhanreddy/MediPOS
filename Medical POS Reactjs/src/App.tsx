@@ -3,6 +3,9 @@ import { createBrowserRouter, RouterProvider, Outlet } from 'react-router-dom';
 import { useAuth } from './lib/auth';
 import { AuthGuard } from './components/auth/AuthGuard';
 import { LoginFlowPage } from './components/auth/LoginFlowPage';
+import { HomeRedirect } from './components/auth/HomeRedirect';
+import { startWebSyncListener } from './db/webSyncEngine';
+import { supabase } from './lib/supabase';
 
 const Placeholder = ({ title }: { title: string }) => <div className="p-4"><h1 className="text-xl">{title}</h1></div>;
 
@@ -14,6 +17,12 @@ const RootLayout = () => {
     
     useEffect(() => {
         checkSession();
+        
+        const getToken = async () => {
+            const { data } = await supabase.auth.getSession();
+            return data.session?.access_token || null;
+        };
+        startWebSyncListener(getToken);
     }, [checkSession]);
 
     return <Outlet />;
@@ -24,6 +33,7 @@ import { AdminDashboard } from './components/admin/AdminDashboard';
 import { AdminClinics } from './components/admin/AdminClinics';
 import { AdminUsers } from './components/admin/AdminUsers';
 import { AdminSystemHealth } from './components/admin/AdminSystemHealth';
+import { AdminClinicProfile } from './components/admin/AdminClinicProfile';
 
 import { ClinicLayout } from './components/clinic/ClinicLayout';
 import { ClinicDashboard } from './components/clinic/ClinicDashboard';
@@ -39,6 +49,7 @@ import { SuppliersListPage } from './components/clinic/SuppliersListPage';
 import { ExpensesListPage } from './components/clinic/ExpensesListPage';
 import { ReportsHubPage } from './components/clinic/ReportsHubPage';
 import { PurchaseWorkflowPage, InventoryPageShell } from './components/clinic/EmbeddedClinicScreens';
+import { ShortbookPage } from './components/clinic/ShortbookPage';
 import { SettingsScreen } from './components/Settings/SettingsScreen';
 
 const router = createBrowserRouter([
@@ -46,6 +57,7 @@ const router = createBrowserRouter([
         path: '/',
         element: <RootLayout />,
         children: [
+            { index: true, element: <HomeRedirect /> },
             { path: 'login', element: <LoginFlowPage /> },
             { path: 'register', element: <RegisterWizard /> },
             { path: '403', element: <Error403 /> },
@@ -59,13 +71,14 @@ const router = createBrowserRouter([
                 children: [
                     { path: 'dashboard', element: <AdminDashboard /> },
                     { path: 'clinics', element: <AdminClinics /> },
+                    { path: 'clinics/:id/profile', element: <AdminClinicProfile /> },
                     { path: 'clinics/:id', element: <Placeholder title="Clinic Details" /> },
                     { path: 'users', element: <AdminUsers /> },
                     { path: 'system', element: <AdminSystemHealth /> },
                 ]
             },
             {
-                path: '',
+                /* Pathless layout: matches /dashboard, /shortbook, etc. A parent with path: "" can fail to rank /shortbook in the data router. */
                 element: (
                     <AuthGuard>
                         <ClinicLayout />
@@ -78,6 +91,7 @@ const router = createBrowserRouter([
                     { path: 'purchases', element: <PurchasesListPage /> },
                     { path: 'purchases/new', element: <PurchaseWorkflowPage /> },
                     { path: 'inventory', element: <InventoryPageShell /> },
+                    { path: 'shortbook', element: <ShortbookPage /> },
                     { path: 'customers', element: <CustomersListPage /> },
                     { path: 'suppliers', element: <SuppliersListPage /> },
                     { path: 'expenses', element: <ExpensesListPage /> },
