@@ -1,0 +1,129 @@
+/* The reference's strong blocks and oversized brand, in Nexsyrus blue. */
+.nex-dashboard .dashboard-heading { margin-bottom: 16px; }
+.nex-dashboard .dashboard-heading h1 { font-size: clamp(22px, 2.2vw, 30px); letter-spacing: -.045em; }
+.nex-dashboard .dashboard-eyebrow { font-size: 9px; margin-bottom: 5px; }
+.nex-dashboard .dashboard-card { border-radius: 16px; box-shadow: none; }
+.nex-dashboard .dashboard-hero-row { margin-bottom: 18px; }
+.nex-dashboard .dashboard-revenue { position: relative; padding: 24px 32px 28px; border-radius: 18px; }
+.nex-dashboard .dashboard-revenue::before, .nex-dashboard .dashboard-revenue::after { content: ''; display: block; position: absolute; z-index: 2; top: 50%; width: 18px; height: 18px; border: 0; box-shadow: none; border-radius: 50%; background: rgb(var(--background)); transform: translateY(-50%); }
+.nex-dashboard .dashboard-revenue::before { left: -10px; }
+.nex-dashboard .dashboard-revenue::after { right: -10px; }
+.nex-dashboard .dashboard-card-heading { font-size: 10px; letter-spacing: .045em; }
+.nex-dashboard .dashboard-hero-date { display: flex; align-items: center; gap: 7px; border: 1px solid #ffffff45; border-radius: 20px; padding: 5px 10px; font-size: 10px; letter-spacing: 0; }
+.dashboard-hero-body { display: flex; align-items: flex-end; justify-content: space-between; gap: 28px; }
+.nex-dashboard .revenue-label { margin-top: 22px; font-size: 12px; color: #e1eaff; }
+.nex-dashboard .revenue-value { font-size: clamp(42px, 5.3vw, 76px); font-weight: 550; line-height: 1.15; letter-spacing: -.065em; margin-top: 7px; }
+.nex-dashboard .revenue-footer { flex: 0 1 50%; display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); column-gap: 28px; row-gap: 14px; margin: 20px 0 0; padding: 0 0 3px 28px; border-top: 0; border-left: 1px solid #ffffff35; }
+.nex-dashboard .revenue-footer > div > span { font-size: 11px; }
+.nex-dashboard .revenue-footer strong { font-size: 25px; letter-spacing: -.04em; }
+.nex-dashboard .revenue-footer strong span { font-size: 11px; }
+.nex-dashboard .liquid-primary-button { grid-column: 1 / -1; width: fit-content; margin: 0; min-height: 38px; padding: 8px 14px; border-radius: 24px; font-size: 11px; }
+.dashboard-content-grid { display: grid; grid-template-columns: minmax(0, 1.05fr) minmax(0, 1fr); gap: 18px; align-items: stretch; }
+.nex-dashboard .dashboard-trend { padding: 20px 22px; }
+.nex-dashboard .trend-number { margin-top: 8px; font-size: 28px; letter-spacing: -.04em; }
+.nex-dashboard .dashboard-chart { height: 110px; margin-top: 8px; }
+.nex-dashboard .dashboard-section-heading h2 { font-size: 15px; letter-spacing: -.025em; }
+.dashboard-utilities { display: flex; flex-direction: column; min-width: 0; }
+.nex-dashboard .dashboard-financials { margin-top: 0; gap: 12px; }
+.nex-dashboard .dashboard-metric { padding: 18px 16px; }
+.nex-dashboard .dashboard-metric > .liquid-content { gap: 10px; flex-wrap: wrap; }
+.nex-dashboard .dashboard-metric > .liquid-content > div:nth-child(2) { flex: 1; min-width: 0; }
+.nex-dashboard .dashboard-metric strong { font-size: clamp(21px, 2.3vw, 29px); line-height: 1.35; letter-spacing: -.04em; overflow-wrap: anywhere; }
+.nex-dashboard .dashboard-metric .metric-link { display: none; }
+.nex-dashboard .dashboard-metric .dashboard-symbol { width: 30px; height: 30px; border-radius: 50%; }
+.nex-dashboard .dashboard-actions-title { margin: 17px 0 8px; }
+.nex-dashboard .dashboard-actions-title h2 { font-size: 12px; color: rgb(var(--muted)); }
+.nex-dashboard .dashboard-quick-actions { background: transparent; border: 0; border-radius: 0; flex: 1; display: flex; }
+.nex-dashboard .dashboard-quick-actions > .liquid-content { display: grid; flex: 1; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; padding: 0; }
+.nex-dashboard .dashboard-quick-actions a, .nex-dashboard .dashboard-quick-actions a:first-child { padding: 7px 12px; gap: 8px; min-height: 43px; border: 1px solid rgb(var(--border)); background: rgb(var(--surface-alt)); border-radius: 28px; transition: background-color 150ms ease, color 150ms ease, border-color 150ms ease; }
+.nex-dashboard .dashboard-quick-actions a:hover { background: #2457e6; border-color: #2457e6; color: #fff; }
+.nex-dashboard .dashboard-quick-actions :is(.dashboard-symbol, .quick-action-arrow) { transition: color 150ms ease; }
+.nex-dashboard .dashboard-quick-actions a:hover :is(.dashboard-symbol, .quick-action-arrow) { color: #fff; }
+.nex-dashboard .dashboard-quick-actions .dashboard-symbol { width: 25px; height: 25px; border-radius: 50%; background: transparent; }
+.nex-dashboard .dashboard-quick-actions .dashboard-symbol svg { width: 17px; height: 17px; }
+.nex-dashboard .dashboard-quick-actions strong { font-size: 11px; }
+.nex-dashboard .dashboard-activity, .nex-dashboard .dashboard-attention { padding: 20px; align-self: start; }
+.dashboard-customer-stack { display: flex; margin: 0 0 10px; }
+.dashboard-customer-stack > span { display: grid; place-items: center; width: 29px; height: 29px; flex-shrink: 0; border: 2px solid rgb(var(--surface)); border-radius: 50%; background: rgb(var(--primary) / .16); color: rgb(var(--primary)); font-size: 9px; font-weight: 650; }
+.dashboard-customer-stack > span + span { margin-left: -7px; }
+.dashboard-customer-stack > span:nth-child(2) { background: rgb(var(--primary) / .08); }
+.dashboard-customer-stack > span:nth-child(3) { background: #2457e6; color: #fff; }
+.nex-dashboard .dashboard-activity .dashboard-section-heading { align-items: flex-end; }
+.nex-dashboard .dashboard-sales-table { margin-top: 14px; }
+.nex-dashboard .dashboard-sale { padding: 12px 0; }
+.dashboard-stock-layout { display: grid; grid-template-columns: 1.1fr 1fr; gap: 12px; margin-top: 18px; }
+.dashboard-stock-visual { display: flex; min-width: 0; flex-direction: column; overflow: hidden; border: 1px solid rgb(var(--border)); border-radius: 12px; background: rgb(var(--primary) / .08); }
+.dashboard-stock-image { display: grid; place-items: center; flex: 1; min-height: 150px; padding: 10px; }
+.dashboard-stock-image img { width: 100%; height: 150px; object-fit: contain; }
+.dashboard-stock-visual > span { display: flex; align-items: center; justify-content: space-between; gap: 5px; padding: 11px 10px; color: #fff; background: #2457e6; font-size: 10px; font-weight: 600; }
+.dashboard-stock-visual:hover { border-color: #9eb5f4; }
+.nex-dashboard .attention-items { display: flex; flex-direction: column; gap: 8px; margin-top: 0; }
+.nex-dashboard .attention-item { flex: 1; min-width: 0; flex-wrap: wrap; gap: 7px; padding: 10px; border: 1px solid rgb(var(--border)); border-radius: 10px; background: rgb(var(--surface)); }
+.nex-dashboard .attention-item:hover { border-color: #b2c4f5; background: rgb(var(--surface-alt)); }
+.nex-dashboard .attention-item .dashboard-symbol { display: none; }
+.nex-dashboard .attention-item > div:nth-child(2) { flex: 1; }
+.nex-dashboard .attention-item strong { font-size: 11px; font-weight: 600; }
+.nex-dashboard .attention-count { min-width: 24px; height: 24px; margin-left: 0; border-radius: 7px; font-size: 10px; }
+.nex-dashboard .attention-item > svg { display: none; }
+.nex-dashboard .attention-note { margin-top: 13px; font-size: 10px; }
+.nex-dashboard .dashboard-brand-panel { display: block; padding: 22px 28px 17px; margin-top: 18px; border-radius: 16px; overflow: hidden; background: #2457e6; color: #fff; }
+.dashboard-brand-top { display: flex; align-items: center; justify-content: space-between; gap: 14px; }
+.dashboard-brand-label { display: flex; align-items: center; gap: 8px; font-size: 10px; font-weight: 600; }
+.dashboard-brand-label > svg { width: 28px; height: 28px; padding: 5px; border: 1px solid #ffffff65; border-radius: 7px; }
+.dashboard-brand-top nav { display: flex; align-items: center; gap: 8px; }
+.dashboard-brand-top nav a { display: flex; align-items: center; gap: 7px; min-height: 32px; padding: 6px 11px; border: 1px solid #ffffff45; border-radius: 22px; font-size: 10px; color: #fff; transition: background-color 150ms ease, color 150ms ease; }
+.dashboard-brand-top nav a:hover { background: #fff; color: #000; }
+.dashboard-brand-wordmark { width: fit-content; margin: 19px auto 0; font-size: clamp(65px, 12vw, 172px); font-weight: 750; letter-spacing: -.06em; line-height: 1.1; color: #fff; }
+.nex-dashboard :is(.dashboard-stock-visual, .dashboard-brand-panel a):focus-visible { outline: 2px solid #2457e6; outline-offset: 3px; }
+.nex-dashboard .dashboard-brand-panel a:focus-visible { outline-color: #fff; }
+@media (max-width: 1100px) {
+  .nex-dashboard .revenue-value { font-size: clamp(42px, 6vw, 64px); }
+  .nex-dashboard .dashboard-metric > .liquid-content { align-items: flex-start; }
+  .nex-dashboard .dashboard-metric .dashboard-symbol { display: none; }
+  .nex-dashboard .dashboard-sales-table-head, .nex-dashboard .dashboard-sale { grid-template-columns: minmax(0, 1fr) 70px; gap: 8px; }
+  .nex-dashboard .dashboard-sales-table-head > span:nth-child(2), .nex-dashboard .sale-payment { display: none; }
+}
+@media (max-width: 760px) {
+  .nex-dashboard .dashboard-heading h1 { font-size: 23px; }
+  .nex-dashboard .dashboard-revenue { padding: 20px 24px; }
+  .dashboard-hero-body { flex-direction: column; align-items: stretch; gap: 16px; }
+  .nex-dashboard .revenue-footer { flex: none; grid-template-columns: 1fr 1fr auto; gap: 12px; padding: 15px 0 0; margin: 0; border-left: 0; border-top: 1px solid #ffffff35; align-items: end; }
+  .nex-dashboard .liquid-primary-button { grid-column: auto; align-self: end; padding: 8px 10px; }
+  .nex-dashboard .liquid-primary-button > svg:last-child { display: none; }
+  .nex-dashboard .dashboard-activity, .nex-dashboard .dashboard-attention { grid-column: 1 / -1; }
+  .nex-dashboard .dashboard-metric { padding: 15px 12px; }
+  .nex-dashboard .dashboard-metric strong { font-size: 22px; }
+  .nex-dashboard .dashboard-brand-panel { padding: 20px 22px 18px; }
+  .dashboard-brand-wordmark { font-size: clamp(65px, 13vw, 105px); }
+}
+@media (max-width: 560px) {
+  .dashboard-content-grid { grid-template-columns: minmax(0, 1fr); }
+  .dashboard-content-grid { row-gap: 14px; }
+  .nex-dashboard .dashboard-activity, .nex-dashboard .dashboard-attention { margin-top: 4px; }
+  .nex-dashboard .dashboard-card-heading { font-size: 9px; }
+  .nex-dashboard .dashboard-hero-date { font-size: 9px; padding: 4px 7px; }
+  .nex-dashboard .revenue-value { font-size: clamp(40px, 11vw, 57px); }
+  .nex-dashboard .revenue-footer strong { font-size: 21px; }
+  .nex-dashboard .revenue-footer > div > span { font-size: 9px; }
+  .nex-dashboard .liquid-primary-button { font-size: 10px; min-height: 40px; gap: 5px; padding: 7px 10px; }
+  .nex-dashboard .liquid-primary-button > svg { width: 15px; height: 15px; }
+  .nex-dashboard .dashboard-trend { padding: 18px; }
+  .nex-dashboard .dashboard-utilities { gap: 0; }
+  .nex-dashboard .dashboard-financials { gap: 10px; }
+  .nex-dashboard .dashboard-actions-title { margin-top: 14px; }
+  .nex-dashboard .dashboard-quick-actions > .liquid-content { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .nex-dashboard .dashboard-activity, .nex-dashboard .dashboard-attention { padding: 17px; }
+  .dashboard-stock-image, .dashboard-stock-image img { min-height: 150px; height: 150px; }
+  .dashboard-brand-top { align-items: flex-start; flex-direction: column; gap: 12px; }
+  .dashboard-brand-top nav { width: 100%; }
+  .dashboard-brand-top nav a { flex: 1; justify-content: center; min-height: 36px; padding: 6px 8px; }
+  .dashboard-brand-wordmark { font-size: clamp(59px, 16vw, 90px); margin-top: 20px; }
+}
+@media (max-width: 350px) {
+  .nex-dashboard .revenue-footer { grid-template-columns: 1fr 1fr; }
+  .nex-dashboard .liquid-primary-button { grid-column: 1 / -1; }
+  .nex-dashboard .dashboard-revenue { padding: 18px; }
+  .nex-dashboard .dashboard-hero-date svg { display: none; }
+}
+@media (pointer: coarse) { .nex-dashboard .liquid-primary-button, .dashboard-brand-top nav a, .nex-dashboard .dashboard-quick-actions a { min-height: 44px; } }
+@media (forced-colors: active) { .nex-dashboard .dashboard-revenue::before, .nex-dashboard .dashboard-revenue::after { display: none; } .nex-dashboard .dashboard-brand-panel { background: Canvas; color: CanvasText; border: 1px solid CanvasText; } .dashboard-brand-wordmark { color: CanvasText; } }

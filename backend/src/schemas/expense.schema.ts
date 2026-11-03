@@ -1,0 +1,18 @@
+import { z } from 'zod';
+import { dateOnlySchema } from './date.schema';
+
+const baseExpenseSchema = z.object({
+  category: z.enum(['rent', 'salary', 'utilities', 'supplies', 'maintenance', 'misc']),
+  description: z.string().optional().nullable(),
+  amount: z.number().finite().positive(),
+  expense_date: dateOnlySchema,
+  payment_mode: z.enum(['cash', 'upi', 'card', 'bank_transfer']).default('cash'),
+  store_id: z.string().optional().nullable(),
+  counter_id: z.string().optional().nullable(),
+  terminal_id: z.string().optional().nullable(),
+  clinic_id: z.string().optional(),
+  _local_id: z.string().optional(),
+});
+
+export const createExpenseSchema = baseExpenseSchema.transform(({ clinic_id, ...rest }) => rest);
+export const updateExpenseSchema = baseExpenseSchema.partial().transform(({ clinic_id, ...rest }) => rest);

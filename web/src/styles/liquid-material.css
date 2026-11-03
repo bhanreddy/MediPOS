@@ -1,0 +1,67 @@
+/* Shared Nexsyrus surfaces. Legacy class names remain compatible with existing screens. */
+:root, .dark {
+  --glass-body: rgb(var(--surface));
+  --glass-chrome: rgb(var(--surface));
+  --glass-edge: rgb(var(--border));
+  --glass-highlight: transparent;
+  --glass-sheen: none;
+  --glass-shadow: 0 2px 5px rgb(var(--overlay) / .025);
+  --workspace-wash: rgb(var(--background));
+}
+body, .clinic-liquid-shell, .admin-workspace, .auth-workspace { background: var(--workspace-wash); }
+.clinic-liquid-shell > div > main { background: rgb(var(--background)); }
+.premium-card, .premium-table, .glass-panel, .liquid-surface,
+.premium-content :is(.bg-surface, .bg-bg-surface, .bg-bg-card).border,
+.premium-content :is(.bg-surface, .bg-bg-surface, .bg-bg-card).border-2 {
+  background: rgb(var(--surface));
+  border-color: rgb(var(--border));
+  box-shadow: var(--glass-shadow);
+  border-radius: 14px;
+}
+.premium-card .premium-table { box-shadow: none; border-radius: 10px; }
+.premium-table tbody { background: rgb(var(--surface)); }
+.premium-table thead { background: rgb(var(--surface-elevated)); }
+.premium-table tbody tr:hover { background: rgb(var(--surface-alt)); }
+.clinic-liquid-shell > aside, .admin-workspace > aside, .clinic-liquid-shell > div > header {
+  background: rgb(var(--surface)); border-color: rgb(var(--border)); box-shadow: none;
+}
+.clinic-liquid-shell > aside nav a[aria-current='page'], .admin-workspace nav a[aria-current='page'] {
+  background: rgb(var(--primary) / .08); box-shadow: inset 3px 0 rgb(var(--primary));
+}
+.glass-button { position: relative; overflow: hidden; border-radius: 8px; box-shadow: none; background-image: none; }
+.glass-button-secondary { background: rgb(var(--surface)); border-color: rgb(var(--border)); }
+.glass-input, .premium-content :is(input:not([type="checkbox"]):not([type="radio"]), select, textarea) {
+  background: rgb(var(--surface)); box-shadow: none; border-radius: 8px;
+}
+.premium-content .report-option[aria-pressed='true'] { border-color: rgb(var(--primary)); background: rgb(var(--primary) / .06); box-shadow: none; }
+.glass-dialog { background: rgb(var(--surface)); border-color: rgb(var(--border)); border-radius: 14px; box-shadow: 0 16px 48px rgb(var(--overlay) / .14); }
+.glass-dialog > :last-child { border-bottom-left-radius: 14px; border-bottom-right-radius: 14px; }
+.auth-frame { max-width: 460px; padding: 32px; background: rgb(var(--surface)); border: 1px solid rgb(var(--border)); border-radius: 14px; box-shadow: none; }
+.auth-brand, .auth-footer { position: relative; z-index: 1; }
+.liquid-surface::after { display: none; }
+.liquid-content { z-index: 1; }
+.liquid-optics { display: none; }
+@media (max-width: 480px) { .auth-workspace .auth-frame { padding: 24px 20px; } }
+@media (forced-colors: active) {
+  .premium-card, .premium-table, .glass-panel, .liquid-surface, .glass-dialog, .auth-frame { background: Canvas; color: CanvasText; border-color: CanvasText; box-shadow: none; }
+}
+
+/* Short, composited transitions keep interaction feedback immediate. */
+@keyframes skeleton-breathe { 50% { opacity: .48; } }
+@keyframes modal-enter { from { opacity: 0; transform: translate(-50%, calc(-50% + 8px)) scale(.985); } to { opacity: 1; transform: translate(-50%, -50%) scale(1); } }
+@keyframes overlay-enter { from { opacity: 0; } to { opacity: 1; } }
+.skeleton { border-radius: 10px; background: rgb(var(--muted) / .12); animation: skeleton-breathe 1.5s ease-in-out infinite; }
+.modal-overlay { animation: overlay-enter 140ms ease-out; }
+.modal-content { top: 50%; left: 50%; transform: translate(-50%, -50%); max-height: min(90dvh, 900px); animation: modal-enter 180ms cubic-bezier(.2,.8,.2,1); }
+.skip-link { position: fixed; z-index: 100; left: 16px; top: 12px; transform: translateY(-160%); padding: 10px 16px; border-radius: 10px; color: rgb(var(--on-primary)); background: rgb(var(--primary)); box-shadow: 0 4px 20px rgb(0 0 0 / .15); }
+.skip-link:focus { transform: translateY(0); }
+.connection-banner { display: flex; align-items: center; gap: 8px; padding: 10px 20px; font-size: 12px; color: rgb(var(--warning)); background: rgb(var(--warning) / .1); border-bottom: 1px solid rgb(var(--warning) / .2); }
+.premium-content { scrollbar-gutter: stable; overscroll-behavior-y: contain; }
+.premium-content:focus { outline: none; }
+.glass-button { transition: background-color 140ms, border-color 140ms, box-shadow 140ms, transform 140ms; }
+.glass-button:active:not(:disabled) { transform: translateY(1px); }
+@media (hover: hover) and (pointer: fine) { .glass-button:hover:not(:disabled) { box-shadow: none; } }
+@media (pointer: coarse) {
+  .premium-content :is(button, select), .clinic-liquid-shell > div > header button { min-height: 44px; }
+  .premium-content input, .premium-content select, .premium-content textarea { font-size: 16px; }
+}

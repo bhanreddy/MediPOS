@@ -45,6 +45,15 @@ Desktop.ini
 coverage/
 *.lcov
 
+# Private runtime databases, documents and local backups
+*.db
+*.db-wal
+*.db-shm
+*.sqlite
+*.sqlite3
+backend/prescription-files/
+backend/backups/
+
 # Logs
 logs
 *.log

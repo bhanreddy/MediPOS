@@ -1,0 +1,252 @@
+@import "tailwindcss";
+@import "./styles/liquid-dashboard.css";
+@import "./styles/liquid-material.css";
+@import "./styles/nexsyrus.css";
+@import "./styles/workspace-sidebar.css";
+@import "./styles/dashboard-premium.css";
+
+/* Hover variants that only fire for a real mouse (pointer: fine).
+   Touch devices apply a sticky :hover on tap, which made the dashboard
+   quick-action cards animate when tapped while scrolling. Gating on
+   pointer: fine prevents that on touch/POS tablets. */
+@custom-variant fine-hover {
+  @media (hover: hover) and (pointer: fine) {
+    &:hover {
+      @slot;
+    }
+  }
+}
+
+@custom-variant fine-group-hover {
+  @media (hover: hover) and (pointer: fine) {
+    &:is(:where(.group):hover *) {
+      @slot;
+    }
+  }
+}
+
+@theme {
+  --color-background: rgb(var(--background));
+  --color-surface: rgb(var(--surface));
+  --color-surface-elevated: rgb(var(--surface-elevated));
+  --color-surface-alt: rgb(var(--surface-alt));
+  /* Clinic UI aliases (bg-bg-*, accent-*) — required for Tailwind utilities to resolve */
+  --color-bg-primary: rgb(var(--surface-elevated));
+  --color-bg-surface: rgb(var(--surface));
+  --color-bg-card: rgb(var(--surface-alt));
+  --color-accent-primary: rgb(var(--primary));
+  --color-accent-secondary: rgb(var(--info));
+  --color-border: rgb(var(--border));
+  --color-foreground: rgb(var(--foreground));
+  --color-foreground-strong: rgb(var(--foreground-strong));
+  --color-muted: rgb(var(--muted));
+  --color-overlay: rgb(var(--overlay));
+  --color-primary: rgb(var(--primary));
+  --color-success: rgb(var(--success));
+  --color-warning: rgb(var(--warning));
+  --color-info: rgb(var(--info));
+  --color-violet: rgb(var(--violet));
+  --color-danger: rgb(var(--danger));
+  --color-error: rgb(var(--danger));
+  --color-on-primary: rgb(var(--on-primary));
+  --color-on-success: rgb(var(--on-success));
+  --color-on-warning: rgb(var(--on-warning));
+  --color-on-danger: rgb(var(--on-danger));
+  --color-focus: rgb(var(--focus));
+
+  --font-sans: "Plus Jakarta Sans", ui-sans-serif, system-ui, sans-serif;
+  --font-mono: "JetBrains Mono", ui-monospace, monospace;
+
+  --text-small: 11px;
+  --text-label: 12px;
+  --text-base: 14px;
+  --text-item-name: 16px;
+  --text-heading: 24px;
+  --text-billing-total: 40px;
+
+  --shadow-shell: 0 8px 28px rgb(24 35 56 / 0.08);
+  --shadow-card: 0 2px 5px rgb(24 35 56 / 0.03);
+  --shadow-card-dark: 0 2px 6px rgb(0 0 0 / 0.1);
+}
+
+/* Nexsyrus: white surfaces, blue actions, and restrained semantic colours. */
+:root {
+  color-scheme: light;
+  --font-sans: "Plus Jakarta Sans", ui-sans-serif, system-ui, sans-serif;
+  --font-mono: "JetBrains Mono", ui-monospace, monospace;
+
+  --background: 255 255 255;
+  --surface: 255 255 255;
+  --surface-elevated: 248 250 255;
+  --surface-alt: 243 246 252;
+  --border: 228 233 242;
+  --foreground: 51 65 85;
+  --foreground-strong: 24 35 56;
+  --muted: 101 112 135;
+  --overlay: 15 23 42;
+
+  --primary: 36 87 230;
+  --success: 38 117 82;
+  --warning: 148 99 11;
+  --danger: 182 61 96;
+  --info: 37 108 147;
+  --violet: 115 83 150;
+
+  --on-primary: 255 255 255;
+  --on-success: 255 255 255;
+  --on-warning: 255 255 255;
+  --on-danger: 255 255 255;
+
+  --focus: 36 87 230;
+
+  --text-billing-total: 48px;
+  --text-heading: 24px;
+  --text-item-name: 16px;
+  --text-base: 14px;
+  --text-label: 12px;
+  --text-small: 11px;
+
+  --radius-sm: 4px;
+  --radius-md: 8px;
+  --radius-lg: 16px;
+}
+
+.no-theme-transition,
+.no-theme-transition * {
+  transition: none !important;
+}
+
+.theme-toggle-icon::before {
+  content: '🌙';
+}
+
+.dark .theme-toggle-icon::before {
+  content: '☀';
+}
+
+.dark {
+  color-scheme: dark;
+  --background: 18 27 44;
+  --surface: 26 38 59;
+  --surface-elevated: 30 43 65;
+  --surface-alt: 36 50 74;
+  --border: 53 65 89;
+  --foreground: 220 228 244;
+  --foreground-strong: 242 245 252;
+  --muted: 169 181 201;
+  --overlay: 2 6 23;
+
+  --primary: 157 183 255;
+  --success: 133 184 160;
+  --warning: 218 184 128;
+  --danger: 220 148 169;
+  --info: 148 182 220;
+  --violet: 186 166 220;
+
+  --on-primary: 10 16 24;
+  --on-success: 10 16 24;
+  --on-warning: 15 23 42;
+  --on-danger: 15 23 42;
+
+  --focus: 157 183 255;
+}
+
+@layer base {
+  html {
+    @apply antialiased;
+    font-feature-settings: "ss01" on, "cv11" on;
+  }
+
+  body {
+    @apply bg-background text-foreground;
+    font-family: var(--font-sans);
+    line-height: 1.5;
+    overflow: hidden;
+    height: 100vh;
+    letter-spacing: 0;
+  }
+
+  h1,
+  h2,
+  h3,
+  h4,
+  h5,
+  h6 {
+    @apply font-semibold text-foreground-strong;
+    letter-spacing: 0;
+  }
+
+  :focus-visible {
+    @apply outline-none ring-2 ring-focus ring-offset-2 ring-offset-background;
+  }
+
+  input,
+  select,
+  textarea {
+    @apply bg-surface-elevated border-border text-foreground rounded-lg placeholder:text-muted;
+  }
+
+  kbd {
+    font-family: var(--font-mono);
+  }
+}
+
+::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+
+::-webkit-scrollbar-track {
+  @apply bg-transparent;
+}
+
+::-webkit-scrollbar-thumb {
+  @apply rounded-full bg-border/80 hover:bg-muted/80;
+}
+
+@keyframes slideIn {
+  from {
+    transform: translateY(10px);
+    opacity: 0;
+  }
+
+  to {
+    transform: translateY(0);
+    opacity: 1;
+  }
+}
+
+@keyframes fade-in-up {
+  from {
+    transform: translateY(8px);
+    opacity: 0;
+  }
+  to {
+    transform: translateY(0);
+    opacity: 1;
+  }
+}
+
+#root {
+  height: 100vh;
+}
+
+button, a, input, select, textarea {
+  -webkit-tap-highlight-color: transparent;
+}
+
+button:not(:disabled), select, summary {
+  cursor: pointer;
+}
+
+input, select, textarea {
+  min-width: 0;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: 0.01ms !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
+}

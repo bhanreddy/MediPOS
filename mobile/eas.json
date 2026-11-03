@@ -1,0 +1,44 @@
+{
+  "cli": {
+    "version": ">= 10.0.0",
+    "appVersionSource": "local"
+  },
+  "build": {
+    "development": {
+      "developmentClient": true,
+      "distribution": "internal",
+      "android": {
+        "buildType": "apk"
+      },
+      "env": {
+        "EXPO_PUBLIC_SUPABASE_URL": "https://mlbdrcdsalbrpcwyidqw.supabase.co",
+        "EXPO_PUBLIC_SUPABASE_ANON_KEY": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Im1sYmRyY2RzYWxicnBjd3lpZHF3Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzAwMzMxOTksImV4cCI6MjA4NTYwOTE5OX0.3aBL2HqQwq3gATaPjQxYWfYvZKAWe4uyz2sc1-5vu10",
+        "EXPO_PUBLIC_API_URL": "https://production-medical-backend-1.onrender.com/api"
+      }
+    },
+    "preview": {
+      "distribution": "internal",
+      "android": {
+        "buildType": "apk"
+      },
+      "env": {
+        "EXPO_PUBLIC_SUPABASE_URL": "https://mlbdrcdsalbrpcwyidqw.supabase.co",
+        "EXPO_PUBLIC_SUPABASE_ANON_KEY": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Im1sYmRyY2RzYWxicnBjd3lpZHF3Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzAwMzMxOTksImV4cCI6MjA4NTYwOTE5OX0.3aBL2HqQwq3gATaPjQxYWfYvZKAWe4uyz2sc1-5vu10",
+        "EXPO_PUBLIC_API_URL": "https://production-medical-backend-1.onrender.com/api"
+      }
+    },
+    "production": {
+      "android": {
+        "buildType": "app-bundle"
+      },
+      "env": {
+        "EXPO_PUBLIC_SUPABASE_URL": "https://mlbdrcdsalbrpcwyidqw.supabase.co",
+        "EXPO_PUBLIC_SUPABASE_ANON_KEY": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Im1sYmRyY2RzYWxicnBjd3lpZHF3Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzAwMzMxOTksImV4cCI6MjA4NTYwOTE5OX0.3aBL2HqQwq3gATaPjQxYWfYvZKAWe4uyz2sc1-5vu10",
+        "EXPO_PUBLIC_API_URL": "https://production-medical-backend-1.onrender.com/api"
+      }
+    }
+  },
+  "submit": {
+    "production": {}
+  }
+}
