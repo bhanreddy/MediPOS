@@ -27,6 +27,9 @@ export interface BillPrintLayoutProps {
     priceIncludesTax?: boolean;
     paymentMethod?: string;
     paidAmount?: number;
+    walletAmount?: number;
+    earnedCoins?: number;
+    coinExpiry?: string;
     balanceDue?: number;
     paperWidthMm?: 58 | 80;
 }
@@ -52,7 +55,7 @@ function expiry(value: string): string {
 export const BillPrintLayout: React.FC<BillPrintLayoutProps> = ({
     shopProfile, customerName, customerPhone, invoiceNumber, date, time, items,
     subtotal, gstAmount, discount, finalTotal, priceIncludesTax = false,
-    paymentMethod, paidAmount, balanceDue, paperWidthMm = 80,
+    paymentMethod, paidAmount, walletAmount = 0, earnedCoins = 0, coinExpiry, balanceDue, paperWidthMm = 80,
 }) => {
     const address = [shopProfile.address_line_1, shopProfile.address_line_2,
         shopProfile.city, shopProfile.state, shopProfile.pincode].map(detail).filter(Boolean);
@@ -130,7 +133,10 @@ export const BillPrintLayout: React.FC<BillPrintLayoutProps> = ({
                 <div className="receipt-grand-total"><span>Total</span><strong>₹{money(finalTotal)}</strong></div>
                 {hasPayment && <dl className="receipt-payment">
                     {paymentMethod && <div><dt>Payment</dt><dd>{paymentMethod}</dd></div>}
-                    {paidAmount !== undefined && <div><dt>Amount paid</dt><dd>₹{money(paidAmount)}</dd></div>}
+                    {walletAmount > 0 && <div><dt>Nex Coins used</dt><dd>₹{money(walletAmount)}</dd></div>}
+                    {paidAmount !== undefined && <div><dt>{walletAmount > 0 ? 'Collected payment' : 'Amount paid'}</dt><dd>₹{money(Math.max(0,paidAmount-walletAmount))}</dd></div>}
+                    {earnedCoins>0 && <div><dt>Nex Coins earned</dt><dd>{money(earnedCoins)}</dd></div>}
+                    {earnedCoins>0 && coinExpiry && <div><dt>Coins expire</dt><dd>{coinExpiry}</dd></div>}
                     {balanceDue !== undefined && balanceDue > 0 && <div className="receipt-balance"><dt>Balance due</dt><dd>₹{money(balanceDue)}</dd></div>}
                 </dl>}
             </section>

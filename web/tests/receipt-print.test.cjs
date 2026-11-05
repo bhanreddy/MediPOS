@@ -68,3 +68,12 @@ test('legacy exclusive pricing still adds recorded GST and preserves line discou
 test('an asynchronous print failure reaches the existing reprint error flow', async () => {
   await assert.rejects(printer(async () => { throw new Error('Print unavailable'); }).printBill({ net_amount: 90 }, [item]), /Print unavailable/);
 });
+
+
+test('promotional credits remain separate from the saved payment and do not change GST totals', async () => {
+ let receipt;
+ await printer(value => { receipt=value; }).printBill({net_amount:100,paid_amount:100,wallet_redeemed_paise:2500,payment_mode:'cash'},[item]);
+ assert.equal(receipt.walletAmount,25);
+ assert.equal(receipt.paidAmount,100);
+ assert.equal(receipt.finalTotal,100);
+});

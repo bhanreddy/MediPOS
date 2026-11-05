@@ -1,7 +1,8 @@
-import { useState, useCallback, useRef } from "react";
+import { useState, useCallback, useEffect, useRef } from "react";
 import api from "../lib/api";
 import { v4 as uuidv4 } from "uuid";
 import type { Product } from "../core/types";
+import { queryClient } from "../lib/queryClient";
 
 function localDateInput() {
   const today = new Date();
@@ -19,13 +20,14 @@ export interface PurchaseItemDraft {
   total: number;
 }
 
-export const usePurchaseFlow = () => {
+export const usePurchaseFlow = (reorderOrderId?: string) => {
   const [vendorId, setVendorId] = useState("");
   const [invoiceNumber, setInvoiceNumber] = useState("");
   const [inwardDate, setInwardDate] = useState(localDateInput());
   const [items, setItems] = useState<PurchaseItemDraft[]>([]);
 
   const committing = useRef(false);
+  const receiptAttempt = useRef<{ signature: string; id: string } | null>(null);
   const [isCommitting, setIsCommitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [isDraft, setIsDraft] = useState(true);
@@ -61,6 +63,11 @@ export const usePurchaseFlow = () => {
     setError(null);
   }, []);
 
+  useEffect(() => {
+    resetDraft();
+    receiptAttempt.current = null;
+  }, [reorderOrderId, resetDraft]);
+
   const commitToLedger = async () => {
     if (committing.current || !isDraft) return;
     if (!vendorId) {
@@ -82,6 +89,7 @@ export const usePurchaseFlow = () => {
 
     try {
       const payload = {
+        ...(reorderOrderId ? { reorder_order_id: reorderOrderId } : {}),
         supplier_id: vendorId,
         invoice_number: invoiceNumber,
         invoice_date: inwardDate,
@@ -94,20 +102,43 @@ export const usePurchaseFlow = () => {
           quantity: item.quantity,
           purchase_price: item.costPrice,
           mrp: item.mrp,
-          gst_rate: item.product.gst_rate || 0,
+          gst_rate: Number(item.product.gst_rate || 0),
           discount: 0,
         })),
       };
 
-      await api.post("/purchases", payload);
+      if (reorderOrderId) {
+        const signature = JSON.stringify(payload);
+        if (receiptAttempt.current?.signature !== signature)
+          receiptAttempt.current = { signature, id: uuidv4() };
+        await api.post("/purchases", {
+          ...payload,
+          reorder_receipt_id: receiptAttempt.current!.id,
+        });
+      } else await api.post("/purchases", payload);
       setIsDraft(false);
-    } catch (err: any) {
+      void Promise.all(
+        [
+          "reorder-workspace",
+          "reorder-drafts",
+          "reorder-order",
+          "shortbook",
+          "supplier-summary",
+          "clinic-header-alerts",
+        ].map((key) => queryClient.invalidateQueries({ queryKey: [key] })),
+      );
+    } catch (err: unknown) {
       console.error("Commit failed", err);
-      const error = err.response?.data?.error;
+      const error = (
+        err as {
+          response?: { data?: { error?: string | { message?: string } } };
+        }
+      ).response?.data?.error;
       setError(
         typeof error === "string"
           ? error
-          : error?.message || err.message || "Commit failed",
+          : error?.message ||
+              (err instanceof Error ? err.message : "Commit failed"),
       );
     } finally {
       committing.current = false;

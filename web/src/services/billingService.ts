@@ -12,6 +12,8 @@ export interface CartItem {
 export interface FinalizeSaleOptions {
   supplyType: "INTRA" | "INTER";
   paidAmount?: number;
+  walletAmountPaise?: number;
+  requestId?: string;
   paymentSplits?: any[];
   prescriptionRxNumber?: string;
   prescriptionImageData?: string;
@@ -67,6 +69,8 @@ export const BillingService = {
       payment_status: paymentStatus,
       paid_amount: paidAmount,
       items: itemsPayload,
+      ...(options.walletAmountPaise ? { wallet_amount_paise: options.walletAmountPaise } : {}),
+      ...(options.requestId ? { _local_id: options.requestId } : {}),
     };
 
     const res = await api.post("/sales", payload, {

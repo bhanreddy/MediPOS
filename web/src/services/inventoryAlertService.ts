@@ -21,19 +21,15 @@ export const InventoryAlertService = {
             if (status !== 404) throw err;
         }
         const items = await buildRadarItems();
-        let lowStock = 0;
+        const lowStockMedicines = new Set<string>();
         let expiry = 0;
         for (const item of items) {
-            if (matchesAttentionFilter(item, 'low_stock')) lowStock++;
+            if (matchesAttentionFilter(item, 'low_stock')) lowStockMedicines.add(item.productId);
             if (matchesAttentionFilter(item, 'expiring')) expiry++;
         }
-        let shortbook = 0;
-        try {
-            const { data } = await api.get<{ data?: unknown[] }>('/shortbook');
-            if (Array.isArray(data?.data)) shortbook = data.data.length;
-        } catch {
-            /* API offline or route unavailable */
-        }
-        return { expiry, lowStock, shortbook };
+        const { data } = await api.get<{ data?: unknown[] }>('/shortbook');
+        const shortbook = Array.isArray(data?.data)
+            ? data.data.filter((row: any) => !row.is_ordered && !row.deleted_at).length : 0;
+        return { expiry, lowStock: lowStockMedicines.size, shortbook };
     },
 };

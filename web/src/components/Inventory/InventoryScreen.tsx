@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useMemo } from 'react';
-import { Link, useSearchParams } from 'react-router-dom';
+import { Link, useLocation, useSearchParams } from 'react-router-dom';
 import { Biohazard } from 'lucide-react';
 import toast from 'react-hot-toast';
 import { Button } from '../ui/Button';
@@ -29,7 +29,8 @@ function parseInventoryFocus(raw: string | null): InventoryAttentionFilter | nul
 }
 
 export const InventoryScreen: React.FC = () => {
-    const [searchParams] = useSearchParams();
+    const location = useLocation();
+    const [searchParams, setSearchParams] = useSearchParams();
     const attentionFilter = useMemo(
         () => parseInventoryFocus(searchParams.get(FOCUS_PARAM)),
         [searchParams],
@@ -44,6 +45,20 @@ export const InventoryScreen: React.FC = () => {
     );
     const [isAddBatchModalOpen, setIsAddBatchModalOpen] = useState(false);
     const [disposeTarget, setDisposeTarget] = useState<RadarItem | null>(null);
+
+    // Notifications must reveal their results even from a searched/disposed view.
+    useEffect(() => {
+        setSearchTerm('');
+        setViewMode('active');
+        if (attentionFilter) refresh();
+    }, [location.key, attentionFilter, refresh]);
+
+    const selectFilter = (filter: InventoryAttentionFilter) => {
+        const next = new URLSearchParams(searchParams);
+        if (filter === 'all') next.delete(FOCUS_PARAM);
+        else next.set(FOCUS_PARAM, filter);
+        setSearchParams(next);
+    };
 
     useEffect(() => {
         const handleKeyDown = (e: KeyboardEvent) => {
@@ -63,12 +78,15 @@ export const InventoryScreen: React.FC = () => {
     const tableData = viewMode === 'active' ? processedInventory : disposedItems;
     const tableHeaders =
         viewMode === 'active' ? [...INVENTORY_PAGE_COPY.headers] : [...INVENTORY_PAGE_COPY.disposedHeaders];
+    const lowStockMedicineCount = new Set(processedInventory.map(item => item.productId)).size;
 
     const subtitle =
         viewMode === 'active'
             ? isLoading
                 ? INVENTORY_PAGE_COPY.subtitleScanning
-                : INVENTORY_PAGE_COPY.subtitleActive(processedInventory.length)
+                : attentionFilter === 'low_stock'
+                  ? `${lowStockMedicineCount} low-stock medicine${lowStockMedicineCount === 1 ? '' : 's'}`
+                  : INVENTORY_PAGE_COPY.subtitleActive(processedInventory.length)
             : isLoading
               ? INVENTORY_PAGE_COPY.subtitleScanning
               : INVENTORY_PAGE_COPY.subtitleDisposed(disposedItems.length);
@@ -83,7 +101,7 @@ export const InventoryScreen: React.FC = () => {
                     <p className="text-muted text-sm font-black uppercase tracking-widest">{subtitle}</p>
                     {viewMode === 'active' && attentionFilter === 'low_stock' && (
                         <p className="text-xs text-danger font-bold mt-2 flex flex-wrap items-center gap-2">
-                            Showing low-stock batches only.
+                            Showing medicines at or below their stock threshold, including out-of-stock medicines.
                             <Link to="/inventory" className="underline hover:text-foreground">
                                 Clear filter
                             </Link>
@@ -148,16 +166,20 @@ export const InventoryScreen: React.FC = () => {
 
             {viewMode === 'active' && (
                 <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6">
-                    <MiniStat label={INVENTORY_PAGE_COPY.miniStats.totalAssets} value={stats.totalAssets.toLocaleString()} variant="neutral" />
+                    <MiniStat label={INVENTORY_PAGE_COPY.miniStats.totalAssets} value={stats.totalAssets.toLocaleString()} variant="neutral" onClick={() => selectFilter('all')} selected={!attentionFilter} />
                     <MiniStat
                         label={INVENTORY_PAGE_COPY.miniStats.criticalStock}
                         value={stats.criticalStock.toString()}
                         variant={stats.criticalStock > 0 ? 'danger' : 'neutral'}
+                        onClick={() => selectFilter('low_stock')}
+                        selected={attentionFilter === 'low_stock'}
                     />
                     <MiniStat
                         label={INVENTORY_PAGE_COPY.miniStats.nearExpiry}
                         value={stats.nearExpiry.toString()}
                         variant={stats.nearExpiry > 0 ? 'warning' : 'neutral'}
+                        onClick={() => selectFilter('expiring')}
+                        selected={attentionFilter === 'expiring'}
                     />
                     <MiniStat label={INVENTORY_PAGE_COPY.miniStats.netValuation} value={formatCurrency(stats.netValuation)} variant="success" />
                 </div>
@@ -166,13 +188,17 @@ export const InventoryScreen: React.FC = () => {
             <div className="bg-surface border border-border rounded-xl overflow-hidden">
                 <Table
                     headers={tableHeaders}
-                    data={tableData}
-                    isEmpty={tableData.length === 0}
+                    data={isLoading || error ? [] : tableData}
+                    isEmpty={isLoading || !!error || tableData.length === 0}
                     emptyMessage={
-                        searchTerm
+                        isLoading ? INVENTORY_PAGE_COPY.subtitleScanning
+                            : error ? 'Inventory is unavailable. Use Retry to load it again.'
+                            : searchTerm.trim()
                             ? INVENTORY_PAGE_COPY.emptySearch
                             : viewMode === 'active'
-                              ? INVENTORY_PAGE_COPY.emptyDefault
+                              ? attentionFilter === 'low_stock' ? 'No medicines are low on stock.'
+                                : attentionFilter === 'expiring' ? 'No batches are expired or nearing expiry.'
+                                : INVENTORY_PAGE_COPY.emptyDefault
                               : INVENTORY_PAGE_COPY.emptyDisposed
                     }
                     renderRow={(item) => {
@@ -238,8 +264,9 @@ export const InventoryScreen: React.FC = () => {
                                 </td>
                                 <td className="px-6 py-4 text-center">
                                     <Badge variant={radar.status === 'NORMAL' ? 'neutral' : radar.status === 'LOW_STOCK' ? 'warning' : 'danger'}>
-                                        {radar.status.replace('_', ' ')}
+                                        {!radar.hasBatch ? 'OUT OF STOCK' : radar.expired ? 'EXPIRED' : radar.lowStock ? 'LOW STOCK' : radar.expiring ? 'EXPIRING SOON' : 'NORMAL'}
                                     </Badge>
+                                    {radar.lowStock && radar.expiring && <span className="block text-xs text-warning mt-1">{radar.expired ? 'Expired stock' : 'Also nearing expiry'}</span>}
                                 </td>
                                 <td className="px-4 py-4 text-center">
                                     <button
@@ -284,7 +311,7 @@ export const InventoryScreen: React.FC = () => {
     );
 };
 
-const MiniStat = ({ label, value, variant }: { label: string; value: string; variant: 'neutral' | 'danger' | 'warning' | 'success' | 'primary' }) => {
+const MiniStat = ({ label, value, variant, onClick, selected }: { label: string; value: string; variant: 'neutral' | 'danger' | 'warning' | 'success' | 'primary'; onClick?: () => void; selected?: boolean }) => {
     const borders = {
         neutral: 'border-border',
         primary: 'border-primary/20',
@@ -301,12 +328,16 @@ const MiniStat = ({ label, value, variant }: { label: string; value: string; var
         danger: 'text-danger',
     };
 
+    const Content = onClick ? 'button' : 'div';
     return (
-        <div
-            className={`bg-surface-elevated border-2 ${borders[variant]} p-3 rounded-xl flex flex-col justify-center transition-all hover:brightness-110`}
+        <Content
+            type={onClick ? 'button' : undefined}
+            onClick={onClick}
+            aria-pressed={onClick ? selected : undefined}
+            className={`bg-surface-elevated border-2 ${borders[variant]} p-3 rounded-xl flex flex-col justify-center text-left transition-all hover:brightness-110 ${selected ? 'ring-2 ring-primary/30' : ''}`}
         >
             <span className="text-label font-black uppercase tracking-[0.2em] text-muted mb-1">{label}</span>
             <span className={`text-2xl font-black tabular-nums ${text[variant]}`}>{value}</span>
-        </div>
+        </Content>
     );
 };

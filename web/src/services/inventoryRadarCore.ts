@@ -12,6 +12,10 @@ export interface RadarItem {
     qty: number;
     status: 'CRITICAL' | 'LOW_STOCK' | 'NORMAL';
     priority: number;
+    lowStock: boolean;
+    expiring: boolean;
+    expired: boolean;
+    hasBatch: boolean;
 }
 
 export interface InventoryRadarStats {
@@ -35,30 +39,24 @@ export interface DisposedBatchItem {
     reason: string;
 }
 
-/** Dispose allowed when expired or batch is in critical attention state. */
-export function canDisposeBatch(item: RadarItem, todayStr = new Date().toISOString().split('T')[0]): boolean {
-    return item.expiry < todayStr || item.status === 'CRITICAL';
+/** Medicines without a batch cannot be disposed. */
+export function canDisposeBatch(item: RadarItem): boolean {
+    return item.hasBatch && (item.expired || item.status === 'CRITICAL');
 }
 
-/** Same semantics as `/inventory?focus=` navigation from ClinicLayout. */
+/** Attention flags are independent: low stock can also be nearing expiry. */
 export function matchesAttentionFilter(
     item: RadarItem,
     filter: InventoryAttentionFilter | null | undefined,
 ): boolean {
-    if (!filter || filter === 'all') return true;
-    if (filter === 'low_stock') {
-        return (
-            (item.status === 'CRITICAL' && item.priority === 100) ||
-            (item.status === 'LOW_STOCK' && item.priority === 80)
-        );
-    }
-    if (filter === 'expiring') {
-        return (
-            (item.status === 'LOW_STOCK' && item.priority === 50) ||
-            (item.status === 'CRITICAL' && item.priority === 1500)
-        );
-    }
+    if (filter === 'low_stock') return item.lowStock;
+    if (filter === 'expiring') return item.expiring;
     return true;
+}
+
+/** Calendar dates in the shop's browser timezone, including around midnight. */
+export function inventoryDay(date = new Date()): string {
+    return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`;
 }
 
 /** The same calendar window the inventory screen uses to mark low stock and expiry. */
@@ -75,8 +73,8 @@ export async function attentionWindow(): Promise<{ today: string; warning: strin
     const warningDate = new Date();
     warningDate.setDate(today.getDate() + expiryWarningDays);
     return {
-        today: today.toISOString().split('T')[0],
-        warning: warningDate.toISOString().split('T')[0],
+        today: inventoryDay(today),
+        warning: inventoryDay(warningDate),
     };
 }
 
@@ -95,76 +93,55 @@ export async function buildRadarItemsWithStats(): Promise<{
     const res = await api.get('/inventory/medicines');
     const medicines: any[] = res.data?.data || res.data || [];
 
-    const radarItems: RadarItem[] = [];
-    let totalAssets = 0;
-    let criticalCount = 0;
-    let nearExpiryCount = 0;
-    let valuation = 0;
+    return classifyInventory(medicines, todayStr, warningStr);
+}
 
+/** Low stock is based on total unexpired stock per medicine, including stockouts. */
+export function classifyInventory(medicines: any[], today: string, warning: string): {
+    items: RadarItem[];
+    stats: InventoryRadarStats;
+} {
+    const items: RadarItem[] = [];
+    const stats: InventoryRadarStats = { totalAssets: 0, criticalStock: 0, nearExpiry: 0, netValuation: 0 };
     for (const med of medicines) {
-        if (med.is_active === 0 || med.is_active === false) continue;
+        if (med.is_active === 0 || med.is_active === false || med.deleted_at) continue;
+        const batches = (med.medicine_batches || []).filter((batch: any) =>
+            !batch.deleted_at && batch.is_disposed !== true && batch.is_disposed !== 1 && Number(batch.quantity_remaining) > 0,
+        );
+        const threshold = Math.max(0, Number(med.low_stock_threshold ?? med.min_stock_alert ?? 10));
+        const available = batches.reduce((sum: number, batch: any) => {
+            const expiry = String(batch.expiry_date || '').slice(0, 10);
+            return sum + (expiry >= today ? Number(batch.quantity_remaining) : 0);
+        }, 0);
+        const lowStock = available <= threshold;
+        const critical = available <= Math.max(1, Math.floor(threshold * 0.5));
+        if (lowStock) stats.criticalStock++;
 
-        const batches: any[] = med.medicine_batches || [];
-        const minAlert = Math.max(1, med.low_stock_threshold ?? med.min_stock_alert ?? 10);
-        const criticalQtyThreshold = Math.max(1, Math.floor(minAlert * 0.5));
-
-        for (const batch of batches) {
-            if (batch.is_disposed === true || batch.is_disposed === 1) continue;
-
-            const qty = Number(batch.quantity_remaining ?? 0);
-            if (qty <= 0) continue;
-
-            const batchExpiry = String(batch.expiry_date || '').slice(0, 10);
-            const purchaseRate = Number(batch.purchase_price ?? batch.purchase_rate ?? 0);
-
-            let status: RadarItem['status'] = 'NORMAL';
-            let priority = 0;
-
-            if (batchExpiry < todayStr) {
-                status = 'CRITICAL';
-                priority = 1500;
-                criticalCount++;
-            } else if (qty <= criticalQtyThreshold) {
-                status = 'CRITICAL';
-                priority = 100;
-                criticalCount++;
-            } else if (qty < minAlert) {
-                status = 'LOW_STOCK';
-                priority = 80;
-            } else if (batchExpiry <= warningStr) {
-                status = 'LOW_STOCK';
-                priority = 50;
-                nearExpiryCount++;
-            } else {
-                status = 'NORMAL';
-                priority = 0;
+        // Keep stockouts actionable even when no batch has remaining stock.
+        const rows = batches.length ? batches : [null];
+        for (const batch of rows) {
+            const expiry = batch ? String(batch.expiry_date || '').slice(0, 10) : '';
+            const expired = !!expiry && expiry < today;
+            const expiring = !!expiry && expiry <= warning;
+            const qty = Number(batch?.quantity_remaining ?? 0);
+            const status = expired || (lowStock && critical) ? 'CRITICAL' : lowStock || expiring ? 'LOW_STOCK' : 'NORMAL';
+            const priority = expired ? 1500 : lowStock ? (critical ? 100 : 80) : expiring ? 50 : 0;
+            if (batch) {
+                stats.totalAssets++;
+                stats.netValuation += qty * Number(batch.purchase_price ?? batch.purchase_rate ?? 0);
             }
-
-            totalAssets += qty;
-            valuation += qty * purchaseRate;
-
-            radarItems.push({
-                id: batch._local_id || batch.id,
+            if (expiring) stats.nearExpiry++;
+            items.push({
+                id: batch ? batch._local_id || batch.id : `stockout:${med._local_id || med.id}`,
                 productId: med._local_id || med.id,
                 name: med.name,
-                batch: batch.batch_number || '',
-                expiry: batchExpiry,
-                qty,
-                status,
-                priority,
+                batch: batch?.batch_number || '—',
+                expiry: expiry || '—',
+                qty, status, priority, lowStock, expiring, expired, hasBatch: !!batch,
             });
         }
     }
-
-    return {
-        items: radarItems,
-        stats: {
-            totalAssets,
-            criticalStock: criticalCount,
-            nearExpiry: nearExpiryCount,
-            netValuation: valuation,
-        },
-    };
+    return { items, stats };
 }
 
 export async function buildRadarItems(): Promise<RadarItem[]> {

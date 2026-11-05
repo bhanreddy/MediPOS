@@ -3,13 +3,13 @@ import * as Dialog from '@radix-ui/react-dialog';
 import type { LucideIcon } from "lucide-react";
 import { Link, useLocation, useNavigate } from "react-router-dom";
 import { ConnectionStatus, WorkspaceRoute } from '../layout/WorkspaceRoute';
-import { useQuery, useQueryClient } from "@tanstack/react-query";
+import { useQueryClient } from "@tanstack/react-query";
 import toast from "react-hot-toast";
 import { useAuth } from "../../lib/auth";
 import { useClinicNavHotkeys } from "../../hooks/useClinicNavHotkeys";
 import { useTheme } from "../../hooks/useTheme";
 import { ShopProfileService } from "../../services/shopProfileService";
-import { InventoryAlertService } from "../../services/inventoryAlertService";
+import { useInventoryAlerts } from "../../hooks/useInventoryAlerts";
 import { useRealtimeEvents } from "../../hooks/useRealtimeEvents";
 import type { ShopProfile } from "../../core/types";
 import {
@@ -154,22 +154,15 @@ export const ClinicLayout = () => {
     isLoading: alertsLoading,
     isError: alertsError,
     refetch: refetchAlerts,
-  } = useQuery({
-    queryKey: ["clinic-header-alerts", "radar-v2"],
-    queryFn: async () => {
-      const { lowStock, expiry, shortbook } = await InventoryAlertService.getCounts();
-      return { lowStock, expiring: expiry, shortbookOpen: shortbook };
-    },
-    staleTime: 30_000,
-  });
+  } = useInventoryAlerts();
 
   useEffect(() => {
     if (alertsOpen) void refetchAlerts();
   }, [alertsOpen, refetchAlerts]);
 
   const lowStockN = alertSummary?.lowStock ?? 0;
-  const expiringN = alertSummary?.expiring ?? 0;
-  const shortbookN = alertSummary?.shortbookOpen ?? 0;
+  const expiringN = alertSummary?.expiry ?? 0;
+  const shortbookN = alertSummary?.shortbook ?? 0;
   const alertTotal = lowStockN + expiringN + shortbookN;
 
   const MAIN_NAV: NavItem[] = [
@@ -433,10 +426,13 @@ export const ClinicLayout = () => {
                       { title: 'Expiring soon', count: expiringN, message: `${expiringN} ${expiringN === 1 ? 'batch needs' : 'batches need'} a review`, clear: 'No batches nearing expiry', icon: CalendarClock, tone: 'amber', path: '/inventory?focus=expiring' },
                       { title: 'Reorder queue', count: shortbookN, message: `${shortbookN} ${shortbookN === 1 ? 'item is' : 'items are'} ready to reorder`, clear: 'Your reorder queue is clear', icon: ClipboardList, tone: 'blue', path: '/shortbook' },
                     ].map(item => (
-                      <button key={item.title} type="button" className="notification-item" onClick={() => { navigate(item.path); setAlertsOpen(false); }}>
+                      <button key={item.title} type="button" className="notification-item" onClick={() => {
+                        navigate(item.path);
+                        setAlertsOpen(false);
+                      }}>
                         <span className={`notification-icon notification-icon-${item.tone}`}><item.icon size={18} aria-hidden="true" /></span>
                         <span className="notification-copy"><strong>{item.title}</strong><span>{item.count > 0 ? item.message : item.clear}</span></span>
-                        {item.count > 0 && <span className="notification-count" aria-label={`${item.count} items`}>{item.count > 99 ? '99+' : item.count}</span>}
+                        {item.count > 0 && <span className="notification-count" aria-label={`${item.count} ${item.count === 1 ? 'item' : 'items'}`}>{item.count > 99 ? '99+' : item.count}</span>}
                         <ChevronRight size={14} className="notification-chevron" aria-hidden="true" />
                       </button>
                     ))

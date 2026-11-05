@@ -51,6 +51,9 @@ export interface PosPaymentTender {
 
 interface PosState {
   cart: PosCartLine[];
+  checkout_request_id: string;
+  wallet_amount_paise: number;
+  setWalletAmount: (paise: number) => void;
   customer_id: string | null;
   customer_name: string;
   customer_phone: string;
@@ -109,6 +112,9 @@ export const usePosStore = create<PosState>()(
   persist(
     (set, get) => ({
       cart: [],
+      checkout_request_id: crypto.randomUUID(),
+      wallet_amount_paise: 0,
+      setWalletAmount: (paise) => set({wallet_amount_paise: paise}),
       customer_id: null,
       customer_name: '',
       customer_phone: '',
@@ -133,6 +139,7 @@ export const usePosStore = create<PosState>()(
       setPaymentMode: (mode) =>
         set({
           payment_mode: mode,
+          ...(mode === 'credit' ? {wallet_amount_paise: 0} : {}),
           payments: [{ tender_type: mode.toUpperCase() as any, amount: 0 }],
         }),
       setDiscount: (disc, isPct = false) => set({ bill_discount: disc, is_percentage_discount: isPct }),
@@ -243,6 +250,8 @@ export const usePosStore = create<PosState>()(
       clearCart: () => {
         set({
           cart: [],
+          checkout_request_id: crypto.randomUUID(),
+          wallet_amount_paise: 0,
           payments: [{ tender_type: 'CASH', amount: 0 }],
           cash_tendered: '',
           paid_amount: '',
@@ -255,7 +264,8 @@ export const usePosStore = create<PosState>()(
       },
 
       setCustomer: (id, name, phone) => {
-        set({ customer_id: id, customer_name: name, customer_phone: phone });
+        set({ customer_id: id, customer_name: name, customer_phone: phone,
+          ...(get().customer_id !== id ? {wallet_amount_paise: 0} : {}) });
       },
 
       setDoctor: (name, regNo = '') => {
@@ -289,6 +299,8 @@ export const usePosStore = create<PosState>()(
       reset: () => {
         set({
           cart: [],
+          checkout_request_id: crypto.randomUUID(),
+          wallet_amount_paise: 0,
           customer_id: null,
           customer_name: '',
           customer_phone: '',

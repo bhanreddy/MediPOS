@@ -1,3 +1,5 @@
+import { queryClient } from '../lib/queryClient';
+
 export const AppSettingsService = {
     async getSetting(key: string): Promise<{ id: string; key: string; value: string; group: string } | undefined> {
         const val = localStorage.getItem(`medpos_setting_${key}`);
@@ -22,6 +24,10 @@ export const AppSettingsService = {
 
     async setString(key: string, value: string, _group = 'SYSTEM'): Promise<void> {
         localStorage.setItem(`medpos_setting_${key}`, value);
+        if (key === 'alert_expiry_days') {
+            void queryClient.invalidateQueries({ queryKey: ['inventory-radar'] });
+            void queryClient.invalidateQueries({ queryKey: ['clinic-header-alerts'] });
+        }
     },
 
     async setBoolean(key: string, value: boolean, _group = 'SYSTEM'): Promise<void> {

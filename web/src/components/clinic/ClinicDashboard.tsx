@@ -29,6 +29,7 @@ import {
   YAxis,
 } from 'recharts';
 import { useClinicDashboardData } from '../../hooks/useClinicDashboardData';
+import { useInventoryAlerts } from '../../hooks/useInventoryAlerts';
 import { useAuth } from '../../lib/auth';
 import { DashboardFooter } from './DashboardFooter';
 
@@ -148,7 +149,7 @@ export function ClinicDashboardView({
     },
     {
       label: 'Expiring soon',
-      hint: 'Batches within 30 days',
+      hint: 'Expired or nearing expiry',
       count: data?.alerts?.expiring ?? data?.expiry_count_30d ?? 0,
       icon: Clock3,
       tone: 'rose',
@@ -578,15 +579,19 @@ export const ClinicDashboard = () => {
   const { user } = useAuth();
   const { data, isLoading, isError, refetch, isFetching } =
     useClinicDashboardData();
+  const alerts = useInventoryAlerts();
   return (
     <ClinicDashboardView
-      data={data}
+      data={data ? { ...data, alerts: alerts.data ? {
+        low_stock: alerts.data.lowStock, expiring: alerts.data.expiry, shortbook: alerts.data.shortbook,
+      } : data.alerts } : data}
       name={user?.full_name?.split(' ')[0] || 'there'}
       loading={isLoading}
       error={isError}
       refreshing={isFetching}
       onRefresh={() => {
         void refetch();
+        void alerts.refetch();
       }}
     />
   );

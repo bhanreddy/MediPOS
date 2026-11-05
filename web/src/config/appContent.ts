@@ -161,7 +161,7 @@ export const DASHBOARD_QUICK_ACTIONS: readonly {
 export const INVENTORY_PAGE_COPY = {
     title: 'Inventory',
     subtitleScanning: 'Loading inventory…',
-    subtitleActive: (n: number) => `${n} active batch${n === 1 ? '' : 'es'}`,
+    subtitleActive: (n: number) => `${n} inventory record${n === 1 ? '' : 's'}`,
     subtitleDisposed: (n: number) => `Disposed batches • ${n} record(s)`,
     searchPlaceholder: 'Search medicine or batch…',
     newBatch: 'Add batch (F6)',

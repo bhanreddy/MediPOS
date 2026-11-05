@@ -7,6 +7,9 @@ import { BillingSearchDropdown } from "../Billing/BillingSearchDropdown";
 import type { Product } from "../../core/types";
 
 interface PurchaseItemModalProps {
+  initialProduct?: Product;
+  initialQuantity?: number;
+  initialCost?: number;
   isOpen: boolean;
   onClose: () => void;
   onAdd: (item: {
@@ -23,10 +26,17 @@ const PurchaseItemForm: React.FC<PurchaseItemModalProps> = ({
   isOpen,
   onClose,
   onAdd,
+  initialProduct,
+  initialQuantity,
+  initialCost,
 }) => {
   const formId = useId();
-  const [productSearch, setProductSearch] = useState("");
-  const [selectedProduct, setSelectedProduct] = useState<Product | null>(null);
+  const [productSearch, setProductSearch] = useState(
+    initialProduct?.name || "",
+  );
+  const [selectedProduct, setSelectedProduct] = useState<Product | null>(
+    initialProduct || null,
+  );
 
   // Search Hook
   const { results, isSearching } = useProductSearch(productSearch);
@@ -35,8 +45,10 @@ const PurchaseItemForm: React.FC<PurchaseItemModalProps> = ({
   // Fields
   const [batchNumber, setBatchNumber] = useState("");
   const [expiryDate, setExpiryDate] = useState("");
-  const [qty, setQty] = useState("");
-  const [cost, setCost] = useState("");
+  const [qty, setQty] = useState(
+    initialQuantity ? String(initialQuantity) : "",
+  );
+  const [cost, setCost] = useState(initialCost ? String(initialCost) : "");
   const [mrp, setMrp] = useState("");
 
   const [error, setError] = useState("");
@@ -116,109 +128,137 @@ const PurchaseItemForm: React.FC<PurchaseItemModalProps> = ({
   if (!isOpen) return null;
 
   return (
-    <Modal isOpen={isOpen} onClose={onClose} title="Add purchase item" footer={<>
-      <Button type="button" variant="ghost" onClick={onClose}>Cancel</Button>
-      <Button type="submit" form={formId}>Add item</Button>
-    </>}>
-      <form id={formId} onSubmit={event => { event.preventDefault(); handleConfirm(); }} className="space-y-5">
-          {/* PRODUCT SELECTOR */}
-          <div className="relative">
-            <Input
-              ref={firstInputRef}
-              label="Product (Search)"
-              placeholder="Type to search..."
-              value={productSearch}
-              onChange={(e) => {
-                setProductSearch(e.target.value);
-                if (selectedProduct) setSelectedProduct(null); // Reset if typing again
+    <Modal
+      isOpen={isOpen}
+      onClose={onClose}
+      title="Add purchase item"
+      footer={
+        <>
+          <Button type="button" variant="ghost" onClick={onClose}>
+            Cancel
+          </Button>
+          <Button type="submit" form={formId}>
+            Add item
+          </Button>
+        </>
+      }
+    >
+      <form
+        id={formId}
+        onSubmit={(event) => {
+          event.preventDefault();
+          handleConfirm();
+        }}
+        className="space-y-5"
+      >
+        {/* PRODUCT SELECTOR */}
+        <div className="relative">
+          <Input
+            ref={firstInputRef}
+            label="Product (Search)"
+            placeholder="Type to search..."
+            value={productSearch}
+            onChange={(e) => {
+              setProductSearch(e.target.value);
+              if (selectedProduct) setSelectedProduct(null); // Reset if typing again
+            }}
+            onKeyDown={handleSearchKeyDown}
+            disabled={!!selectedProduct}
+            icon={selectedProduct ? "🔒" : "🔍"}
+          />
+          {/* Reuse Search Dropdown */}
+          {!selectedProduct && productSearch.length > 0 && (
+            <BillingSearchDropdown
+              results={results}
+              selectedIndex={searchIndex}
+              onSelect={(res) => {
+                setSelectedProduct(res.product);
+                setProductSearch(res.product.name);
               }}
-              onKeyDown={handleSearchKeyDown}
-              disabled={!!selectedProduct}
-              icon={selectedProduct ? "🔒" : "🔍"}
+              isSearching={isSearching}
             />
-            {/* Reuse Search Dropdown */}
-            {!selectedProduct && productSearch.length > 0 && (
-              <BillingSearchDropdown
-                results={results}
-                selectedIndex={searchIndex}
-                onSelect={(res) => {
-                  setSelectedProduct(res.product);
-                  setProductSearch(res.product.name);
+          )}
+          {selectedProduct && (
+            <div className="absolute right-2 top-9">
+              <Button
+                size="sm"
+                type="button"
+                variant="ghost"
+                onClick={() => {
+                  setSelectedProduct(null);
+                  setProductSearch("");
+                  setTimeout(() => firstInputRef.current?.focus(), 50);
                 }}
-                isSearching={isSearching}
-              />
-            )}
-            {selectedProduct && (
-              <div className="absolute right-2 top-9">
-                <Button
-                  size="sm"
-                  type="button"
-                  variant="ghost"
-                  onClick={() => {
-                    setSelectedProduct(null);
-                    setProductSearch("");
-                    setTimeout(() => firstInputRef.current?.focus(), 50);
-                  }}
-                >
-                  Change
-                </Button>
-              </div>
-            )}
-          </div>
-
-          <div className="grid grid-cols-2 gap-4">
-            <Input
-              label="Batch Number"
-              required maxLength={100}
-              placeholder="e.g. BATCH-001"
-              value={batchNumber}
-              onChange={(e) => setBatchNumber(e.target.value)}
-            />
-            <Input
-              label="Expiry Date"
-              required
-              type="date"
-              value={expiryDate}
-              onChange={(e) => setExpiryDate(e.target.value)}
-            />
-          </div>
-
-          <div className="grid grid-cols-3 gap-4">
-            <Input
-              label="Quantity"
-              required min="0.001" step="any"
-              type="number"
-              placeholder="0"
-              value={qty}
-              onChange={(e) => setQty(e.target.value)}
-            />
-            <Input
-              label="Cost Price (₹)"
-              required min="0.01" step="0.01"
-              type="number"
-              placeholder="0.00"
-              value={cost}
-              onChange={(e) => setCost(e.target.value)}
-            />
-            <Input
-              label="MRP (₹)"
-              required min="0.01" step="0.01"
-              type="number"
-              placeholder="0.00"
-              value={mrp}
-              onChange={(e) => setMrp(e.target.value)}
-            />
-          </div>
-
-          {error && (
-            <div role="alert" className="bg-danger/10 border border-danger text-danger p-3 rounded text-sm font-bold text-center uppercase">
-              {error}
+              >
+                Change
+              </Button>
             </div>
           )}
+        </div>
+
+        <div className="grid grid-cols-2 gap-4">
+          <Input
+            label="Batch Number"
+            required
+            maxLength={100}
+            placeholder="e.g. BATCH-001"
+            value={batchNumber}
+            onChange={(e) => setBatchNumber(e.target.value)}
+          />
+          <Input
+            label="Expiry Date"
+            required
+            type="date"
+            value={expiryDate}
+            onChange={(e) => setExpiryDate(e.target.value)}
+          />
+        </div>
+
+        <div className="grid grid-cols-3 gap-4">
+          <Input
+            label="Quantity"
+            required
+            min="0.001"
+            step="any"
+            type="number"
+            placeholder="0"
+            value={qty}
+            onChange={(e) => setQty(e.target.value)}
+          />
+          <Input
+            label="Cost Price (₹)"
+            required
+            min="0.01"
+            step="0.01"
+            type="number"
+            placeholder="0.00"
+            value={cost}
+            onChange={(e) => setCost(e.target.value)}
+          />
+          <Input
+            label="MRP (₹)"
+            required
+            min="0.01"
+            step="0.01"
+            type="number"
+            placeholder="0.00"
+            value={mrp}
+            onChange={(e) => setMrp(e.target.value)}
+          />
+        </div>
+
+        {error && (
+          <div
+            role="alert"
+            className="bg-danger/10 border border-danger text-danger p-3 rounded text-sm font-bold text-center uppercase"
+          >
+            {error}
+          </div>
+        )}
       </form>
     </Modal>
   );
 };
 
-export const PurchaseItemModal: React.FC<PurchaseItemModalProps> = props =>
+export const PurchaseItemModal: React.FC<PurchaseItemModalProps> = (props) =>
   props.isOpen ? <PurchaseItemForm {...props} /> : null;

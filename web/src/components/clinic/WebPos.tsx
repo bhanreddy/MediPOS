@@ -1,4 +1,5 @@
 import { useState, useRef, useEffect, useMemo, useCallback } from "react";
+import { Link } from "react-router-dom";
 import { useSelector } from "react-redux";
 import { useAuth } from "../../lib/auth";
 import { Card } from "../ui/Card.tsx";
@@ -16,7 +17,7 @@ import {
   Wallet,
   UserRound,
 } from "lucide-react";
-import { useQueryClient } from "@tanstack/react-query";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { usePosStore, type PosCartLine } from "../../store/posStore";
 import toast from "react-hot-toast";
 import {
@@ -35,10 +36,12 @@ import { useShopDisplayName } from "../../hooks/useShopDisplayName";
 import { buildUpiPaymentUri } from "../../lib/upiPaymentUri";
 import api from "../../lib/api";
 import { BillingService, type CartItem } from "../../services/billingService";
+import { WalletService, walletMoney, walletDate } from "../../services/walletService";
+import { CustomerService, normalizeBillingPhone } from "../../services/customerService";
 
 import { InsufficientStockError } from "../../core/errors";
 import type { RootState } from "../../state/store";
-import type { PaymentMode, SaleItem } from "../../core/types";
+import type { PaymentMode, SaleItem, Sale } from "../../core/types";
 
 const SEARCH_LIST_ID = "pos-medicine";
 const MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
@@ -144,6 +147,9 @@ export const WebPos = () => {
   const store = usePosStore();
   const searchInputRef = useRef<HTMLInputElement>(null);
   const customerInputRef = useRef<HTMLInputElement>(null);
+  const customerNameRef = useRef<HTMLInputElement>(null);
+  const customerSavingRef = useRef(false);
+  const [customerSaving, setCustomerSaving] = useState(false);
   const paidInputRef = useRef<HTMLInputElement>(null);
   const queryClient = useQueryClient();
   const { upiId } = useUpiId();
@@ -165,6 +171,16 @@ export const WebPos = () => {
   const reduxUser = useSelector((s: RootState) => s.auth.user);
   const clinicUser = useAuth((s) => s.user);
   const cashierId = reduxUser?.id ?? clinicUser?.id ?? null;
+  const wallet = useQuery({
+    queryKey: ["customer-wallet", `${clinicUser?.id}:${clinicUser?.clinic_id}`, store.customer_id, 1],
+    queryFn: ({signal}) => WalletService.get(store.customer_id!,1,signal),
+    enabled: !!store.customer_id,
+    retry: false,
+    staleTime: 0,
+  });
+  const walletAvailable = wallet.data?.integrity_verified ? wallet.data.balance_paise : 0;
+  const walletBlocked = store.wallet_amount_paise > 0 && (wallet.isPending || wallet.isError || wallet.isFetching);
+
 
   useEffect(() => {
     upiModalRef.current = upiModal;
@@ -216,7 +232,7 @@ export const WebPos = () => {
 
   useEffect(() => {
     if (store.customer_id) return;
-    const query = store.customer_phone.trim();
+    const query = normalizeBillingPhone(store.customer_phone);
     if (query.length < 2) {
       setCustomerHits([]);
       setCustomerOpen(false);
@@ -242,6 +258,13 @@ export const WebPos = () => {
             phone: String(row.phone || ""),
             due: Number(row.outstanding_balance || 0),
           }));
+          const existing = hits.find((hit) => normalizeBillingPhone(hit.phone) === query);
+          if (existing) {
+            usePosStore.getState().setCustomer(existing.id, existing.name, existing.phone);
+            setCustomerHits([]);
+            setCustomerOpen(false);
+            return;
+          }
           setCustomerHits(hits);
           setCustomerIndex(0);
           setCustomerOpen(true);
@@ -302,20 +325,24 @@ export const WebPos = () => {
     cgst *= discountRatio;
     sgst *= discountRatio;
     const payable = roundMoney(subtotal - billDiscountAmt);
+    const walletPaise = store.customer_id && store.payment_mode !== 'credit'
+      ? Math.min(Math.max(0,store.wallet_amount_paise || 0),walletAvailable,Math.floor(Math.round(payable*100)*(wallet.data?.policy?.redemption_limit_percent??100)/100)) : 0;
+    const walletAmount = walletPaise / 100;
+    const amountToCollect = roundMoney(payable-walletAmount);
     const rawPaid = store.paid_amount.trim();
     const parsedPaid = Number(rawPaid);
     const tendered = rawPaid !== "" && Number.isFinite(parsedPaid)
       ? Math.max(0, parsedPaid)
       : store.payment_mode === "credit"
         ? 0
-        : payable;
-    const balance_due = Math.max(0, roundMoney(payable - tendered));
+        : amountToCollect;
+    const balance_due = Math.max(0, roundMoney(amountToCollect - tendered));
     const changeDue = store.payment_mode === "cash"
-      ? Math.max(0, roundMoney(tendered - payable))
+      ? Math.max(0, roundMoney(tendered - amountToCollect))
       : 0;
     const collected = store.payment_mode === "credit"
-      ? Math.min(tendered, payable)
-      : payable;
+      ? Math.min(tendered, amountToCollect)
+      : amountToCollect;
 
     return {
       subtotal,
@@ -323,6 +350,9 @@ export const WebPos = () => {
       sgst,
       billDiscountAmt,
       payable,
+      walletPaise,
+      walletAmount,
+      amountToCollect,
       tendered,
       balance_due,
       changeDue,
@@ -334,7 +364,21 @@ export const WebPos = () => {
     store.is_percentage_discount,
     store.paid_amount,
     store.payment_mode,
+    store.wallet_amount_paise,
+    store.customer_id,
+    walletAvailable,
+    wallet.data?.policy?.redemption_limit_percent,
   ]);
+
+  const coinPolicy=wallet.data?.policy;
+  const coinRedemptionCap=Math.min(walletAvailable,Math.floor(Math.round(calculation.payable*100)*(coinPolicy?.redemption_limit_percent??100)/100));
+  const expectedCoins = store.customer_id && store.payment_mode!=='credit' && coinPolicy?.enabled && Math.round(calculation.payable*100)>=coinPolicy.minimum_sale_paise
+    ? Math.min(coinPolicy.earning_cap_paise||Number.MAX_SAFE_INTEGER,Math.floor(Math.round(calculation.amountToCollect*100)*coinPolicy.rate_bps/10000)) : 0;
+  const selectedCoinAmount=store.wallet_amount_paise;
+  const setSelectedCoinAmount=store.setWalletAmount;
+  useEffect(()=>{
+    if(wallet.isSuccess&&!wallet.isFetching&&selectedCoinAmount>coinRedemptionCap)setSelectedCoinAmount(coinRedemptionCap);
+  },[wallet.isSuccess,wallet.isFetching,selectedCoinAmount,setSelectedCoinAmount,coinRedemptionCap]);
 
   const unitCount = store.cart.reduce((sum, line) => sum + line.quantity, 0);
   const creditNeedsCustomer = store.payment_mode === "credit" && !store.customer_id;
@@ -347,7 +391,9 @@ export const WebPos = () => {
   );
   const confirmBlockedReason = store.cart.length === 0
     ? ""
-    : creditNeedsCustomer
+    : walletBlocked
+      ? "Refresh the Nex Coins before confirming"
+      : creditNeedsCustomer
       ? "Choose a saved customer for credit"
       : overCreditLimit
         ? "This bill would pass the customer's credit limit"
@@ -365,6 +411,11 @@ export const WebPos = () => {
       toast.error("Add a medicine before confirming");
       return;
     }
+    if (!store.customer_id && store.customer_phone.trim()) {
+      toast.error("Select a saved customer or enter a name and save the customer first");
+      (customerNameRef.current || customerInputRef.current)?.focus();
+      return;
+    }
     if (store.payment_mode !== "credit" && calculation.balance_due > 0.009) {
       toast.error("Amount received is less than the bill. Collect the rest or switch to Credit.");
       return;
@@ -374,6 +425,7 @@ export const WebPos = () => {
       return;
     }
 
+    if (walletBlocked) { toast.error("Refresh the Nex Coins before confirming"); return; }
     committingRef.current = true;
     setIsCommitting(true);
     try {
@@ -401,7 +453,7 @@ export const WebPos = () => {
         store.customer_id || undefined,
         cashierId,
         mapPosPaymentToService(store.payment_mode),
-        { supplyType: "INTRA", paidAmount: calculation.collected },
+        { supplyType: "INTRA", paidAmount: calculation.collected, walletAmountPaise: calculation.walletPaise, requestId: store.checkout_request_id },
       );
 
       const items = ((sale as { sale_items?: Record<string, unknown>[] }).sale_items || []).map(
@@ -420,7 +472,8 @@ export const WebPos = () => {
 
       setUpiModal("closed");
       setPendingUpiAmount(0);
-      toast.success("Sale confirmed");
+      const earned=Number((sale as Sale & {nex_coins_earned_paise?:number}).nex_coins_earned_paise||0);
+      toast.success(earned>0?`Sale confirmed · earned ${walletMoney(earned)} Nex Coins`:"Sale confirmed");
       store.reset();
       setSearchTerm("");
       setClearArmed(false);
@@ -438,6 +491,10 @@ export const WebPos = () => {
       });
       void Promise.all([
         queryClient.invalidateQueries({ queryKey: ["sales"] }),
+        queryClient.invalidateQueries({ queryKey: ["customer-wallet"] }),
+        queryClient.invalidateQueries({ queryKey: ["customer-history"] }),
+        queryClient.invalidateQueries({ queryKey: ["customer-history-profile"] }),
+        queryClient.invalidateQueries({ queryKey: ["directory", "/customers"] }),
         queryClient.invalidateQueries({ queryKey: ["medicines"] }),
         queryClient.invalidateQueries({ queryKey: ["clinic-dashboard"] }),
         queryClient.invalidateQueries({ queryKey: ["reports"] }),
@@ -460,6 +517,8 @@ export const WebPos = () => {
     calculation.balance_due,
     calculation.subtotal,
     calculation.collected,
+    calculation.walletPaise,
+    walletBlocked,
     queryClient,
   ]);
 
@@ -479,6 +538,11 @@ export const WebPos = () => {
       searchInputRef.current?.focus();
       return;
     }
+    if (!store.customer_id && store.customer_phone.trim()) {
+      toast.error("Select a saved customer or enter a name and save the customer first");
+      (customerNameRef.current || customerInputRef.current)?.focus();
+      return;
+    }
     if (shortPay) {
       toast.error("Amount received is less than the bill. Collect the rest or switch to Credit.");
       paidInputRef.current?.focus();
@@ -493,7 +557,8 @@ export const WebPos = () => {
       toast.error("This bill would pass the customer's credit limit");
       return;
     }
-    if (store.payment_mode === "upi") {
+    if (walletBlocked) { toast.error("Refresh the Nex Coins before confirming"); return; }
+    if (store.payment_mode === "upi" && calculation.collected > 0) {
       const amount = roundMoney(calculation.collected);
       if (!upiId.trim()) {
         setPendingUpiAmount(amount);
@@ -507,6 +572,8 @@ export const WebPos = () => {
     await executeSale();
   }, [
     store.payment_mode,
+    store.customer_id,
+    store.customer_phone,
     store.cart.length,
     cashierId,
     calculation.collected,
@@ -515,6 +582,7 @@ export const WebPos = () => {
     shortPay,
     creditNeedsCustomer,
     overCreditLimit,
+    walletBlocked,
   ]);
 
   handleConfirmRef.current = () => {
@@ -636,6 +704,40 @@ export const WebPos = () => {
     searchInputRef.current?.focus();
   };
 
+  const saveCustomer = async () => {
+    if (customerSavingRef.current || committingRef.current) return;
+    const phone = normalizeBillingPhone(store.customer_phone);
+    const name = store.customer_name.trim();
+    if (!/^[6-9]\d{9}$/.test(phone)) {
+      toast.error("Enter a valid 10-digit mobile number");
+      customerInputRef.current?.focus();
+      return;
+    }
+    if (!name) {
+      toast.error("Customer name is required");
+      customerNameRef.current?.focus();
+      return;
+    }
+    customerSavingRef.current = true;
+    setCustomerSaving(true);
+    try {
+      const customer = await CustomerService.findOrCreateCustomer({ name, phone });
+      store.setCustomer(customer.id, customer.name, customer.phone || phone);
+      setCustomerHits([]);
+      setCustomerOpen(false);
+      void queryClient.invalidateQueries({ queryKey: ["directory", "/customers"] });
+      toast.success("Customer saved");
+      searchInputRef.current?.focus();
+    } catch (error: unknown) {
+      const message = (error as { response?: { data?: { error?: { message?: string } } } })
+        ?.response?.data?.error?.message;
+      toast.error(message || (error instanceof Error ? error.message : "Failed to save customer"));
+    } finally {
+      customerSavingRef.current = false;
+      setCustomerSaving(false);
+    }
+  };
+
   const clearCustomer = () => {
     store.setCustomer(null, "", "");
     setCustomerHits([]);
@@ -684,15 +786,15 @@ export const WebPos = () => {
   const activeOptionId = showSearchPanel && results[selectedIndex]
     ? `${SEARCH_LIST_ID}-option-${selectedIndex}`
     : undefined;
-  const suggestions = store.payment_mode === "cash" ? cashSuggestions(calculation.payable) : [];
+  const suggestions = store.payment_mode === "cash" ? cashSuggestions(calculation.amountToCollect) : [];
   const receivedLabel = store.payment_mode === "credit" ? "Received now" : "Amount received";
   const receivedHint = store.payment_mode === "credit"
     ? "Leave this blank to put the whole bill on credit."
-    : "Leave this blank to collect the full bill.";
+    : calculation.walletAmount > 0 ? "Collect the remainder after Nex Coins." : "Leave this blank to collect the full bill.";
 
   return (
     <fieldset
-      disabled={isCommitting}
+      disabled={isCommitting || upiModal !== "closed"}
       aria-label="Current bill"
       className={`mx-auto flex min-h-full w-full max-w-[1600px] min-w-0 flex-col gap-4 border-0 p-4 md:p-6 lg:flex-row lg:items-start ${
         store.cart.length > 0 ? "max-[480px]:pb-40" : ""
@@ -925,6 +1027,7 @@ export const WebPos = () => {
                 <div className="min-w-0 flex-1">
                   <p className="truncate text-sm font-semibold text-foreground-strong">{store.customer_name || "Customer"}</p>
                   <p className="text-xs text-muted">{store.customer_phone || "No phone"}</p>
+                  <Link to={`/customers/${encodeURIComponent(store.customer_id)}`} className="mt-1 inline-block text-xs font-semibold text-primary hover:underline">View purchase history</Link>
                   {customerAccount && customerAccount.due > 0 && (
                     <p className="mt-1 text-xs font-semibold text-warning">
                       Already owes {formatRupee(customerAccount.due)}
@@ -934,6 +1037,7 @@ export const WebPos = () => {
                 <button
                   type="button"
                   onClick={clearCustomer}
+                  disabled={customerSaving || isCommitting}
                   className="text-xs font-semibold text-primary hover:underline"
                 >
                   Change
@@ -955,6 +1059,7 @@ export const WebPos = () => {
                     aria-controls="pos-customer-list"
                     aria-autocomplete="list"
                     type="text"
+                    disabled={customerSaving || isCommitting}
                     value={store.customer_phone}
                     onChange={(e) => store.setCustomer(null, "", e.target.value)}
                     onKeyDown={handleCustomerKeyDown}
@@ -972,9 +1077,39 @@ export const WebPos = () => {
                   {customerSearching
                     ? "Looking up customers…"
                     : customerOpen && customerHits.length === 0
-                      ? "No saved customer. Cash, UPI, and card still work."
+                      ? "New customer? Enter their mobile number and name below."
                       : "Walk-in if you leave this empty. Credit needs a saved customer."}
                 </p>
+                {store.customer_phone.trim() && /^[+\d\s().-]+$/.test(store.customer_phone.trim()) && (
+                  <form
+                    className="mt-3 space-y-2"
+                    onSubmit={(event) => {
+                      event.preventDefault();
+                      void saveCustomer();
+                    }}
+                  >
+                    <label htmlFor="pos-customer-name" className="block text-xs font-semibold text-muted">
+                      Customer name *
+                    </label>
+                    <input
+                      id="pos-customer-name"
+                      ref={customerNameRef}
+                      type="text"
+                      autoComplete="name"
+                      placeholder="Enter customer name"
+                      required
+                      maxLength={200}
+                      disabled={customerSaving || isCommitting}
+                      value={store.customer_name}
+                      onChange={(event) => store.setCustomer(null, event.target.value, store.customer_phone)}
+                      className="w-full rounded-xl border border-border bg-surface px-3 py-3 text-sm outline-none focus:border-primary focus:ring-2 focus:ring-primary/20"
+                    />
+                    <p className="text-xs text-muted">Save their name and phone to Customers and use them on this bill.</p>
+                    <Button type="submit" size="sm" isLoading={customerSaving} disabled={customerSearching || isCommitting}>
+                      Save customer
+                    </Button>
+                  </form>
+                )}
                 {customerOpen && customerHits.length > 0 && (
                   <ul
                     id="pos-customer-list"
@@ -1008,6 +1143,22 @@ export const WebPos = () => {
               </>
             )}
           </div>
+
+          {store.customer_id && (
+            <div className="rounded-xl border border-primary/20 bg-primary/5 p-3 text-sm">
+              <div className="flex items-center justify-between gap-2"><span className="font-semibold">Nex Coins</span><span className="font-bold text-primary">{wallet.isPending ? 'Checking…' : wallet.isError ? 'Unavailable' : walletMoney(walletAvailable)}</span></div>
+              {wallet.isError ? <button type="button" className="mt-2 text-xs font-semibold text-primary" onClick={() => void wallet.refetch()}>Retry wallet check</button> : <>
+                {wallet.data?.next_expiry && <p className="mt-1 text-xs text-muted">Next deadline: {walletDate(wallet.data.next_expiry)}</p>}
+                {walletAvailable > 0 && coinRedemptionCap>0 && store.payment_mode !== 'credit' && <div className="mt-3 flex flex-wrap items-center gap-2">
+                  <label htmlFor="pos-wallet-use" className="text-xs font-semibold">Use coins</label>
+                  <input id="pos-wallet-use" aria-label="Nex Coins amount" inputMode="decimal" type="number" min="0" step="0.01" max={coinRedemptionCap/100} value={store.wallet_amount_paise ? (store.wallet_amount_paise/100).toString() : ''} placeholder="0.00" onChange={e => store.setWalletAmount(Math.min(coinRedemptionCap,Math.max(0,Math.round(Number(e.target.value)*100)||0)))} className="w-24 rounded-lg border border-border bg-surface px-2 py-1.5 text-right text-sm"/>
+                  <button type="button" className="text-xs font-semibold text-primary hover:underline" onClick={() => store.setWalletAmount(coinRedemptionCap)}>Use maximum</button>
+                  {store.wallet_amount_paise > 0 && <button type="button" className="text-xs text-muted hover:underline" onClick={() => store.setWalletAmount(0)}>Remove</button>}
+                </div>}
+                <p className="mt-2 text-xs text-muted">{store.payment_mode === 'credit' ? 'Choose Cash, UPI or Card to redeem Nex Coins.' : `Nearest-expiry coins first · maximum ${coinPolicy?.redemption_limit_percent??100}% of this bill.`}</p>
+              </>}
+            </div>
+          )}
 
           <div className="space-y-2.5 text-sm">
             <div className="flex items-center justify-between text-muted">
@@ -1058,6 +1209,10 @@ export const WebPos = () => {
             </p>
           </div>
 
+          {store.customer_id && expectedCoins>0 && <p className="rounded-lg bg-primary/5 px-3 py-2 text-xs font-semibold text-primary">Earn {walletMoney(expectedCoins)} Nex Coins after payment · valid {coinPolicy?.expiry_days||90} days</p>}
+          {!store.customer_id && <p className="text-xs text-muted">Save or select a customer to earn Nex Coins automatically.</p>}
+          {calculation.walletAmount > 0 && <div className="space-y-1 rounded-lg bg-success/5 px-3 py-2 text-sm"><p className="flex justify-between"><span>Nex Coins</span><strong>−{formatRupee(calculation.walletAmount)}</strong></p><p className="flex justify-between font-semibold"><span>Remaining to collect</span><span>{formatRupee(calculation.amountToCollect)}</span></p></div>}
+
           <div
             role="radiogroup"
             aria-label="Payment method"
@@ -1103,7 +1258,7 @@ export const WebPos = () => {
                   inputMode="decimal"
                   aria-label={receivedLabel}
                   className="w-28 bg-transparent text-right text-xl font-semibold tabular-nums outline-none"
-                  placeholder={store.payment_mode === "credit" ? "0.00" : calculation.payable.toFixed(2)}
+                  placeholder={store.payment_mode === "credit" ? "0.00" : calculation.amountToCollect.toFixed(2)}
                   value={store.paid_amount}
                   onChange={(e) => store.setPaidAmount(e.target.value)}
                 />

@@ -215,7 +215,8 @@ export const ReportsHubPage: React.FC = () => {
                             ['Net revenue', formatInr(Number(p.net_revenue ?? 0), 2)],
                             ['Cost of goods sold', formatInr(Number(p.cogs ?? 0), 2)],
                             ['Gross profit', formatInr(Number(p.gross_profit ?? 0), 2)],
-                            ['Operating expenses', formatInr(Number(p.total_expenses ?? 0), 2)],
+                            ['Operating expenses', formatInr(Number(p.operating_expenses ?? p.total_expenses ?? 0), 2)],
+                            ['Nex Coins redeemed (net of returns)', formatInr(Number(p.promotional_credit_cost ?? 0), 2)],
                             ['Net profit', formatInr(Number(p.net_profit ?? 0), 2)],
                         ],
                     };

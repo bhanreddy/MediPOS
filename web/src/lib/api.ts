@@ -2,6 +2,7 @@ import axios, { type AxiosError, type InternalAxiosRequestConfig } from 'axios';
 import axiosRetry, { exponentialDelay, isNetworkError } from 'axios-retry';
 import { sessionClient } from './sessionClient';
 import { API_BASE_URL } from './apiBaseUrl';
+import { queryClient } from './queryClient';
 
 const api = axios.create({
   baseURL: API_BASE_URL,
@@ -46,7 +47,16 @@ axiosRetry(api, {
 
 // Renew once, share the refresh across concurrent 401s, and keep the UI signed in on failure.
 api.interceptors.response.use(
-  (res) => res,
+  (res) => {
+    const method = res.config.method?.toLowerCase() || 'get';
+    if (!['get', 'head', 'options'].includes(method) &&
+        /^\/(sales|purchases|inventory|shortbook|bulk)(\/|$)/.test(res.config.url || '')) {
+      for (const key of ['inventory-radar', 'inventory-disposed', 'clinic-header-alerts', 'clinic-dashboard']) {
+        void queryClient.invalidateQueries({ queryKey: [key] });
+      }
+    }
+    return res;
+  },
   async (error: AxiosError) => {
     const original = error.config as SessionRequest | undefined;
     const isCredentialRequest = /\/auth\/(login|register|refresh)\/?$/.test(

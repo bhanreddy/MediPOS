@@ -80,3 +80,16 @@ test("unpaid credit sales default to zero received", async () => {
   );
   assert.equal(saved.payload.paid_amount, 0);
 });
+
+
+test("wallet checkout sends integer promotional credits, external payment, and a stable request identifier", async () => {
+  let saved;
+  await service(value => (saved = value)).finalizeSale(cart,"customer","cashier","CASH",{
+    supplyType:"INTRA",paidAmount:8,walletAmountPaise:1000,requestId:"408165df-b0ed-437a-a852-ad5bb8c1a692",
+  });
+  assert.equal(saved.payload.wallet_amount_paise,1000);
+  assert.equal(saved.payload.paid_amount,8);
+  assert.equal(saved.payload._local_id,"408165df-b0ed-437a-a852-ad5bb8c1a692");
+  assert.equal(saved.payload.customer_id,"customer");
+  assert.equal(saved.options["axios-retry"].retries,0);
+});

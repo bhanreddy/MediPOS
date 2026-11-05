@@ -49,6 +49,7 @@ const BusinessAnalyticsScreen = lazy(() => import('./components/Analytics/Busine
 const ImportDataScreen = lazy(() => import('./components/Settings/ImportDataScreen').then(module => ({ default: module.ImportDataScreen })));
 const BillingSalesListPage = lazy(() => import('./components/clinic/BillingSalesListPage').then(module => ({ default: module.BillingSalesListPage })));
 const PurchasesListPage = lazy(() => import('./components/clinic/PurchasesListPage').then(module => ({ default: module.PurchasesListPage })));
+const CustomerHistoryPage = lazy(() => import('./components/clinic/CustomerHistoryPage').then(module => ({ default: module.CustomerHistoryPage })));
 const CustomersListPage = lazy(() => import('./components/clinic/CustomersListPage').then(module => ({ default: module.CustomersListPage })));
 const SuppliersListPage = lazy(() => import('./components/clinic/SuppliersListPage').then(module => ({ default: module.SuppliersListPage })));
 const ExpensesListPage = lazy(() => import('./components/clinic/ExpensesListPage').then(module => ({ default: module.ExpensesListPage })));
@@ -129,6 +130,7 @@ const router = createBrowserRouter([
                     { path: 'prescriptions', element: <PrescriptionQueuePage /> },
                     { path: 'patients/:id/medications', element: <PatientMedicationHistoryPage /> },
                     { path: 'customers', element: <CustomersListPage /> },
+                    { path: 'customers/:id', element: <CustomerHistoryPage /> },
                     { path: 'suppliers', element: <SuppliersListPage /> },
                     { path: 'expenses', element: <ExpensesListPage /> },
                     { path: 'reports', element: <ReportsHubPage /> },

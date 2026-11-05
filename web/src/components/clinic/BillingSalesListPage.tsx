@@ -23,12 +23,14 @@ type Row = Sale & {
   customerLabel: string;
   payment_status?: string;
   paid_amount?: number;
+  wallet_redeemed_paise?: number;
   balance_due?: number;
 };
 type InvoiceDetail = {
   invoice_number: string;
   net_amount: number;
   paid_amount: number;
+  wallet_redeemed_paise?: number;
   balance_due: number;
   sale_items: {
     id: string;
@@ -123,10 +125,10 @@ export const BillingSalesListPage: React.FC = () => {
       (sum, row) =>
         sum +
         (row.status === "REFUNDED" ? -1 : 1) *
-          Number(
+          Math.max(0,Number(
             row.paid_amount ??
               (row.payment_status === "paid" ? row.final_amount : 0),
-          ),
+          )-Number(row.wallet_redeemed_paise||0)/100),
       0,
     );
     const pending = rows
@@ -389,7 +391,7 @@ export const BillingSalesListPage: React.FC = () => {
           <div className="space-y-4">
             <p>
               Total {formatInr(detail.net_amount, 2)} · Received{" "}
-              {formatInr(detail.paid_amount, 2)} · Due{" "}
+              {formatInr(Number(detail.paid_amount)-Number(detail.wallet_redeemed_paise||0)/100, 2)} · Nex Coins {formatInr(Number(detail.wallet_redeemed_paise||0)/100,2)} · Due{" "}
               {formatInr(detail.balance_due, 2)}
             </p>
             <ul className="space-y-2">

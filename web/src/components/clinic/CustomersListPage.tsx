@@ -1,10 +1,12 @@
 import React, { useId, useState } from "react";
-import { Plus } from "lucide-react";
+import { Link } from "react-router-dom";
+import { Plus, History } from "lucide-react";
 import toast from "react-hot-toast";
 import { useDirectory } from "../../hooks/useDirectory";
 import { LoadError, NoSearchResults, Pagination } from "../ui/ListFeedback";
 import type { Customer } from "../../core/types";
 import { CustomerService } from "../../services/customerService";
+import { NexCoinRules } from './NexCoinRules';
 import { Button } from "../ui/Button";
 import { Card } from "../ui/Card";
 import { Input } from "../ui/Input";
@@ -113,6 +115,7 @@ export const CustomersListPage: React.FC = () => {
             billing.
           </p>
         </div>
+        <div className="flex flex-wrap items-center gap-2"><NexCoinRules />
         <Button
           variant="secondary"
           type="button"
@@ -121,7 +124,7 @@ export const CustomersListPage: React.FC = () => {
         >
           <Plus className="w-4 h-4 mr-2 inline" />
           Add customer
-        </Button>
+        </Button></div>
       </div>
 
       <Card className="p-4 space-y-4">
@@ -151,18 +154,19 @@ export const CustomersListPage: React.FC = () => {
               <TableCell className="text-muted font-bold uppercase text-xs tracking-wider text-right">
                 Due balance
               </TableCell>
+              <TableCell className="text-right text-xs font-bold uppercase text-muted">History</TableCell>
             </TableRow>
           </TableHeader>
           <TableBody>
             {error ? null : loading ? (
               <TableRow>
-                <TableCell colSpan={5} className="text-center text-muted py-12">
+                <TableCell colSpan={6} className="text-center text-muted py-12">
                   Loading customers…
                 </TableCell>
               </TableRow>
             ) : filtered.length === 0 ? (
               <TableRow>
-                <TableCell colSpan={5} className="text-center py-16 text-muted">
+                <TableCell colSpan={6} className="text-center py-16 text-muted">
                   {q.trim() ? <NoSearchResults onClear={() => { setQ(""); setPage(1); }} /> : <>
                   <p className="font-medium mb-2">No customers yet.</p>
                   <p className="text-sm">
@@ -173,7 +177,7 @@ export const CustomersListPage: React.FC = () => {
             ) : (
               filtered.map((c) => (
                 <TableRow key={c.id || c._local_id}>
-                  <TableCell className="font-bold">{c.name}</TableCell>
+                  <TableCell className="font-bold"><Link to={`/customers/${encodeURIComponent(c.id || c._local_id || "")}`} className="inline-flex items-center gap-2 text-primary hover:underline">{c.name}<History size={14} aria-label="View purchase history" /></Link></TableCell>
                   <TableCell className="font-mono text-sm">{c.phone}</TableCell>
                   <TableCell className="text-muted text-sm">
                     {c.email || "—"}
@@ -184,6 +188,7 @@ export const CustomersListPage: React.FC = () => {
                   <TableCell className="text-right font-black tabular-nums text-warning">
                     {formatInr(c.outstanding_balance ?? c.credit_balance ?? 0)}
                   </TableCell>
+                  <TableCell className="text-right"><Link to={`/customers/${encodeURIComponent(c.id || c._local_id || "")}`} className="whitespace-nowrap text-xs font-semibold text-primary hover:underline" aria-label={`View purchase history for ${c.name}`}>View history</Link></TableCell>
                 </TableRow>
               ))
             )}

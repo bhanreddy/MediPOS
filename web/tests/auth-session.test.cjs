@@ -232,10 +232,11 @@ test("storage recovery never masquerades as an intentional signed-out session", 
   assert.equal(h.client.hasSavedSession(), true);
 });
 let retryPolicy;
-function apiHarness(client) {
+function apiHarness(client, invalidateQueries = () => Promise.resolve()) {
   return load("lib/api.ts", {
     axios,
     "./apiBaseUrl": { API_BASE_URL: "/api" },
+    "./queryClient": { queryClient: { invalidateQueries } },
     "axios-retry": {
       __esModule: true,
       default: (_api, policy) => {
@@ -581,4 +582,25 @@ test('unchecked Remember me removes desktop durable credentials and writes no ne
   assert.equal(await h.authStorage.getItem('sdk-session'), 'tab-token');
   const restarted = persistenceHarness(true, h.browserValues, new Map(), native);
   assert.equal(await restarted.authStorage.getItem('sdk-session'), null);
+});
+
+test('successful stock changes refresh inventory, notification counts and the dashboard; reads and failed writes do not', async () => {
+  const invalidated = [];
+  const api = apiHarness({ getVersion: () => 0, getSession: async () => null }, options => {
+    invalidated.push(options.queryKey[0]);
+    return Promise.resolve();
+  });
+  api.defaults.adapter = async config => ({ data: {}, status: 200, headers: {}, config });
+  for (const url of ['/purchases', '/sales', '/inventory/batches/batch/dispose', '/shortbook/item', '/bulk/medicines']) {
+    invalidated.length = 0;
+    await api.post(url, {});
+    assert.deepEqual(invalidated, ['inventory-radar', 'inventory-disposed', 'clinic-header-alerts', 'clinic-dashboard']);
+  }
+  invalidated.length = 0;
+  await api.get('/inventory/medicines');
+  await api.post('/auth/login', {});
+  assert.deepEqual(invalidated, []);
+  api.defaults.adapter = async () => { throw new Error('Stock update failed'); };
+  await assert.rejects(api.post('/purchases', {}));
+  assert.deepEqual(invalidated, []);
 });

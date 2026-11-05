@@ -102,6 +102,12 @@ export interface Supplier extends BaseEntity {
     email?: string;
     address: string;
     is_active: boolean;
+    outstanding_balance?: number;
+    lead_time_days?: number;
+    minimum_order_value?: number;
+    preferred_channel?: 'MANUAL' | 'WHATSAPP' | 'SMS';
+    whatsapp_opt_in?: boolean;
+    sms_opt_in?: boolean;
 }
 
 export type PaymentMode = 'CASH' | 'UPI' | 'CARD' | 'DUE' | 'MIXED';

@@ -32,7 +32,7 @@ export const PrinterService = {
             const paidAmount = optionalNumber(saleData.paid_amount);
             const balanceDue = optionalNumber(saleData.balance_due) ?? (paidAmount === undefined ? undefined
                 : Math.max(0, Math.round((finalTotal - paidAmount) * 100) / 100));
-            const paymentModes: Record<string, string> = { CASH: 'Cash', UPI: 'UPI', CARD: 'Card', DUE: 'Credit', CREDIT: 'Credit', MIXED: 'Split payment' };
+            const paymentModes: Record<string, string> = { CASH: 'Cash', UPI: 'UPI', CARD: 'Card', DUE: 'Credit', CREDIT: 'Credit', MIXED: 'Split payment', WALLET: 'Nex Coins' };
             const paymentMode = String(saleData.payment_mode || saleData.payment_method || '').toUpperCase();
             const createdAt = saleData.created_at ? new Date(saleData.created_at) : new Date();
             const invoiceDate = Number.isNaN(createdAt.getTime()) ? new Date() : createdAt;
@@ -137,6 +137,9 @@ export const PrinterService = {
                 priceIncludesTax,
                 paymentMethod: paymentModes[paymentMode] || (paymentMode || undefined),
                 paidAmount,
+                walletAmount: toNumber(saleData.wallet_redeemed_paise) / 100,
+                earnedCoins: toNumber(saleData.nex_coins_earned_paise) / 100,
+                coinExpiry: saleData.nex_coins_expires_at ? new Date(saleData.nex_coins_expires_at).toLocaleDateString('en-IN',{day:'2-digit',month:'short',year:'numeric'}) : undefined,
                 balanceDue,
             });
 
