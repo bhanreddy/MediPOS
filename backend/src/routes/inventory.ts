@@ -149,7 +149,8 @@ inventoryRouter.get('/medicines', requireAuth, async (req, res, next) => {
       queryAll('medicines', where, values),
       queryRaw(
         `SELECT * FROM medicine_batches
-         WHERE medicine_id IN (SELECT id FROM medicines WHERE deleted_at IS NULL AND (${where}))
+         WHERE EXISTS (SELECT 1 FROM medicines WHERE deleted_at IS NULL AND (${where})
+           AND (medicine_batches.medicine_id::text = medicines.id::text OR medicine_batches.medicine_id::text = medicines._local_id::text))
            AND quantity_remaining > 0 AND deleted_at IS NULL AND ${SELLABLE_BATCH_FILTER}${batchClinicClause}
          ORDER BY expiry_date ASC`,
         clinicId ? [...values, clinicId] : values,
@@ -165,7 +166,9 @@ inventoryRouter.get('/medicines', requireAuth, async (req, res, next) => {
     }
     let data = medicines;
     for (const med of data) {
-      const batches = batchesByMedicine.get(med.id) || [];
+      const batches = [...(batchesByMedicine.get(med.id) || [])];
+      if (med._local_id && med._local_id !== med.id) batches.push(...(batchesByMedicine.get(med._local_id) || []));
+      batches.sort((a, b) => String(a.expiry_date).localeCompare(String(b.expiry_date)));
       (med as any).medicine_batches = batches;
       (med as any).total_stock = batches.reduce(
         (s: number, b: any) => s + Number(b.quantity_remaining ?? 0),
@@ -198,27 +201,26 @@ inventoryRouter.get('/attention-counts', requireAuth, async (req, res, next) => 
       warning = fallback.toISOString().slice(0, 10);
     }
     const [row] = await queryRaw<{ low_stock: number; expiring: number; shortbook: number }>(
-      `WITH batches AS (
-         SELECT mb.quantity_remaining AS qty, mb.expiry_date,
-                GREATEST(COALESCE(m.low_stock_threshold, 10), 1) AS min_alert
-         FROM medicine_batches mb
-         JOIN medicines m ON m.id = mb.medicine_id
-         WHERE m.clinic_id = ? AND m.deleted_at IS NULL AND m.is_active = true
-           AND mb.clinic_id = ? AND mb.deleted_at IS NULL AND mb.quantity_remaining > 0
+      `WITH medicines_in_scope AS (
+         SELECT id, _local_id, GREATEST(COALESCE(low_stock_threshold, 10), 0) AS min_alert
+         FROM medicines WHERE clinic_id = ? AND deleted_at IS NULL AND is_active = true
+       ), batches AS (
+         SELECT m.id AS medicine_id, mb.quantity_remaining AS qty, mb.expiry_date
+         FROM medicines_in_scope m
+         JOIN medicine_batches mb ON (mb.medicine_id::text = m.id::text OR mb.medicine_id::text = m._local_id::text)
+         WHERE mb.clinic_id = ? AND mb.deleted_at IS NULL AND mb.quantity_remaining > 0
            AND (mb.is_disposed = false OR mb.is_disposed IS NULL)
+       ), stock AS (
+         SELECT m.id, m.min_alert,
+                COALESCE(SUM(b.qty) FILTER (WHERE b.expiry_date >= ?::date), 0) AS available
+         FROM medicines_in_scope m LEFT JOIN batches b ON b.medicine_id = m.id
+         GROUP BY m.id, m.min_alert
        )
        SELECT
-         COUNT(*) FILTER (
-           WHERE expiry_date >= ?::date AND (qty < min_alert OR (min_alert = 1 AND qty <= 1))
-         )::int AS low_stock,
-         COUNT(*) FILTER (
-           WHERE expiry_date < ?::date
-              OR (expiry_date >= ?::date AND expiry_date <= ?::date
-                  AND NOT (qty < min_alert OR (min_alert = 1 AND qty <= 1)))
-         )::int AS expiring,
-         (SELECT COUNT(*)::int FROM shortbook WHERE clinic_id = ? AND is_ordered = false) AS shortbook
-       FROM batches`,
-      [clinicId, clinicId, today, today, today, warning, clinicId],
+         (SELECT COUNT(*)::int FROM stock WHERE available <= min_alert) AS low_stock,
+         (SELECT COUNT(*)::int FROM batches WHERE expiry_date <= ?::date) AS expiring,
+         (SELECT COUNT(*)::int FROM shortbook WHERE clinic_id = ? AND is_ordered = false AND deleted_at IS NULL) AS shortbook`,
+      [clinicId, clinicId, today, warning, clinicId],
     );
     res.json({
       data: {

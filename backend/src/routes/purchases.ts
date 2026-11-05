@@ -10,6 +10,7 @@ import { supabaseAdmin } from '../config/supabase';
 import { createPurchaseSchema, updatePaymentSchema, csvRowSchema } from '../schemas/purchase.schema';
 import { InventoryPositionService } from '../services/inventoryPosition';
 import { SupplierSchemeEngine } from '../services/commercial/supplierSchemeEngine';
+import { applyReorderReceipt, findReorderReceipt, receiptHash } from '../services/procurement/reorderReceiptService';
 
 import multer from 'multer';
 import Anthropic from '@anthropic-ai/sdk';
@@ -86,7 +87,11 @@ purchasesRouter.post('/', requireAuth, requireRole('OWNER'), transactionalRoute(
   try {
     const parsed = createPurchaseSchema.parse(req.body);
     const clinicId = req.user!.clinic_id!;
-    
+    const linkedReceiptHash = parsed.reorder_order_id ? receiptHash(parsed) : '';
+    if (parsed.reorder_order_id) {
+      const previous = await findReorderReceipt(clinicId, parsed.reorder_receipt_id, linkedReceiptHash);
+      if (previous) { res.status(201).json({ data: previous }); return; }
+    }
     const { organizationId, storeId, counterId, terminalId } = await resolveCloudStoreContext(clinicId, parsed);
 
     
@@ -122,6 +127,8 @@ purchasesRouter.post('/', requireAuth, requireRole('OWNER'), transactionalRoute(
         supplierObj = supp;
       }
     }
+
+    if (parsed.reorder_order_id) await applyReorderReceipt(clinicId, parsed.reorder_order_id, supplierId, parsed.items);
 
     // Insert purchase locally
     const purchase = await localMutate({
@@ -305,6 +312,9 @@ purchasesRouter.post('/', requireAuth, requireRole('OWNER'), transactionalRoute(
       });
     }
 
+    if (parsed.reorder_order_id) await queryRaw(`INSERT INTO reorder_receipts
+      (clinic_id,request_id,purchase_order_id,purchase_id,payload_hash) VALUES (?,?,?,?,?)`,
+      [clinicId, parsed.reorder_receipt_id, parsed.reorder_order_id, purchase.id, linkedReceiptHash]);
     res.status(201).json({ data: purchase });
   } catch (err) {
     next(err);

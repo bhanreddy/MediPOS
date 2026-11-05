@@ -39,6 +39,7 @@ import { patientsRouter } from './patients';
 import { procurementRouter } from './procurement';
 import transfersRouter from './transfers';
 import warehouseRouter from './warehouse';
+import { walletRouter } from './wallet';
 import { ordersRouter } from './orders';
 
 export const routes = Router();
@@ -76,6 +77,7 @@ routes.use('/expenses', expensesRouter);
 routes.use('/inventory', inventoryRouter);
 routes.use('/suppliers', suppliersRouter);
 routes.use('/customers', customersRouter);
+routes.use('/wallet', walletRouter);
 routes.use('/devices', devicesRouter);
 routes.use('/events', eventsRouter);
 routes.use('/reports', reportsRouter);

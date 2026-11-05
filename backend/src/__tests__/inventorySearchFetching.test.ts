@@ -74,9 +74,9 @@ test('attention counts use one aggregated query scoped to the clinic and the req
   expect(response.status).toBe(200);
   expect(response.body.data).toEqual({ low_stock: 2, expiring: 3, shortbook: 4 });
   expect(raw).toHaveBeenCalledTimes(1);
-  expect(raw.mock.calls[0][0]).toContain('GREATEST(COALESCE(m.low_stock_threshold, 10), 1)');
+  expect(raw.mock.calls[0][0]).toContain('GREATEST(COALESCE(low_stock_threshold, 10), 0)');
   expect(raw.mock.calls[0][0]).toContain('is_ordered = false');
-  expect(raw.mock.calls[0][1]).toEqual(['clinic-a', 'clinic-a', '2026-10-25', '2026-10-25', '2026-10-25', '2026-11-24', 'clinic-a']);
+  expect(raw.mock.calls[0][1]).toEqual(['clinic-a', 'clinic-a', '2026-10-25', '2026-11-24', 'clinic-a']);
   expect(all).not.toHaveBeenCalled();
 });
 
@@ -98,7 +98,7 @@ test('medicine list reads products and their stock together and groups stock per
   expect(response.status).toBe(200);
   const where = 'is_active=true AND clinic_id=? AND (name ILIKE ? OR generic_name ILIKE ?)';
   expect(all.mock.calls[0].slice(1)).toEqual([where, ['clinic-a', '%Para%', '%Para%']]);
-  expect(raw.mock.calls[0][0]).toContain(`medicine_id IN (SELECT id FROM medicines WHERE deleted_at IS NULL AND (${where}))`);
+  expect(raw.mock.calls[0][0]).toContain(`EXISTS (SELECT 1 FROM medicines WHERE deleted_at IS NULL AND (${where})`);
   expect(raw.mock.calls[0][1]).toEqual(['clinic-a', '%Para%', '%Para%', 'clinic-a']);
   expect(response.body.data.map((med: any) => [med.id, med.total_stock, med.medicine_batches.map((b: any) => b.id)]))
     .toEqual([['med-a', 7, ['a-1', 'a-2']]]);

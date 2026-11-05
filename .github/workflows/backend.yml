@@ -5,11 +5,13 @@ on:
     branches: [main]
     paths:
       - 'backend/**'
+      - 'web/src/services/importService.ts'
       - '.github/workflows/backend.yml'
   pull_request:
     branches: [main]
     paths:
       - 'backend/**'
+      - 'web/src/services/importService.ts'
       - '.github/workflows/backend.yml'
 
 defaults:
@@ -74,6 +76,8 @@ jobs:
       NODE_ENV: test
       TEST_DATABASE_URL: postgres://postgres:postgres@127.0.0.1:5432/medical_ci_qa
       DATABASE_URL: postgres://postgres:postgres@127.0.0.1:5432/medical_ci_qa
+      # Test-only signing key for the disposable QA database.
+      WALLET_LEDGER_SECRET: 'abababababababababababababababababababababababababababababababab'
       LOCAL_DB_PATH: /tmp/medical-ci-qa.db
       SUPABASE_URL: https://test.supabase.co
       SUPABASE_SERVICE_ROLE_KEY: test-service-role-key
@@ -89,7 +93,7 @@ jobs:
       - run: npm ci
       - run: npm run build
       - run: node scripts/setup-qa.cjs
-      - run: npm test -- --runInBand --runTestsByPath src/__tests__/integration/cloudWrites.pg.test.ts src/__tests__/integration/billingPerformance.pg.test.ts
+      - run: npm test -- --runInBand --runTestsByPath src/__tests__/integration/cloudWrites.pg.test.ts src/__tests__/integration/billingPerformance.pg.test.ts src/__tests__/integration/medicineImport.pg.test.ts
       - run: node scripts/test-durable-runtime.cjs
 
   deploy:

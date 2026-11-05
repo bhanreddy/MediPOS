@@ -465,8 +465,8 @@ reportsRouter.get("/profit-loss", requireAuth, async (req, res, next) => {
       eValues.push(to);
     }
 
-    const sales = await queryRaw<{ net_amount: number; is_return: number }>(
-      `SELECT net_amount, is_return FROM sales WHERE ${salesConds.join(" AND ")}`,
+    const sales = await queryRaw<{ net_amount: number; is_return: number; wallet_redeemed_paise: number }>(
+      `SELECT net_amount, is_return, wallet_redeemed_paise FROM sales WHERE ${salesConds.join(" AND ")}`,
       sValues,
     );
 
@@ -489,7 +489,9 @@ reportsRouter.get("/profit-loss", requireAuth, async (req, res, next) => {
       `SELECT SUM(amount) as total FROM expenses WHERE ${expConds.join(" AND ")}`,
       eValues,
     );
-    const total_expenses = Number(exps[0]?.total ?? 0);
+    const operating_expenses = Number(exps[0]?.total ?? 0);
+    const promotional_credit_cost = Money.round2(sales.reduce((total,s)=>total+(s.is_return?-1:1)*Number(s.wallet_redeemed_paise||0)/100,0));
+    const total_expenses = Money.add(operating_expenses,promotional_credit_cost);
 
     const net_profit = gross_profit - total_expenses;
     const gross_margin_pct =
@@ -503,6 +505,8 @@ reportsRouter.get("/profit-loss", requireAuth, async (req, res, next) => {
         cogs,
         gross_profit,
         total_expenses,
+        operating_expenses,
+        promotional_credit_cost,
         net_profit,
         gross_margin_pct,
       },

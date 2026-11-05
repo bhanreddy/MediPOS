@@ -1,3 +1,4 @@
+import { WalletService } from "./wallet/walletService";
 import { AppError } from "../lib/appError";
 import { Money } from "../lib/money";
 import { localMutate, queryOne, queryRaw } from "../lib/postgresDb";
@@ -63,6 +64,14 @@ export async function settleCloudBalance(input: {
         ...(input.kind === "customer" ? { balance_due: balance } : {}),
       },
     });
+    if(input.kind==='customer'&&balance===0&&!Number(invoice.nex_coins_earned_paise||0)){
+      const paid=Money.add(invoice.paid_amount||0,allocated);
+      const earned=await WalletService.earn({clinicId:input.clinicId,customerId:party.id,actorId:input.userId},Money.toPaise(invoice.net_amount),Math.max(0,Money.toPaise(paid)-Number(invoice.wallet_redeemed_paise||0)),invoice.id);
+      if(earned>0){
+        const [award]=await queryRaw("SELECT expires_at FROM promo_wallet_ledger WHERE sale_id=? AND kind='EARN' ORDER BY sequence LIMIT 1",[invoice.id]);
+        await localMutate({table:'sales',operation:'UPDATE',data:{_local_id:invoice._local_id||invoice.id,nex_coins_earned_paise:earned,nex_coins_expires_at:award.expires_at}});
+      }
+    }
     allocations.push({ invoiceId: invoice.id, amount: allocated });
     remaining = Money.subtract(remaining, allocated);
   }

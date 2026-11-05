@@ -6,6 +6,9 @@ const escapeInvoiceHtml = (value: unknown) =>
         char
       ]!,
   );
+import { createHash } from "node:crypto";
+import { getCoinPolicy } from "../services/wallet/coinPolicy";
+import { WalletService } from "../services/wallet/walletService";
 import { resolveCloudStoreContext } from "../services/cloudStoreContext";
 import { transactionalRoute } from "../lib/transactionalRoute";
 import {
@@ -69,8 +72,11 @@ salesRouter.get("/", requireAuth, async (req, res, next) => {
       values.push(resolvedMedicineId);
     }
     if (customer_id) {
-      conditions.push("customer_id=?");
-      values.push(customer_id);
+      conditions.push(`(customer_id=? OR (is_return=true AND EXISTS (
+        SELECT 1 FROM sales original WHERE original.id=sales.return_of
+          AND original.customer_id=? AND original.clinic_id=sales.clinic_id AND original._deleted=0
+      )))`);
+      values.push(customer_id, customer_id);
     }
     if (payment_status) {
       conditions.push("payment_status=?");
@@ -107,6 +113,13 @@ salesRouter.get("/", requireAuth, async (req, res, next) => {
       queryCount("sales", where, values),
       queryRaw(queryStr, [...values, limit, offset]),
     ]);
+
+    // Older returns did not store customer_id. The filter above verifies their original bill.
+    if (customer_id) {
+      for (const sale of data) {
+        if (sale.is_return && !sale.customer_id && sale.return_of) sale.customer_id = customer_id;
+      }
+    }
 
     // Attach customer name (in batch)
     const customerIds = [
@@ -158,6 +171,10 @@ salesRouter.get("/:id", requireAuth, async (req, res, next) => {
     );
     if (!sale) return res.status(404).json({ error: "Sale not found" });
 
+    if ((sale as any).is_return && !(sale as any).customer_id && (sale as any).return_of) {
+      const original = await queryOne("sales", "id=? AND clinic_id=?", [(sale as any).return_of, clinicId]);
+      if (original) (sale as any).customer_id = (original as any).customer_id;
+    }
     const saleId = (sale as any).id;
     const saleItems = await queryAll("sale_items", "sale_id=?", [saleId]);
 
@@ -173,8 +190,8 @@ salesRouter.get("/:id", requireAuth, async (req, res, next) => {
     if (medicineIds.length > 0) {
       const placeholders = medicineIds.map(() => "?").join(",");
       const medicines = await queryRaw(
-        `SELECT id, _local_id, name FROM medicines WHERE (_local_id IN (${placeholders}) OR id IN (${placeholders})) AND _deleted = 0`,
-        [...medicineIds, ...medicineIds],
+        `SELECT id, _local_id, name FROM medicines WHERE (_local_id IN (${placeholders}) OR id IN (${placeholders})) AND clinic_id=?`,
+        [...medicineIds, ...medicineIds, clinicId],
       );
       for (const med of medicines) {
         medicineMap.set(med.id, med);
@@ -186,8 +203,8 @@ salesRouter.get("/:id", requireAuth, async (req, res, next) => {
     if (batchIds.length > 0) {
       const placeholders = batchIds.map(() => "?").join(",");
       const batches = await queryRaw(
-        `SELECT id, _local_id, batch_number, expiry_date FROM medicine_batches WHERE (_local_id IN (${placeholders}) OR id IN (${placeholders})) AND _deleted = 0`,
-        [...batchIds, ...batchIds],
+        `SELECT id, _local_id, batch_number, expiry_date FROM medicine_batches WHERE (_local_id IN (${placeholders}) OR id IN (${placeholders})) AND clinic_id=?`,
+        [...batchIds, ...batchIds, clinicId],
       );
       for (const b of batches) {
         batchMap.set(b.id, b);
@@ -229,6 +246,21 @@ salesRouter.post(
     try {
       const parsed = createSaleSchema.parse(req.body);
       const clinicId = req.user!.clinic_id!;
+
+      const walletAmount = parsed.wallet_amount_paise;
+      const checkoutHash = createHash('sha256').update(JSON.stringify(parsed)).digest('hex');
+      if (walletAmount > 0 && (!parsed.customer_id || !parsed._local_id || !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(parsed._local_id) || parsed.payment_mode === 'credit'))
+        throw new AppError(400, 'Wallet checkout requires a saved customer, a request identifier and full payment');
+      if (walletAmount === 0 && parsed.payment_mode === 'wallet') throw new AppError(400,'No promotional credits were specified');
+      if (parsed._local_id) {
+        await queryRaw('SELECT pg_advisory_xact_lock(hashtextextended(?,0))', [`sale:${clinicId}:${parsed._local_id}`]);
+        const existing = await queryOne('sales', '_local_id=? AND clinic_id=?', [parsed._local_id,clinicId]);
+        if (existing) {
+          if (existing.wallet_checkout_hash !== checkoutHash) throw new AppError(409, 'This checkout identifier was already used for a different bill');
+          const items = await queryAll('sale_items','sale_id=? AND clinic_id=?',[existing.id,clinicId]);
+          return void res.json({data:{...existing,sale_items:items}});
+        }
+      }
 
       const { organizationId, storeId, counterId, terminalId } =
         await resolveCloudStoreContext(clinicId, parsed);
@@ -340,7 +372,7 @@ salesRouter.post(
           gstRate: i.gst_rate,
         })),
         billDiscount: parsed.discount,
-        paidAmount: parsed.paid_amount,
+        paidAmount: Money.add(parsed.paid_amount, walletAmount / 100),
         priceIncludesTax: parsed.price_includes_tax,
         isInterstate: false,
       });
@@ -360,8 +392,16 @@ salesRouter.post(
         }
       }
 
+      if (parsed.customer_id && !customerObj) throw new AppError(404,'Customer not found in this medical store');
+      const coinPolicy = customerId ? await getCoinPolicy(clinicId) : null;
+      if (walletAmount > 0 && coinPolicy && walletAmount > Math.floor(Money.toPaise(grandCalc.grandTotal) * coinPolicy.redemption_limit_percent / 100))
+        throw new AppError(409,`Nex Coins can cover at most ${coinPolicy.redemption_limit_percent}% of this bill`);
+
+      if (walletAmount > 0 && (!customerObj || walletAmount > Money.toPaise(grandCalc.grandTotal) || grandCalc.balanceDue > 0 || Money.toPaise(parsed.paid_amount) + walletAmount > Money.toPaise(grandCalc.grandTotal)))
+        throw new AppError(400, 'Wallet credits and collected payment must exactly cover this bill');
+
       if (
-        customerObj &&
+        grandCalc.balanceDue > 0 && customerObj &&
         Number(customerObj.credit_limit) > 0 &&
         Number(customerObj.outstanding_balance || 0) + grandCalc.balanceDue >
           Number(customerObj.credit_limit)
@@ -393,7 +433,9 @@ salesRouter.post(
           gst_amount: grandCalc.totalGst,
           net_amount: grandCalc.grandTotal,
           grand_total: grandCalc.grandTotal,
-          payment_mode: parsed.payment_mode,
+          payment_mode: walletAmount > 0 && walletAmount === Money.toPaise(grandCalc.grandTotal) ? 'wallet' : parsed.payment_mode,
+          wallet_redeemed_paise: walletAmount,
+          wallet_checkout_hash: checkoutHash,
           payment_status:
             grandCalc.balanceDue > 0
               ? grandCalc.paidAmount > 0
@@ -406,6 +448,8 @@ salesRouter.post(
           _local_id: parsed._local_id,
         },
       });
+
+      if (walletAmount > 0) await WalletService.redeem({clinicId,customerId:customerId!,actorId:req.user!.id},walletAmount,sale.id);
 
       // Insert Sale Items + Deduct Batch Stock + Adjust Inventory Position + Record Stock Ledger
       const itemRows: Record<string, any>[] = [];
@@ -507,12 +551,22 @@ salesRouter.post(
         });
       }
 
+      let earnedCoins=0;
+      let finalSale=sale;
+      if(customerId && coinPolicy && grandCalc.balanceDue===0){
+        earnedCoins=await WalletService.earn({clinicId,customerId,actorId:req.user!.id},Money.toPaise(grandCalc.grandTotal),Math.max(0,Money.toPaise(grandCalc.paidAmount)-walletAmount),sale.id,coinPolicy);
+        if(earnedCoins>0){
+          const [award]=await queryRaw("SELECT expires_at FROM promo_wallet_ledger WHERE sale_id=? AND kind='EARN' ORDER BY sequence LIMIT 1",[sale.id]);
+          finalSale=await localMutate({table:'sales',operation:'UPDATE',data:{_local_id:sale._local_id||sale.id,nex_coins_earned_paise:earnedCoins,nex_coins_expires_at:award.expires_at}});
+        }
+      }
+
       // Refresh Daily Sales Summary in background
       afterPostgresCommit(() => {
         void DailySalesSummaryService.refresh();
       });
 
-      res.status(201).json({ data: { ...sale, sale_items: finalItems } });
+      res.status(201).json({ data: { ...sale,...finalSale, sale_items: finalItems } });
     } catch (err) {
       next(err);
     }
@@ -545,6 +599,17 @@ salesRouter.post(
 
       if (!originalSale || originalSale.is_return)
         throw new AppError(404, "Original sale not found", "SALE_NOT_FOUND");
+      const originalWallet = Number(originalSale.wallet_redeemed_paise || 0);
+      const hasCoinActivity=originalWallet>0||Number(originalSale.nex_coins_earned_paise||0)>0;
+      const returnHash = createHash('sha256').update(JSON.stringify(parsed)).digest('hex');
+      if (hasCoinActivity) {
+        if (!parsed._local_id || !/^[a-f0-9-]{36}$/i.test(parsed._local_id)) throw new AppError(400,'A request identifier is required for a Nex Coins return');
+        const existing = await queryOne('sales','_local_id=? AND clinic_id=?',[parsed._local_id,clinicId]);
+        if (existing) {
+          if (existing.wallet_checkout_hash !== returnHash) throw new AppError(409,'This return identifier was already used for different details');
+          return void res.json({data:existing});
+        }
+      }
       const organizationId = originalSale.organization_id || null;
       const storeId = parsed.store_id || originalSale?.store_id || null;
       const counterId = parsed.counter_id || originalSale?.counter_id || null;
@@ -552,6 +617,9 @@ salesRouter.post(
         parsed.terminal_id || originalSale?.terminal_id || null;
 
       let totalRefundAmount = 0;
+      const [previousWalletReturns] = originalSale.customer_id
+        ? await queryRaw(`SELECT COALESCE(SUM(net_amount),0) AS returned, COALESCE(SUM(wallet_redeemed_paise),0) AS wallet_returned FROM sales WHERE clinic_id=? AND return_of=? AND is_return=true AND deleted_at IS NULL`,[clinicId,originalSale.id])
+        : [{returned:0,wallet_returned:0}];
 
       // Generate Return Document Number
       const returnDocNumber = await cloudDocumentNumber(clinicId, "RET");
@@ -568,7 +636,10 @@ salesRouter.post(
           clinic_id: clinicId,
           invoice_number: returnDocNumber,
           is_return: true,
+          customer_id: originalSale.customer_id || null,
           return_of: returnOfId,
+          payment_mode: originalSale.payment_mode,
+          wallet_checkout_hash: hasCoinActivity ? returnHash : null,
           payment_status: "returned",
           served_by: req.user!.id,
           _local_id: parsed._local_id,
@@ -629,7 +700,11 @@ salesRouter.post(
           priceIncludesTax: Boolean(originalSale.price_includes_tax),
         });
 
-        totalRefundAmount = Money.add(totalRefundAmount, itemCalc.total);
+        // Repeated partial returns can otherwise round above the original invoice by a paise.
+        const returnLineTotal = originalSale.customer_id
+          ? Math.min(itemCalc.total,Math.max(0,Money.subtract(Money.subtract(originalSale.net_amount,previousWalletReturns.returned),totalRefundAmount)))
+          : itemCalc.total;
+        totalRefundAmount = Money.add(totalRefundAmount, returnLineTotal);
 
         await localMutate({
           table: "sale_items",
@@ -644,7 +719,7 @@ salesRouter.post(
             batch_id: origItem.batch_id,
             quantity: retItem.quantity,
             unit_price: itemUnitPrice,
-            total: itemCalc.total,
+            total: returnLineTotal,
             reason: retItem.reason || "Customer return",
             _local_id: retItem._local_id,
           },
@@ -718,6 +793,19 @@ salesRouter.post(
         }
       }
 
+      let walletRefund = 0;
+      if (originalWallet > 0 && originalSale.customer_id) {
+        const previous = previousWalletReturns;
+        const totalPaise = Money.toPaise(originalSale.net_amount);
+        const returnedPaise = Math.min(totalPaise,Money.toPaise(Money.add(previous.returned,totalRefundAmount)));
+        walletRefund = Number(BigInt(originalWallet)*BigInt(returnedPaise)/BigInt(totalPaise))-Number(previous.wallet_returned);
+        if (walletRefund > 0) await WalletService.refund({clinicId,customerId:originalSale.customer_id,actorId:req.user!.id},originalSale.id,returnSale.id,walletRefund);
+      }
+
+      if(originalSale.customer_id){
+        await WalletService.reverseEarnings({clinicId,customerId:originalSale.customer_id,actorId:req.user!.id},originalSale.id,returnSale.id,Money.toPaise(Money.add(previousWalletReturns.returned,totalRefundAmount)));
+      }
+
       // Update return sale with calculated refund totals
       const updatedReturn = await localMutate({
         table: "sales",
@@ -726,6 +814,7 @@ salesRouter.post(
           _local_id: returnSale._local_id || returnSale.id,
           net_amount: totalRefundAmount,
           grand_total: totalRefundAmount,
+          wallet_redeemed_paise: walletRefund,
         },
       });
 
@@ -787,7 +876,7 @@ salesRouter.post(
           balance_due: 0,
         },
       });
-      res.json({ data: { ...updatedReturn, ...refund } });
+      res.json({ data: { ...updatedReturn, ...refund, external_refund_amount: Money.subtract(Money.subtract(totalRefundAmount, creditReduction), walletRefund / 100) } });
     } catch (err) {
       next(err);
     }
@@ -880,6 +969,8 @@ salesRouter.get("/:id/invoice", requireAuth, async (req, res, next) => {
              <tr><th colspan="4" class="right">Discount</th><th class="right">${escapeInvoiceHtml(sale.discount)}</th></tr>
              <tr><th colspan="4" class="right">GST</th><th class="right">${escapeInvoiceHtml(sale.gst_amount)}</th></tr>
              <tr><th colspan="4" class="right"><strong>Grand Total</strong></th><th class="right"><strong>${escapeInvoiceHtml(sale.net_amount)}</strong></th></tr>
+             ${Number(sale.nex_coins_earned_paise||0)>0?`<tr><th colspan="4" class="right">Nex Coins earned</th><td class="right">${escapeInvoiceHtml(Number(sale.nex_coins_earned_paise)/100)}</td></tr>`:''}
+             ${Number(sale.wallet_redeemed_paise||0)>0?`<tr><th colspan="4" class="right">Nex Coins</th><td class="right">${escapeInvoiceHtml(Number(sale.wallet_redeemed_paise)/100)}</td></tr><tr><th colspan="4" class="right">Collected payment</th><td class="right">${escapeInvoiceHtml(Money.subtract(sale.paid_amount,Number(sale.wallet_redeemed_paise)/100))}</td></tr>`:''}
           </table>
           <p style="margin-top:20px; font-size:12px;">${escapeInvoiceHtml(clinic?.invoice_footer || "")}</p>
         </body>

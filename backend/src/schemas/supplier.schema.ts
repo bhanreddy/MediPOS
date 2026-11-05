@@ -8,6 +8,11 @@ const baseSupplierSchema = z.object({
   gstin: z.string().length(15).optional().nullable(),
   drug_licence_number: z.string().optional().nullable(),
   address: z.string().optional().nullable(),
+  lead_time_days: z.number().int().min(1).max(90).optional(),
+  minimum_order_value: z.number().finite().min(0).max(100000000).optional(),
+  preferred_channel: z.enum(['MANUAL', 'WHATSAPP', 'SMS']).optional(),
+  whatsapp_opt_in: z.boolean().optional(),
+  sms_opt_in: z.boolean().optional(),
   clinic_id: z.string().optional(),
 });
 

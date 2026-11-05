@@ -18,6 +18,17 @@ import {
 
 export const suppliersRouter = Router();
 
+suppliersRouter.get('/summary', requireAuth, async (req, res, next) => {
+  try {
+    const [data] = await queryRaw(`SELECT COUNT(*)::int AS total,
+      COUNT(*) FILTER (WHERE COALESCE(is_active, true))::int AS active,
+      COUNT(*) FILTER (WHERE COALESCE(is_active, true) AND NULLIF(TRIM(phone), '') IS NULL)::int AS missing_contact,
+      COALESCE(SUM(outstanding_balance), 0) AS outstanding
+      FROM suppliers WHERE clinic_id=? AND deleted_at IS NULL`, [req.user!.clinic_id!]);
+    res.json({ data });
+  } catch (error) { next(error); }
+});
+
 // GET /api/suppliers
 suppliersRouter.get("/", requireAuth, async (req, res, next) => {
   try {
@@ -28,6 +39,8 @@ suppliersRouter.get("/", requireAuth, async (req, res, next) => {
     const clinicId = req.user!.clinic_id!;
     const conditions: string[] = ["clinic_id=?"];
     const values: any[] = [clinicId];
+    if (req.query.filter === 'active') conditions.push('COALESCE(is_active, true)=true');
+    if (req.query.filter === 'missing_contact') conditions.push("COALESCE(is_active, true)=true AND NULLIF(TRIM(phone), '') IS NULL");
     if (q) {
       conditions.push("(name ILIKE ? OR phone ILIKE ? OR gstin ILIKE ? OR email ILIKE ?)");
       values.push(`%${q}%`, `%${q}%`, `%${q}%`, `%${q}%`);

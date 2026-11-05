@@ -1,6 +1,6 @@
 import { z } from 'zod';
 
-const baseMedicineSchema = z.object({
+export const baseMedicineSchema = z.object({
   name: z.string().trim().min(1).max(300),
   product_type: z.enum([
     'MEDICINE',

@@ -1,7 +1,7 @@
 import express from 'express';
 import request from 'supertest';
 import { salesRouter } from '../routes/sales';
-import { queryRaw, queryCount } from '../lib/postgresDb';
+import { queryRaw, queryCount, queryOne, queryAll } from '../lib/postgresDb';
 
 jest.mock('../lib/postgresDb', () => ({
   queryRaw: jest.fn(), queryCount: jest.fn(), queryOne: jest.fn(),
@@ -69,4 +69,35 @@ test('starts the page query before waiting for the total count', async () => {
   const response = await request(app).get('/sales');
   expect(response.status).toBe(200);
   expect(response.body.pagination.total).toBe(0);
+});
+
+
+test('customer history includes legacy returns through their original bill within the same clinic', async () => {
+  raw.mockResolvedValueOnce([{ id: 'return-1', customer_id: null, is_return: true, return_of: 'original-1' }])
+    .mockResolvedValueOnce([{ id: 'customer-one', name: 'Anita' }]);
+  const response = await request(app).get('/sales').query({ customer_id: 'customer-one', page: 2 });
+  expect(response.status).toBe(200);
+  expect(response.body.data[0].customer_id).toBe('customer-one');
+  expect(count.mock.calls[0][1]).toContain('original.clinic_id=sales.clinic_id');
+  expect(count.mock.calls[0][1]).toContain('original.id=sales.return_of');
+  expect(count.mock.calls[0][2]).toEqual(['clinic-a', 'customer-one', 'customer-one']);
+});
+
+test('return invoice details recover the original customer and keep archived medicine and batch names', async () => {
+  jest.mocked(queryOne).mockResolvedValueOnce({ id: 'return-1', is_return: true, return_of: 'original-1', customer_id: null })
+    .mockResolvedValueOnce({ id: 'original-1', customer_id: 'customer-one' });
+  jest.mocked(queryAll).mockResolvedValueOnce([{ id: 'line', medicine_id: 'archived-med', batch_id: 'archived-batch', quantity: 2 }]);
+  raw.mockResolvedValueOnce([{ id: 'archived-med', name: 'Archived medicine' }])
+    .mockResolvedValueOnce([{ id: 'archived-batch', batch_number: 'B-1', expiry_date: '2026-12-01' }]);
+  const response = await request(app).get('/sales/return-1');
+  expect(response.status).toBe(200);
+  expect(response.body.data.customer_id).toBe('customer-one');
+  expect(response.body.data.sale_items[0].medicines.name).toBe('Archived medicine');
+  expect(response.body.data.sale_items[0].medicine_batches.batch_number).toBe('B-1');
+  expect(jest.mocked(queryOne).mock.calls[1]).toEqual(['sales', 'id=? AND clinic_id=?', ['original-1', 'clinic-a']]);
+  for (const call of raw.mock.calls) {
+    expect(call[0]).toContain('clinic_id=?');
+    expect(call[0]).not.toContain('_deleted = 0');
+    expect(call[1]?.at(-1)).toBe('clinic-a');
+  }
 });

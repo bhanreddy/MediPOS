@@ -2,7 +2,9 @@ const fs = require('node:fs');
 const path = require('node:path');
 const { spawnSync } = require('node:child_process');
 const root = path.resolve(__dirname, '..');
-const output = path.join(root, '.catalyst-build');
+const buildName = process.env.CATALYST_BUILD_NAME || '.catalyst-build';
+if (!/^\.catalyst-build(?:-[a-z0-9-]+)?$/.test(buildName)) throw new Error('Invalid Catalyst build directory name');
+const output = path.join(root, buildName);
 function run(command, args, cwd = root) {
   const result = spawnSync(command, args, { cwd, stdio: 'inherit' });
   if (result.error) throw result.error;
@@ -23,12 +25,12 @@ const dotenv = require('dotenv');
 const source = { ...dotenv.parse(fs.readFileSync(path.join(root, process.env.CATALYST_ENV_FILE || '.env'))), ...process.env };
 const keys = [
   'DATABASE_URL', 'SUPABASE_URL', 'SUPABASE_SERVICE_ROLE_KEY', 'SUPABASE_JWT_SECRET',
-  'JWT_SECRET', 'JWT_REFRESH_SECRET', 'ALLOWED_ORIGINS', 'ANTHROPIC_API_KEY', 'CRON_SECRET', 'LOG_LEVEL', 'SENTRY_DSN',
+  'JWT_SECRET', 'JWT_REFRESH_SECRET', 'WALLET_LEDGER_SECRET', 'ALLOWED_ORIGINS', 'ANTHROPIC_API_KEY', 'CRON_SECRET', 'LOG_LEVEL', 'SENTRY_DSN',
   'WHATSAPP_API_KEY', 'WHATSAPP_PHONE_NUMBER_ID', 'APP_URL', 'PHONEPE_ENV', 'PHONEPE_CLIENT_ID', 'PHONEPE_CLIENT_SECRET',
   'PHONEPE_CLIENT_VERSION', 'PHONEPE_MERCHANT_ID', 'PHONEPE_CLINIC_REDIRECT_URL', 'PHONEPE_WEBHOOK_USERNAME', 'PHONEPE_WEBHOOK_PASSWORD',
   'SCHOOL_OPS_SUPABASE_URL', 'SCHOOL_OPS_SUPABASE_ANON_KEY', 'SCHOOL_OPS_SUPABASE_SERVICE_ROLE_KEY',
 ];
-for (const key of ['DATABASE_URL', 'SUPABASE_URL', 'SUPABASE_SERVICE_ROLE_KEY', 'SUPABASE_JWT_SECRET', 'JWT_SECRET', 'JWT_REFRESH_SECRET', 'ALLOWED_ORIGINS']) {
+for (const key of ['DATABASE_URL', 'SUPABASE_URL', 'SUPABASE_SERVICE_ROLE_KEY', 'SUPABASE_JWT_SECRET', 'JWT_SECRET', 'JWT_REFRESH_SECRET', 'WALLET_LEDGER_SECRET', 'ALLOWED_ORIGINS']) {
   if (!source[key]?.trim()) throw new Error(`Missing required runtime setting: ${key}`);
 }
 const variables = Object.fromEntries(keys.filter(key => source[key]?.trim()).map(key => [key, source[key]]));

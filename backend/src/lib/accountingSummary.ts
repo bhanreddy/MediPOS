@@ -9,6 +9,8 @@ export interface AccountingSummaryResult {
   gross_profit: number;
   gross_margin_pct: number;
   total_expenses: number;
+  operating_expenses: number;
+  promotional_credit_cost: number;
   net_profit: number;
   outstanding_receivable: number;
   outstanding_payable: number;
@@ -41,8 +43,8 @@ export async function buildAccountingSummary(
     expValues.push(to);
   }
 
-  const sales = await queryRaw<{ net_amount: number; is_return: number | boolean }>(
-    `SELECT net_amount, is_return FROM sales WHERE ${salesConditions.join(' AND ')}`,
+  const sales = await queryRaw<{ net_amount: number; is_return: number | boolean; wallet_redeemed_paise?: number }>(
+    `SELECT net_amount, is_return, wallet_redeemed_paise FROM sales WHERE ${salesConditions.join(' AND ')}`,
     salesValues,
   );
 
@@ -62,7 +64,9 @@ export async function buildAccountingSummary(
     `SELECT COALESCE(SUM(amount), 0) as total FROM expenses WHERE ${expConditions.join(' AND ')}`,
     expValues,
   );
-  const total_expenses = Money.round2(Number(expRows[0]?.total ?? 0));
+  const operating_expenses = Money.round2(Number(expRows[0]?.total ?? 0));
+  const promotional_credit_cost = Money.round2(sales.reduce((total,s)=>total+(s.is_return?-1:1)*Number(s.wallet_redeemed_paise||0)/100,0));
+  const total_expenses = Money.add(operating_expenses,promotional_credit_cost);
   const net_profit = Money.subtract(gross_profit, total_expenses);
 
   const customers = await queryAll('customers', 'clinic_id = ?', [clinicId]);
@@ -88,6 +92,8 @@ export async function buildAccountingSummary(
     gross_profit,
     gross_margin_pct,
     total_expenses,
+    operating_expenses,
+    promotional_credit_cost,
     net_profit,
     outstanding_receivable,
     outstanding_payable,

@@ -14,6 +14,8 @@ export const purchaseItemSchema = z.object({
 });
 
 export const createPurchaseSchema = z.object({
+  reorder_order_id: z.string().uuid().optional(),
+  reorder_receipt_id: z.string().uuid().optional(),
   supplier_id: z.string().optional().nullable(),
   store_id: z.string().optional().nullable(),
   counter_id: z.string().optional().nullable(),

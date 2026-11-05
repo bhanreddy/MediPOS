@@ -17,6 +17,8 @@ import { Money } from '../lib/money';
 import jwt from 'jsonwebtoken';
 
 const JWT_SECRET = process.env.JWT_SECRET || 'test_secret_for_jwt_testing_1234567890';
+// Keep FEFO fixtures relative to today so valid test batches do not expire as the suite ages.
+const expiryAfterDays = (days: number) => new Date(Date.now() + days * 86400000).toISOString().slice(0, 10);
 
 describe('Task 2 — Enterprise POS Counter Engine V2 Test Suite', () => {
   let orgId: string;
@@ -143,21 +145,21 @@ describe('Task 2 — Enterprise POS Counter Engine V2 Test Suite', () => {
     batchDisposedId = 'batch-para-disp';
 
     localDb.prepare('INSERT OR REPLACE INTO medicine_batches (id, organization_id, store_id, clinic_id, medicine_id, batch_number, expiry_date, mrp, purchase_price, quantity_in, quantity_remaining, is_disposed, _local_id, _updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)').run(
-      batchEarlyExpId, orgId, storeAId, 'default-clinic', paracetamolMedId, 'B-EARLY-26', '2026-10-31', 30.0, 18.0, 10, 5, 0, batchEarlyExpId, new Date().toISOString()
+      batchEarlyExpId, orgId, storeAId, 'default-clinic', paracetamolMedId, 'B-EARLY-26', expiryAfterDays(30), 30.0, 18.0, 10, 5, 0, batchEarlyExpId, new Date().toISOString()
     );
     localDb.prepare('INSERT OR REPLACE INTO medicine_batches (id, organization_id, store_id, clinic_id, medicine_id, batch_number, expiry_date, mrp, purchase_price, quantity_in, quantity_remaining, is_disposed, _local_id, _updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)').run(
-      batchLateExpId, orgId, storeAId, 'default-clinic', paracetamolMedId, 'B-LATE-27', '2027-04-30', 30.0, 18.0, 50, 20, 0, batchLateExpId, new Date().toISOString()
+      batchLateExpId, orgId, storeAId, 'default-clinic', paracetamolMedId, 'B-LATE-27', expiryAfterDays(180), 30.0, 18.0, 50, 20, 0, batchLateExpId, new Date().toISOString()
     );
     localDb.prepare('INSERT OR REPLACE INTO medicine_batches (id, organization_id, store_id, clinic_id, medicine_id, batch_number, expiry_date, mrp, purchase_price, quantity_in, quantity_remaining, is_disposed, _local_id, _updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)').run(
-      batchExpiredId, orgId, storeAId, 'default-clinic', paracetamolMedId, 'B-EXPIRED-24', '2024-01-01', 30.0, 18.0, 10, 10, 0, batchExpiredId, new Date().toISOString()
+      batchExpiredId, orgId, storeAId, 'default-clinic', paracetamolMedId, 'B-EXPIRED-24', expiryAfterDays(-30), 30.0, 18.0, 10, 10, 0, batchExpiredId, new Date().toISOString()
     );
     localDb.prepare('INSERT OR REPLACE INTO medicine_batches (id, organization_id, store_id, clinic_id, medicine_id, batch_number, expiry_date, mrp, purchase_price, quantity_in, quantity_remaining, is_disposed, _local_id, _updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)').run(
-      batchDisposedId, orgId, storeAId, 'default-clinic', paracetamolMedId, 'B-DISPOSED', '2027-01-01', 30.0, 18.0, 10, 10, 1, batchDisposedId, new Date().toISOString()
+      batchDisposedId, orgId, storeAId, 'default-clinic', paracetamolMedId, 'B-DISPOSED', expiryAfterDays(90), 30.0, 18.0, 10, 10, 1, batchDisposedId, new Date().toISOString()
     );
 
     // Dolo Batch
     localDb.prepare('INSERT OR REPLACE INTO medicine_batches (id, organization_id, store_id, clinic_id, medicine_id, batch_number, expiry_date, mrp, purchase_price, quantity_in, quantity_remaining, is_disposed, _local_id, _updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)').run(
-      'batch-dolo-1', orgId, storeAId, 'default-clinic', doloMedId, 'B-DOLO-01', '2027-06-30', 45.0, 25.0, 50, 50, 0, 'batch-dolo-1', new Date().toISOString()
+      'batch-dolo-1', orgId, storeAId, 'default-clinic', doloMedId, 'B-DOLO-01', expiryAfterDays(240), 45.0, 25.0, 50, 50, 0, 'batch-dolo-1', new Date().toISOString()
     );
 
     // Customer

@@ -84,6 +84,14 @@ describePg("Cloud documents against PostgreSQL", () => {
     await sql`INSERT INTO medicine_batches(id,_local_id,clinic_id,medicine_id,supplier_id,batch_number,expiry_date,mrp,purchase_price,quantity_in,quantity_remaining) VALUES(${batch},${batch},${clinic},${med},${supplier},'WRITE-QA','2031-12-31',20,10,10,10)`;
   });
   afterAll(async () => {
+    localDb.prepare("DELETE FROM users WHERE id = ?").run(user);
+    // Paid customer sales now create immutable rewards history. Retain those
+    // synthetic fixtures in the disposable *_qa database, as the wallet tests do.
+    const wallets = await sql`SELECT id FROM promo_wallet_accounts WHERE clinic_id=${clinic} LIMIT 1`;
+    if (wallets.length) {
+      await sql.end();
+      return;
+    }
     for (const table of [
       "audit_logs",
       "expenses",
@@ -105,7 +113,6 @@ describePg("Cloud documents against PostgreSQL", () => {
     await sql`DELETE FROM users WHERE id = ${user}`;
     await sql`DELETE FROM clinics WHERE id = ${clinic}`;
     await sql`DELETE FROM auth.users WHERE id = ${user}`;
-    localDb.prepare("DELETE FROM users WHERE id = ?").run(user);
     await sql.end();
   });
   test("schedule-H1 report executes with PostgreSQL boolean columns", async () => {

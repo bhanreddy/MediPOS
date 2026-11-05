@@ -245,8 +245,8 @@ analyticsRouter.get('/payment-behaviour', requireAuth, async (req, res, next) =>
     const clinicId = req.user!.clinic_id!;
     const from = startDateFromRange(90);
 
-    const sales = await queryRaw<{ payment_mode: string; balance_due: number; created_at: string; net_amount: number }>(
-      `SELECT payment_mode, balance_due, created_at, net_amount FROM sales
+    const sales = await queryRaw<{ payment_mode: string; balance_due: number; created_at: string; net_amount: number; wallet_redeemed_paise: number }>(
+      `SELECT payment_mode, balance_due, created_at, net_amount, wallet_redeemed_paise FROM sales
        WHERE clinic_id = ? AND deleted_at IS NULL AND COALESCE(is_return, false) = false
        AND created_at >= ?`,
       [clinicId, from]
@@ -255,10 +255,17 @@ analyticsRouter.get('/payment-behaviour', requireAuth, async (req, res, next) =>
     const modes: Record<string, { count: number; amount: number }> = {};
     for (const s of sales) {
       const mode = s.payment_mode || 'unknown';
-      const cur = modes[mode] || { count: 0, amount: 0 };
-      cur.count += 1;
-      cur.amount += Number(s.net_amount);
-      modes[mode] = cur;
+      const promotional = Number(s.wallet_redeemed_paise || 0) / 100;
+      if (mode !== 'wallet') {
+        const cur = modes[mode] || { count: 0, amount: 0 };
+        cur.count += 1;
+        cur.amount += Math.max(0,Number(s.net_amount)-promotional);
+        modes[mode] = cur;
+      }
+      if (promotional > 0) {
+        const cur = modes.wallet || {count:0,amount:0};
+        cur.count += 1;cur.amount += promotional;modes.wallet = cur;
+      }
     }
 
     const now = new Date();

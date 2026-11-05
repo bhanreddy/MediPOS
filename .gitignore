@@ -57,3 +57,6 @@ backend/backups/
 # Logs
 logs
 *.log
+
+# Isolated Catalyst deployment bundles contain private environment configuration.
+backend/.catalyst-build-*/
