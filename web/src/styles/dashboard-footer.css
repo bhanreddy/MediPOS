@@ -1,0 +1,107 @@
+/* The footer uses the same primary / on-primary pair as workspace actions. */
+.nex-dashboard .dashboard-brand-panel {
+  position: relative;
+  isolation: isolate;
+  overflow: hidden;
+  margin-top: 22px;
+  padding: 22px 28px 0;
+  border: 1px solid rgb(var(--primary));
+  border-radius: 22px;
+  background: rgb(var(--primary));
+  color: rgb(var(--on-primary));
+}
+.dashboard-brand-header { position: relative; z-index: 1; display: flex; align-items: center; justify-content: space-between; gap: 16px; }
+.dashboard-brand-lockup { display: flex; align-items: center; gap: 9px; font-size: 23px; font-weight: 600; letter-spacing: -.065em; line-height: 1; }
+.dashboard-brand-period { opacity: .65; }
+.dashboard-brand-mark { display: grid; place-items: center; width: 28px; height: 28px; border: 1px solid rgb(var(--on-primary) / .35); border-radius: 9px; }
+.dashboard-brand-header-end { display: flex; align-items: center; gap: 14px; }
+.dashboard-brand-eyebrow { font-size: 8px; font-weight: 500; letter-spacing: .17em; color: rgb(var(--on-primary) / .9); }
+.dashboard-brand-motion-toggle { display: grid; place-items: center; flex-shrink: 0; width: 32px; height: 32px; color: inherit; background: rgb(var(--on-primary) / .08); border: 1px solid rgb(var(--on-primary) / .25); border-radius: 50%; cursor: pointer; transition: background-color 180ms ease; }
+.dashboard-brand-main { position: relative; display: grid; grid-template-columns: 1.1fr .85fr 1fr; gap: 24px; align-items: center; padding: 28px 0 26px; }
+.dashboard-brand-story { position: relative; z-index: 1; min-width: 0; }
+.nex-dashboard .dashboard-brand-story h2 { margin: 0; color: inherit; font-size: clamp(32px, 3.5vw, 49px); font-weight: 550; line-height: 1.04; letter-spacing: -.065em; }
+.dashboard-brand-story h2 > span { color: rgb(var(--on-primary) / .8); }
+.dashboard-brand-story > p { margin: 12px 0 18px; font-size: 11px; line-height: 1.6; color: rgb(var(--on-primary) / .9); }
+.dashboard-brand-cta { display: inline-flex; align-items: center; gap: 22px; min-height: 39px; padding: 6px 7px 6px 15px; border: 1px solid rgb(var(--on-primary)); border-radius: 30px; background: rgb(var(--on-primary)); color: rgb(var(--primary)); font-size: 11px; font-weight: 600; transition: transform 220ms ease, box-shadow 220ms ease; }
+.dashboard-brand-cta > span { display: grid; place-items: center; width: 26px; height: 26px; border-radius: 50%; background: rgb(var(--primary) / .09); }
+.dashboard-brand-cta svg { transition: transform 220ms ease; }
+.dashboard-brand-art { position: relative; display: grid; place-items: center; height: 210px; min-width: 0; pointer-events: none; }
+.dashboard-brand-art-grid { position: absolute; inset: -15px -20px; background: radial-gradient(circle, rgb(var(--on-primary) / .22) .8px, transparent 1px) center / 16px 16px; mask-image: radial-gradient(ellipse, #000 25%, transparent 68%); }
+.dashboard-brand-ring { position: absolute; width: 208px; height: 208px; border: 1px solid rgb(var(--on-primary) / .23); border-radius: 50%; animation: footer-orbit 28s linear infinite; }
+.dashboard-brand-ring > span { position: absolute; top: 26px; left: 26px; width: 6px; height: 6px; border-radius: 50%; background: rgb(var(--on-primary) / .85); box-shadow: 0 0 0 5px rgb(var(--on-primary) / .08); }
+.dashboard-brand-ring-inner { width: 162px; height: 162px; border-style: dashed; border-color: rgb(var(--on-primary) / .18); animation-duration: 38s; animation-direction: reverse; }
+.dashboard-brand-ring-inner > span { top: 20px; left: 20px; width: 4px; height: 4px; box-shadow: none; }
+.dashboard-brand-cross { position: relative; display: grid; place-items: center; width: 140px; height: 140px; transform: rotate(-12deg); animation: footer-float 6s ease-in-out infinite; }
+.dashboard-brand-cross::before { content: ''; position: absolute; inset: 12px; transform: translate(7px, 8px); background: rgb(var(--on-primary) / .22); clip-path: polygon(36% 0,64% 0,64% 36%,100% 36%,100% 64%,64% 64%,64% 100%,36% 100%,36% 64%,0 64%,0 36%,36% 36%); }
+.dashboard-brand-cross > svg { position: relative; width: 140px; height: 140px; color: rgb(var(--on-primary)); stroke-width: 4.5; }
+.dashboard-brand-art-caption { position: absolute; bottom: -8px; padding: 5px 10px; border: 1px solid rgb(var(--on-primary) / .2); border-radius: 20px; background: rgb(var(--primary)); color: rgb(var(--on-primary) / .9); font-size: 8px; letter-spacing: .035em; white-space: nowrap; }
+.dashboard-brand-links { position: relative; z-index: 1; display: grid; gap: 8px; min-width: 0; }
+.dashboard-brand-links > a { display: flex; align-items: center; gap: 12px; min-height: 62px; padding: 12px; border: 1px solid rgb(var(--on-primary) / .22); border-radius: 13px; color: inherit; background: rgb(var(--on-primary) / .05); transition: transform 240ms cubic-bezier(.2,.7,.3,1), background-color 240ms ease, border-color 240ms ease, color 240ms ease; }
+.dashboard-brand-tool-icon { display: grid; place-items: center; flex-shrink: 0; width: 34px; height: 34px; border-radius: 10px; background: rgb(var(--on-primary) / .1); }
+.dashboard-brand-link-copy { flex: 1; min-width: 0; }
+.dashboard-brand-link-copy strong { display: block; font-size: 12px; font-weight: 550; line-height: 1.5; }
+.dashboard-brand-link-copy > span { display: block; margin-top: 2px; color: rgb(var(--on-primary) / .85); font-size: 9px; line-height: 1.5; }
+.dashboard-brand-tool-arrow { display: grid; place-items: center; flex-shrink: 0; width: 26px; height: 26px; border-radius: 50%; transition: background-color 240ms ease, color 240ms ease; }
+.dashboard-brand-tool-arrow > svg { transition: transform 240ms cubic-bezier(.2,.7,.3,1); }
+.dashboard-brand-bottom { position: relative; display: flex; align-items: center; justify-content: space-between; gap: 12px; min-height: 45px; padding: 13px 0; border-top: 1px solid rgb(var(--on-primary) / .2); color: rgb(var(--on-primary) / .85); font-size: 9px; line-height: 1.6; }
+.dashboard-brand-bottom > span:first-child { display: flex; align-items: center; gap: 6px; }
+.dashboard-brand-animated { animation-play-state: paused; }
+.dashboard-brand-panel[data-visible='true'][data-motion-paused='false'] .dashboard-brand-animated { animation-play-state: running; }
+@media (prefers-reduced-motion: no-preference) {
+  .dashboard-brand-panel[data-visible='true'] .dashboard-brand-story { animation: footer-enter 700ms cubic-bezier(.16,1,.3,1) both; }
+  .dashboard-brand-panel[data-visible='true'] .dashboard-brand-links > a { animation: footer-enter 650ms cubic-bezier(.16,1,.3,1) both; animation-delay: calc(100ms + var(--footer-link-index) * 80ms); }
+  .dashboard-brand-panel[data-motion-paused='true'] :is(.dashboard-brand-story, .dashboard-brand-links > a) { animation-duration: 0s; animation-delay: 0s; }
+}
+@keyframes footer-orbit { to { transform: rotate(360deg); } }
+@keyframes footer-float { 0%,100% { transform: translateY(3px) rotate(-12deg); } 50% { transform: translateY(-8px) rotate(-5deg); } }
+@keyframes footer-enter { from { opacity: 0; translate: 0 16px; } to { opacity: 1; translate: 0 0; } }
+@media (hover: hover) and (pointer: fine) {
+  .dashboard-brand-links > a:hover { transform: translateX(-5px); border-color: #fff; background: #fff; color: #000; }
+  .dashboard-brand-links > a:hover .dashboard-brand-link-copy > span { color: inherit; }
+  .dashboard-brand-links > a:hover :is(.dashboard-brand-tool-icon, .dashboard-brand-tool-arrow) { background: rgb(0 0 0 / .06); color: inherit; }
+  .dashboard-brand-links > a:hover .dashboard-brand-tool-arrow > svg { transform: rotate(45deg); }
+  .dashboard-brand-cta:hover { transform: translateY(-3px); background: #fff; border-color: #fff; color: #000; box-shadow: 0 6px 0 rgb(var(--on-primary) / .15); }
+  .dashboard-brand-cta:hover svg { transform: rotate(45deg); }
+  .dashboard-brand-motion-toggle:hover { background: #fff; border-color: #fff; color: #000; }
+}
+.nex-dashboard .dashboard-brand-panel :is(a, button):focus-visible { outline: 2px solid rgb(var(--on-primary)); outline-offset: 3px; }
+@media (max-width: 1000px) {
+  .dashboard-brand-main { grid-template-columns: 1fr 1fr; gap: 28px; }
+  .dashboard-brand-art { position: absolute; right: 27%; top: 25px; width: 200px; opacity: .25; }
+  .dashboard-brand-art-caption { display: none; }
+}
+@media (max-width: 560px) {
+  .nex-dashboard .dashboard-brand-panel { padding: 18px 18px 0; border-radius: 18px; }
+  .dashboard-brand-lockup { font-size: 21px; }
+  .dashboard-brand-eyebrow { display: none; }
+  .dashboard-brand-main { grid-template-columns: minmax(0,1fr); gap: 26px; padding: 28px 0 20px; }
+  .nex-dashboard .dashboard-brand-story h2 { font-size: 42px; }
+  .dashboard-brand-story > p { max-width: 170px; font-size: 10px; }
+  .dashboard-brand-art { top: 4px; right: -82px; width: 220px; height: 220px; opacity: .23; }
+  .dashboard-brand-links { grid-template-columns: repeat(3, minmax(0,1fr)); gap: 7px; }
+  .dashboard-brand-links > a { position: relative; flex-direction: column; align-items: flex-start; gap: 10px; min-height: 96px; padding: 11px 9px; }
+  .dashboard-brand-tool-icon { width: 29px; height: 29px; border-radius: 8px; }
+  .dashboard-brand-tool-icon > svg { width: 17px; height: 17px; }
+  .dashboard-brand-link-copy { flex: none; }
+  .dashboard-brand-link-copy strong { font-size: 10px; }
+  .dashboard-brand-link-copy > span { display: none; }
+  .dashboard-brand-tool-arrow { position: absolute; top: 11px; right: 5px; width: 18px; height: 18px; }
+  .dashboard-brand-tool-arrow > svg { width: 12px; height: 12px; }
+  .dashboard-brand-bottom { align-items: flex-start; flex-wrap: wrap; gap: 5px 16px; font-size: 8px; }
+}
+@media (pointer: coarse) { .dashboard-brand-motion-toggle { width: 44px; height: 44px; } .dashboard-brand-cta { min-height: 44px; } }
+@media (prefers-reduced-motion: reduce) {
+  .dashboard-brand-panel *, .dashboard-brand-panel *::before, .dashboard-brand-panel *::after { animation: none !important; transition: none !important; }
+  .dashboard-brand-panel :is(a, a svg) { transform: none !important; }
+  .dashboard-brand-motion-toggle { display: none; }
+}
+@media (forced-colors: active) {
+  .nex-dashboard .dashboard-brand-panel { border-color: CanvasText; background: Canvas; color: CanvasText; }
+  .dashboard-brand-art { display: none; }
+  .dashboard-brand-story h2 > span, .dashboard-brand-story > p, .dashboard-brand-eyebrow, .dashboard-brand-link-copy > span, .dashboard-brand-bottom { color: CanvasText; }
+  .dashboard-brand-cta, .dashboard-brand-links > a { color: LinkText; background: Canvas; border-color: LinkText; }
+  .dashboard-brand-panel :is(.dashboard-brand-links > a, .dashboard-brand-cta, .dashboard-brand-motion-toggle):hover { color: HighlightText; background: Highlight; border-color: Highlight; }
+  .dashboard-brand-links > a:hover .dashboard-brand-link-copy > span { color: inherit; }
+  .dashboard-brand-mark, .dashboard-brand-motion-toggle, .dashboard-brand-bottom { border-color: CanvasText; }
+  .dashboard-brand-panel :is(a, button):focus-visible { outline-color: Highlight; }
+}

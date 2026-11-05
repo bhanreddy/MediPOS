@@ -4,6 +4,7 @@
 @import "./styles/nexsyrus.css";
 @import "./styles/workspace-sidebar.css";
 @import "./styles/dashboard-premium.css";
+@import "./styles/dashboard-footer.css";
 
 /* Hover variants that only fire for a real mouse (pointer: fine).
    Touch devices apply a sticky :hover on tap, which made the dashboard

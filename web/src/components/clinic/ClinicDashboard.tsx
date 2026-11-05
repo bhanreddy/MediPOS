@@ -17,7 +17,7 @@ import {
   Wallet,
   ChartNoAxesCombined,
   Activity,
-  Plus,
+  Zap,
 } from 'lucide-react';
 import {
   Area,
@@ -26,9 +26,11 @@ import {
   ResponsiveContainer,
   Tooltip,
   XAxis,
+  YAxis,
 } from 'recharts';
 import { useClinicDashboardData } from '../../hooks/useClinicDashboardData';
 import { useAuth } from '../../lib/auth';
+import { DashboardFooter } from './DashboardFooter';
 
 function DashboardCard({ children, className = '', ...props }: HTMLAttributes<HTMLDivElement>) {
   return <div {...props} className={`dashboard-card ${className}`}><div className="liquid-content">{children}</div></div>;
@@ -95,6 +97,7 @@ const currencyFormatter = new Intl.NumberFormat('en-IN', {
   maximumFractionDigits: 0,
 });
 const currency = (value: unknown) => currencyFormatter.format(Number(value) || 0);
+const compactNumberFormatter = new Intl.NumberFormat('en-IN', { notation: 'compact', maximumFractionDigits: 1 });
 
 export function ClinicDashboardView({
   data,
@@ -115,7 +118,6 @@ export function ClinicDashboardView({
   const [chartStyle, setChartStyle] = useState<'area' | 'line'>('area');
   const unavailable = error && !data;
   const bills = Number(data?.today_bills || 0);
-  const recentCustomers = [...new Set((data?.recent_sales ?? []).map(sale => sale.customers?.name?.trim()).filter((customer): customer is string => Boolean(customer)))].slice(0, 3);
   const chart =
     data?.daily_chart?.map((point) => ({
       day: point.date
@@ -132,6 +134,9 @@ export function ClinicDashboardView({
       bills: 0,
     })) ||
     [];
+  const chartTotal = chart.reduce((total, point) => total + point.revenue, 0);
+  const bestDay = chart.reduce<(typeof chart)[number] | undefined>((best, point) => !best || point.revenue > best.revenue ? point : best, undefined);
+  const hasChartActivity = chart.some(point => point.revenue !== 0 || point.bills > 0);
   const attention = [
     {
       label: 'Low stock',
@@ -183,16 +188,14 @@ export function ClinicDashboardView({
           <h1>
             {greeting}, <span>{name}.</span>
           </h1>
-          {refreshing && !loading && (
-            <p className="dashboard-heading-status" aria-live="polite">
-              Updating your latest figures…
-            </p>
-          )}
+          <p className="dashboard-heading-description" aria-live="polite">
+            {refreshing && !loading ? 'Updating your latest figures…' : 'Your sales, stock, and everyday priorities in one place.'}
+          </p>
         </div>
         <div className="dashboard-heading-actions">
           <span className="dashboard-date">
             <CalendarDays size={15} />
-            {format(new Date(), 'EEE, dd MMM')}
+            {format(new Date(), 'EEE, dd MMM yyyy')}
           </span>
           <button
             className="liquid-icon-button"
@@ -212,10 +215,10 @@ export function ClinicDashboardView({
         <div className="dashboard-attention-banner" role="status">
           <span className="status-dot" aria-hidden />
           <span>
-            <strong>{alertTotal.toLocaleString('en-IN')}</strong> inventory
-            {alertTotal === 1 ? ' item needs' : ' items need'} your attention.
+            <strong>{alertTotal.toLocaleString('en-IN')}</strong> stock
+            {alertTotal === 1 ? ' alert needs' : ' alerts need'} your attention.
           </span>
-          <Link to="/inventory?focus=low_stock">Review stock</Link>
+          <Link to={attention.find(item => Number(item.count) > 0)?.path ?? '/inventory'}>Review alerts <ArrowRight size={13} aria-hidden /></Link>
         </div>
       )}
       {error && (
@@ -232,42 +235,46 @@ export function ClinicDashboardView({
       <div className="dashboard-hero-row" data-reveal="">
         <DashboardCard className="dashboard-revenue">
           <div className="dashboard-card-heading">
-            <span>
-              <span className="status-dot" /> TODAY AT A GLANCE
-            </span>
-            <span className="dashboard-hero-date"><CalendarDays size={13} aria-hidden />{format(new Date(), 'dd MMM yyyy')}</span>
+            <span><Wallet size={15} aria-hidden /> TODAY’S PERFORMANCE</span>
+            <span className="dashboard-hero-date">Today</span>
           </div>
           <div className="dashboard-hero-body">
-          <div className="dashboard-hero-amount">
-          <div className="revenue-label">Today’s revenue</div>
-          <div className="revenue-value">{value(data?.today_revenue)}</div>
-          </div>
-          <div className="revenue-footer">
-            <div>
-              <span>Invoices created</span>
-              <strong>
-                {loading || unavailable ? '—' : bills.toLocaleString('en-IN')}{' '}
-                <span>bills</span>
-              </strong>
-            </div>
-            <div>
-              <span>Average bill</span>
-              <strong>
-                {value(bills ? Number(data?.today_revenue || 0) / bills : 0)}
-              </strong>
+            <div className="dashboard-hero-amount">
+              <div className="revenue-label">Total revenue</div>
+              <div className="revenue-value">{value(data?.today_revenue)}</div>
             </div>
             <Link to="/billing/new" className="liquid-primary-button">
-              <CirclePlus size={18} /> New sale <ArrowUpRight size={16} />
+              <CirclePlus size={16} aria-hidden /> New sale <ArrowUpRight size={15} aria-hidden />
             </Link>
           </div>
+          <div className="revenue-footer">
+            <div><span>Invoices created</span><strong>{loading || unavailable ? '—' : bills.toLocaleString('en-IN')} <span>bills today</span></strong></div>
+            <div><span>Average bill value</span><strong>{value(bills ? Number(data?.today_revenue || 0) / bills : 0)}</strong></div>
           </div>
         </DashboardCard>
+        <div className="dashboard-financials">
+          {[
+            { label: 'To collect', amount: data?.outstanding_receivable, hint: 'From your customers', icon: ArrowDownLeft, tone: 'blue', path: '/customers' },
+            { label: 'To pay', amount: data?.outstanding_payable, hint: 'To your suppliers', icon: ArrowUpRight, tone: 'amber', path: '/suppliers' },
+          ].map(metric => (
+            <Link key={metric.label} to={metric.path} className="dashboard-metric-link" aria-label={`${metric.label}: ${loading ? 'loading' : unavailable ? 'unavailable' : currency(metric.amount)}. ${metric.hint}`}>
+              <DashboardCard className={`dashboard-metric metric-${metric.tone}`}>
+                <div className="dashboard-metric-top"><span className={`dashboard-symbol tone-${metric.tone}`}><metric.icon size={20} strokeWidth={1.7} aria-hidden /></span><ArrowUpRight size={15} className="metric-link" aria-hidden /></div>
+                <span className="dashboard-metric-label">{metric.label}</span>
+                <strong>{value(metric.amount)}</strong>
+                <small>{metric.hint}</small>
+                <span className="dashboard-metric-bottom">View {metric.path === '/customers' ? 'customers' : 'suppliers'} <ArrowRight size={12} aria-hidden /></span>
+              </DashboardCard>
+            </Link>
+          ))}
+        </div>
       </div>
       <div className="dashboard-content-grid">
         <DashboardCard className="dashboard-trend" data-reveal="">
           <div className="dashboard-section-heading">
             <div>
-              <h2>Weekly report</h2>
+              <h2>Revenue overview</h2>
+              <p>Your sales over the last 7 days.</p>
             </div>
             <div
               className="liquid-segment"
@@ -290,9 +297,9 @@ export function ClinicDashboardView({
               </button>
             </div>
           </div>
-          <div className="trend-number">
+          <div className="dashboard-trend-summary"><div className="trend-number">
             {value(data?.week_revenue)} <span>this week</span>
-          </div>
+          </div><span className="dashboard-chart-legend"><span /> Revenue</span></div>
           <div
             className="dashboard-chart"
             role="img"
@@ -310,7 +317,7 @@ export function ClinicDashboardView({
               <ResponsiveContainer width="100%" height="100%">
                 <AreaChart
                   data={chart}
-                  margin={{ top: 12, right: 5, bottom: 0, left: 5 }}
+                  margin={{ top: 12, right: 10, bottom: 0, left: 0 }}
                 >
                   <defs>
                     <linearGradient
@@ -344,6 +351,14 @@ export function ClinicDashboardView({
                     tick={{ fill: 'var(--liquid-muted)', fontSize: 10 }}
                     dy={5}
                     minTickGap={15}
+                  />
+                  <YAxis
+                    tickLine={false}
+                    axisLine={false}
+                    tick={{ fill: 'var(--liquid-muted)', fontSize: 9 }}
+                    width={48}
+                    tickCount={4}
+                    tickFormatter={(amount: number) => `₹${compactNumberFormatter.format(amount)}`}
                   />
                   <Tooltip
                     content={({ active, payload }) => {
@@ -408,97 +423,33 @@ export function ClinicDashboardView({
               </div>
             )}
           </div>
+          <div className="dashboard-chart-summary">
+            <div><span>Daily average</span><strong>{loading || unavailable || !chart.length ? '—' : currency(chartTotal / chart.length)}</strong></div>
+            <div><span>Best day</span><strong>{loading || unavailable || !bestDay || !hasChartActivity ? '—' : <>{bestDay.day} <span>· {currency(bestDay.revenue)}</span></>}</strong></div>
+            <Link to="/reports">Full report <ArrowUpRight size={14} aria-hidden /></Link>
+          </div>
         </DashboardCard>
-        <div className="dashboard-utilities" data-reveal="">
-      <div className="dashboard-financials">
-        {[
-          {
-            label: 'To collect',
-            amount: data?.outstanding_receivable,
-            hint: 'Outstanding from customers',
-            icon: ArrowDownLeft,
-            tone: 'blue',
-            path: '/customers',
-          },
-          {
-            label: 'To pay',
-            amount: data?.outstanding_payable,
-            hint: 'Outstanding to suppliers',
-            icon: ArrowUpRight,
-            tone: 'amber',
-            path: '/suppliers',
-          },
-        ].map((metric) => (
-          <Link
-            key={metric.label}
-            to={metric.path}
-            className="dashboard-metric-link"
-            aria-label={`${metric.label}: ${loading || unavailable ? 'loading' : currency(metric.amount)}. ${metric.hint}`}
-          >
-            <DashboardCard
-              className={`dashboard-metric metric-${metric.tone}`}
-            >
-              <div className={`dashboard-symbol tone-${metric.tone}`}>
-                <metric.icon size={21} strokeWidth={1.6} />
-              </div>
-              <div>
-                <span>{metric.label}</span>
-                <strong>{value(metric.amount)}</strong>
-              </div>
-              <span className="metric-link" aria-hidden>
-                <ArrowUpRight size={18} />
-              </span>
-            </DashboardCard>
-          </Link>
-        ))}
-      </div>
-      <div className="dashboard-section-heading dashboard-actions-title">
-        <h2>Quick actions</h2>
-      </div>
-      <DashboardCard className="dashboard-quick-actions">
-        {[
-          {
-            label: 'Create invoice',
-            icon: ReceiptText,
-            to: '/billing/new',
-            tone: 'violet',
-          },
-          {
-            label: 'Manage stock',
-            icon: Package,
-            to: '/inventory',
-            tone: 'blue',
-          },
-          {
-            label: 'Customers',
-            icon: Users,
-            to: '/customers',
-            tone: 'violet',
-          },
-          {
-            label: 'View reports',
-            icon: Wallet,
-            to: '/reports',
-            tone: 'amber',
-          },
-        ].map((action) => (
-          <Link to={action.to} key={action.label}>
-            <div className={`dashboard-symbol tone-${action.tone}`}>
-              <action.icon size={20} strokeWidth={1.6} />
-            </div>
-            <div>
-              <strong>{action.label}</strong>
-            </div>
-            <ArrowUpRight size={15} className="quick-action-arrow" />
-          </Link>
-        ))}
-      </DashboardCard>
-        </div>
+        <DashboardCard className="dashboard-actions-card" data-reveal="">
+          <div className="dashboard-section-heading"><div><h2>Quick actions</h2><p>Your everyday essentials, one tap away.</p></div><span className="dashboard-section-icon"><Zap size={18} strokeWidth={1.7} aria-hidden /></span></div>
+          <div className="dashboard-action-grid">
+            {[
+              { label: 'Create invoice', hint: 'Start a new sale', icon: ReceiptText, to: '/billing/new' },
+              { label: 'Manage stock', hint: 'Medicines & batches', icon: Package, to: '/inventory' },
+              { label: 'Customers', hint: 'People & accounts', icon: Users, to: '/customers' },
+              { label: 'View reports', hint: 'Your business insights', icon: ChartNoAxesCombined, to: '/reports' },
+            ].map(action => (
+              <Link to={action.to} key={action.label}>
+                <span className="dashboard-action-top"><span className="dashboard-symbol tone-blue"><action.icon size={20} strokeWidth={1.7} aria-hidden /></span><ArrowUpRight size={15} className="quick-action-arrow" aria-hidden /></span>
+                <strong>{action.label}</strong><small>{action.hint}</small>
+              </Link>
+            ))}
+          </div>
+        </DashboardCard>
         <DashboardCard className="dashboard-activity" data-reveal="">
           <div className="dashboard-section-heading">
             <div>
-              {recentCustomers.length > 0 && <div className="dashboard-customer-stack" aria-label="Recent customers">{recentCustomers.map(customer => <span key={customer} title={customer} aria-label={customer}>{customer.split(/\s+/).slice(0, 2).map(word => word[0]).join('').toUpperCase()}</span>)}</div>}
               <h2>Recent sales</h2>
+              <p>Your latest invoices, all in one place.</p>
             </div>
             <Link className="dashboard-text-link" to="/billing">
               All invoices <ArrowRight size={15} />
@@ -562,15 +513,11 @@ export function ClinicDashboardView({
         <DashboardCard className="dashboard-attention" data-reveal="">
           <div className="dashboard-section-heading">
             <div>
-              <h2>Stock alerts</h2>
+              <h2>Inventory watch</h2>
+              <p>Stay ahead of stock and expiry dates.</p>
             </div>
-            <ShieldCheck size={21} className="attention-shield" />
+            <span className="dashboard-section-icon"><ShieldCheck size={19} aria-hidden /></span>
           </div>
-          <div className="dashboard-stock-layout">
-          <Link to="/inventory" className="dashboard-stock-visual" aria-label="Open inventory overview">
-            <div className="dashboard-stock-image"><img src="/images/login-medical-products-realistic.png" alt="" loading="lazy" /></div>
-            <span>Inventory overview <ArrowUpRight size={16} aria-hidden /></span>
-          </Link>
           <div className="attention-items">
             {attention.map((item) => {
               const count = Number(item.count) || 0;
@@ -586,6 +533,7 @@ export function ClinicDashboardView({
                   </div>
                   <div>
                     <strong>{item.label}</strong>
+                    <small>{item.hint}</small>
                   </div>
                   <span
                     className={[
@@ -606,7 +554,6 @@ export function ClinicDashboardView({
               );
             })}
           </div>
-          </div>
           <div className="attention-note">
             <span
               className={`status-dot${alertTotal === 0 && !loading && !unavailable ? ' status-dot--success' : ''}`}
@@ -619,15 +566,10 @@ export function ClinicDashboardView({
                   : 'Review stock and expiry dates.'}
             </span>
           </div>
+          <Link to="/inventory" className="dashboard-inventory-link">Open inventory <ArrowUpRight size={15} aria-hidden /></Link>
         </DashboardCard>
       </div>
-      <footer className="dashboard-brand-panel" data-reveal="">
-        <div className="dashboard-brand-top">
-          <span className="dashboard-brand-label"><Plus size={20} strokeWidth={2.5} aria-hidden /> Pharmacy workspace</span>
-          <nav aria-label="More pharmacy tools"><Link to="/purchases">Purchases <ArrowUpRight size={13} aria-hidden /></Link><Link to="/shortbook">Reorder <ArrowUpRight size={13} aria-hidden /></Link><Link to="/reports">Reports <ArrowUpRight size={13} aria-hidden /></Link></nav>
-        </div>
-        <div className="dashboard-brand-wordmark">nexsyrus</div>
-      </footer>
+      <DashboardFooter />
     </div>
   );
 }
