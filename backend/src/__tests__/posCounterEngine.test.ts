@@ -371,8 +371,9 @@ describe('Task 2 — Enterprise POS Counter Engine V2 Test Suite', () => {
 
       expect(price.mrp).toBe(30.0);
       expect(price.discountPct).toBe(10);
-      expect(price.lineTotal).toBe(60.48); // 2 * 30 * 0.90 = 54.00 + 12% GST (6.48) = 60.48
-      expect(price.taxableAmountPaise).toBe(5400);
+      expect(price.lineTotal).toBe(54); // 2 * 30 * 0.90, including GST
+      expect(price.taxableAmountPaise).toBe(4821);
+      expect(price.taxAmountPaise).toBe(579);
       expect(price.requiresSupervisorApproval).toBe(false);
     });
 
@@ -508,14 +509,15 @@ describe('Task 2 — Enterprise POS Counter Engine V2 Test Suite', () => {
         .set('x-store-id', storeAId)
         .send({
           items: [{ medicine_id: paracetamolMedId, quantity: 2, discount_pct: 0 }],
-          payments: [{ tender_type: 'CASH', amount: 100.0 }], // Total 67.00 -> Tendered 100 -> Change 33.00
+          payments: [{ tender_type: 'CASH', amount: 100.0 }], // Inclusive total ₹60, tendered ₹100, change ₹40
         });
 
       expect(res.status).toBe(201);
       const data = res.body.data;
-      expect(data.sale.grand_total).toBe(67.0);
+      expect(data.sale.grand_total).toBe(60.0);
+      expect(data.sale.price_includes_tax).toBe(1);
       expect(data.sale.payment_status).toBe('paid');
-      expect(data.change_returned).toBe(33.0);
+      expect(data.change_returned).toBe(40.0);
       completedSaleId = data.sale.id || data.sale._local_id;
       completedInvoiceNumber = data.sale.invoice_number;
     });

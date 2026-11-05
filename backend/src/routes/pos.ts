@@ -11,7 +11,6 @@ import { DocumentNumberingService } from '../services/documentNumbering';
 import { InventoryPositionService } from '../services/inventoryPosition';
 import { CommercialEngine } from '../services/commercial/commercialEngine';
 import { CouponEngine } from '../services/commercial/couponEngine';
-import { LoyaltyEngine } from '../services/commercial/loyaltyEngine';
 import { PromotionEngine } from '../services/commercial/promotionEngine';
 import { Money } from '../lib/money';
 import { PrescriptionService } from '../services/prescription/prescriptionService';
@@ -20,8 +19,10 @@ import { localDb } from '../local-db';
 import { localMutate } from '../lib/localMutate';
 import { v4 as uuidv4 } from 'uuid';
 import { AppError } from '../lib/appError';
+import { rejectLegacyLoyalty } from '../services/commercial/retiredLoyalty';
 
 export const posRouter = Router();
+posRouter.use(requireAuth, rejectLegacyLoyalty);
 
 // ── 1. GET /api/pos/session ──────────────────────────────────────────────────
 posRouter.get('/session', requireAuth, async (req, res, next) => {
@@ -296,6 +297,7 @@ posRouter.post('/checkout', requireAuth, requireRole('CASHIER', 'PHARMACIST', 'O
           prescription_required: quote.hasPrescriptionMedication ? 1 : 0,
           idempotency_key: idempotencyKey || null,
           subtotal: quote.subtotal,
+          price_includes_tax: 1,
           discount: quote.totalDiscount,
           gst_amount: quote.totalGst,
           net_amount: quote.grandTotal,
@@ -534,20 +536,6 @@ posRouter.post('/checkout', requireAuth, requireRole('CASHIER', 'PHARMACIST', 'O
         });
       }
 
-      // Record Loyalty Points Redemption
-      if (quote.loyaltyCreditsRedeemed > 0 && customer_id) {
-        LoyaltyEngine.recordTransaction({
-          organizationId: session.organizationId,
-          customerId: customer_id,
-          transactionType: 'REDEEM',
-          credits: -quote.loyaltyCreditsRedeemed,
-          monetaryValuePaise: quote.loyaltyRedeemedPaise,
-          saleId,
-          notes: `Redemption of ${quote.loyaltyCreditsRedeemed} credits on sale invoice #${invoiceNumber}`,
-          idempotencyKey: `redeem_${saleId}`,
-        });
-      }
-
       // Update Customer Receivables if credit balance remains
       if (customer_id && balanceDuePaise > 0) {
         localDb
@@ -579,24 +567,6 @@ posRouter.post('/checkout', requireAuth, requireRole('CASHIER', 'PHARMACIST', 'O
     });
 
     const result = executeCheckoutTx();
-
-    // 4. Post-sale loyalty credit earning (idempotent)
-    if (customer_id && quote.loyaltyCreditsEarnable > 0) {
-      try {
-        LoyaltyEngine.recordTransaction({
-          organizationId: session.organizationId,
-          customerId: customer_id,
-          transactionType: 'EARN',
-          credits: quote.loyaltyCreditsEarnable,
-          monetaryValuePaise: quote.grandTotalPaise,
-          saleId: result.sale.id || result.sale._local_id,
-          notes: `Earned ${quote.loyaltyCreditsEarnable} credits on sale #${result.sale.invoice_number}`,
-          idempotencyKey: `earn_${result.sale.id || result.sale._local_id}`,
-        });
-      } catch (earnErr) {
-        console.warn('Loyalty earning record warning:', earnErr);
-      }
-    }
 
     res.status(201).json({ data: result });
   } catch (err) {

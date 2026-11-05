@@ -124,6 +124,9 @@ describePg("Cloud documents against PostgreSQL", () => {
     const res = await post("/sales", { paid_amount: 40, items: [line(2)] });
     expect(res.status).toBe(201);
     sale = res.body.data;
+    expect(sale.price_includes_tax).toBe(true);
+    expect(Number(sale.net_amount)).toBe(40);
+    expect(Number(sale.balance_due)).toBe(0);
     expect((await sql`SELECT id FROM sales WHERE id = ${sale.id}`).length).toBe(
       1,
     );

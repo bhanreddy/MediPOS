@@ -10,9 +10,9 @@ import { PriceBookService } from './priceBookService';
 import { MarginGuard } from './marginGuard';
 import { CustomerGroupService } from './customerGroupService';
 import { CouponEngine } from './couponEngine';
-import { LoyaltyEngine } from './loyaltyEngine';
 import { PromotionEngine } from './promotionEngine';
 import { AppError } from '../../lib/appError';
+import { assertNoLegacyLoyalty } from './retiredLoyalty';
 
 export class CommercialEngine {
   /**
@@ -33,6 +33,8 @@ export class CommercialEngine {
       isInterstate = false,
       isOffline = false,
     } = context;
+
+    assertNoLegacyLoyalty(redeemLoyaltyCredits);
 
     if (!items || items.length === 0) {
       return this.emptyQuoteResult();
@@ -208,15 +210,17 @@ export class CommercialEngine {
         ? Math.round(netLineTotalPaise / line.quantity)
         : 0;
 
-      // GST Calculation for Line
-      const gstCalc = Money.calculateGstSplit(
-        Money.toRupees(netLineTotalPaise),
-        line.gstRate,
-        isInterstate
-      );
+      // GST is extracted from the discounted selling price, never added to it.
+      const gstCalc = Money.calculateLineItem({
+        quantity: 1,
+        unitPrice: Money.toRupees(netLineTotalPaise),
+        gstRate: line.gstRate,
+        isInterstate,
+        priceIncludesTax: true,
+      });
 
       const lineTaxAmountPaise = Money.toPaise(gstCalc.gstAmount);
-      const lineTotalPaise = netLineTotalPaise + lineTaxAmountPaise;
+      const lineTotalPaise = netLineTotalPaise;
 
       // Margin Guard Check
       const marginResult = MarginGuard.evaluate({
@@ -280,8 +284,8 @@ export class CommercialEngine {
         freeQuantity: freeQty,
         effectiveUnitPricePaise,
         effectiveUnitPrice: Money.toRupees(effectiveUnitPricePaise),
-        taxableAmountPaise: netLineTotalPaise,
-        taxableAmount: Money.toRupees(netLineTotalPaise),
+        taxableAmountPaise: Money.toPaise(gstCalc.taxableAmount),
+        taxableAmount: gstCalc.taxableAmount,
         gstRate: line.gstRate,
         taxAmountPaise: lineTaxAmountPaise,
         taxAmount: gstCalc.gstAmount,
@@ -303,13 +307,13 @@ export class CommercialEngine {
     let couponValidation = null;
 
     if (couponCode && couponCode.trim()) {
-      const intermediateTaxableSubtotal = quoteLines.reduce((sum, l) => sum + l.taxableAmountPaise, 0);
+      const intermediateSubtotal = quoteLines.reduce((sum, l) => sum + l.lineTotalPaise, 0);
       couponValidation = CouponEngine.validateCoupon({
         organizationId,
         storeId,
         customerId,
         code: couponCode,
-        cartSubtotalPaise: intermediateTaxableSubtotal,
+        cartSubtotalPaise: intermediateSubtotal,
         eligibleMedicineIds: quoteLines.map(l => l.medicineId),
         isOffline,
         asOfDate,
@@ -322,8 +326,13 @@ export class CommercialEngine {
 
     // 6. Subtotals and Discounts Aggregation
     const subtotalPaise = basePriceTotalPaise;
-    const totalDiscountPaise = totalPromoDiscountPaise + totalMembershipDiscountPaise + totalManualDiscountPaise + couponDiscountPaise + billDiscountPaise;
-    const taxableAmountPaise = Math.max(0, subtotalPaise - totalDiscountPaise);
+    const discountedSubtotalPaise = quoteLines.reduce((sum, line) => sum + line.lineTotalPaise, 0);
+    couponDiscountPaise = Math.min(discountedSubtotalPaise, Math.max(0, couponDiscountPaise));
+    const appliedBillDiscountPaise = Math.min(discountedSubtotalPaise - couponDiscountPaise, Math.max(0, billDiscountPaise));
+    const invoiceDiscountPaise = couponDiscountPaise + appliedBillDiscountPaise;
+    const preGrandTotalPaise = discountedSubtotalPaise - invoiceDiscountPaise;
+    const totalDiscountPaise = subtotalPaise - preGrandTotalPaise;
+    let taxableAmountPaise = 0;
 
     // Re-calculate GST across invoice
     let totalGstPaise = 0;
@@ -331,64 +340,49 @@ export class CommercialEngine {
     let totalSgstPaise = 0;
     let totalIgstPaise = 0;
 
+    let cumulativeGrossPaise = 0;
+    let allocatedDiscountPaise = 0;
     for (const line of quoteLines) {
-      // Pro-rate coupon & bill discounts to taxable base of line for exact GST calculation
-      const lineGst = Money.calculateGstSplit(
-        Money.toRupees(line.taxableAmountPaise),
-        line.gstRate,
-        isInterstate
-      );
+      // Allocate every discount paise before extracting GST, including mixed-rate bills.
+      cumulativeGrossPaise += line.lineTotalPaise;
+      const cumulativeDiscountPaise = discountedSubtotalPaise > 0
+        ? Math.round(invoiceDiscountPaise * cumulativeGrossPaise / discountedSubtotalPaise)
+        : 0;
+      const lineDiscountPaise = cumulativeDiscountPaise - allocatedDiscountPaise;
+      allocatedDiscountPaise = cumulativeDiscountPaise;
+      line.totalDiscountPaise += lineDiscountPaise;
+      line.lineTotalPaise -= lineDiscountPaise;
+      line.lineTotal = Money.toRupees(line.lineTotalPaise);
+      line.effectiveUnitPricePaise = Math.round(line.lineTotalPaise / line.requestedQuantity);
+      line.effectiveUnitPrice = Money.toRupees(line.effectiveUnitPricePaise);
+      line.savingsPaise += lineDiscountPaise;
+      const lineGst = Money.calculateLineItem({
+        quantity: 1,
+        unitPrice: line.lineTotal,
+        gstRate: line.gstRate,
+        isInterstate,
+        priceIncludesTax: true,
+      });
+      line.taxableAmountPaise = Money.toPaise(lineGst.taxableAmount);
+      line.taxableAmount = lineGst.taxableAmount;
+      line.taxAmountPaise = Money.toPaise(lineGst.gstAmount);
+      line.taxAmount = lineGst.gstAmount;
+      line.cgstPaise = Money.toPaise(lineGst.cgst);
+      line.sgstPaise = Money.toPaise(lineGst.sgst);
+      line.igstPaise = Money.toPaise(lineGst.igst);
+      taxableAmountPaise += line.taxableAmountPaise;
       totalGstPaise += Money.toPaise(lineGst.gstAmount);
       totalCgstPaise += Money.toPaise(lineGst.cgst);
       totalSgstPaise += Money.toPaise(lineGst.sgst);
       totalIgstPaise += Money.toPaise(lineGst.igst);
     }
 
-    const preGrandTotalPaise = taxableAmountPaise + totalGstPaise;
-
-    // 7. Loyalty Redemption Calculation
-    let loyaltyRedeemedPaise = 0;
-    let loyaltyCreditsRedeemed = 0;
-    let availableLoyaltyCredits = 0;
-    let availableLoyaltyValuePaise = 0;
-
-    if (customerId) {
-      const loyaltyAccount = LoyaltyEngine.getOrCreateAccount(organizationId, customerId);
-      const loyaltyProgram = LoyaltyEngine.getOrCreateProgram(organizationId);
-      availableLoyaltyCredits = Number(loyaltyAccount.available_balance || 0);
-      availableLoyaltyValuePaise = availableLoyaltyCredits * Number(loyaltyProgram.redemption_rate_paise_per_credit);
-
-      if (redeemLoyaltyCredits > 0) {
-        const redeemCalc = LoyaltyEngine.calculateRedemption({
-          organizationId,
-          customerId,
-          requestedCredits: redeemLoyaltyCredits,
-          billTotalPaise: preGrandTotalPaise,
-        });
-
-        if (redeemCalc.allowed) {
-          loyaltyCreditsRedeemed = redeemCalc.creditsToRedeem;
-          loyaltyRedeemedPaise = redeemCalc.monetaryValuePaise;
-        }
-      }
-    }
-
-    const finalPayablePaise = Math.max(0, preGrandTotalPaise - loyaltyRedeemedPaise);
+    const finalPayablePaise = Math.max(0, preGrandTotalPaise);
 
     // Standard commercial half-up 50-paise round-off
     const roundedPayableRs = Math.round(Money.toRupees(finalPayablePaise));
     const grandTotalPaise = Money.toPaise(roundedPayableRs);
     const roundOffPaise = grandTotalPaise - finalPayablePaise;
-
-    // Loyalty Earning calculation on eligible paid value
-    const earnCalc = customerId
-      ? LoyaltyEngine.calculateEarning({
-          organizationId,
-          customerId,
-          eligibleSpendPaise: taxableAmountPaise,
-          asOfDate,
-        })
-      : { creditsEarned: 0 };
 
     const totalSavingsPaise = Math.max(0, mrpTotalPaise - grandTotalPaise);
 
@@ -417,12 +411,13 @@ export class CommercialEngine {
       manualDiscount: Money.toRupees(totalManualDiscountPaise),
       totalDiscountPaise,
       totalDiscount: Money.toRupees(totalDiscountPaise),
-      loyaltyRedeemedPaise,
-      loyaltyRedeemed: Money.toRupees(loyaltyRedeemedPaise),
-      loyaltyCreditsRedeemed,
-      loyaltyCreditsEarnable: earnCalc.creditsEarned,
-      availableLoyaltyCredits,
-      availableLoyaltyValuePaise,
+      // Retained as zero for clients restoring older quote snapshots.
+      loyaltyRedeemedPaise: 0,
+      loyaltyRedeemed: 0,
+      loyaltyCreditsRedeemed: 0,
+      loyaltyCreditsEarnable: 0,
+      availableLoyaltyCredits: 0,
+      availableLoyaltyValuePaise: 0,
       customerMembership: membership,
       customerGroupName: customerGroup?.name || null,
       taxableAmountPaise,

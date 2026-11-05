@@ -79,7 +79,7 @@ publicRouter.get('/invoice/:sale_id', async (req, res, next) => {
              <tfoot>
                <tr class="total-row"><th colspan="4" class="right">Subtotal</th><th class="right">${Number(sale.subtotal).toFixed(2)}</th></tr>
                <tr class="total-row"><th colspan="4" class="right">Discount</th><th class="right">${Number(sale.discount).toFixed(2)}</th></tr>
-               <tr class="total-row"><th colspan="4" class="right">GST</th><th class="right">${Number(sale.gst_amount).toFixed(2)}</th></tr>
+               <tr class="total-row"><th colspan="4" class="right">${sale.price_includes_tax ? 'GST (included)' : 'GST'}</th><th class="right">${Number(sale.gst_amount).toFixed(2)}</th></tr>
                <tr class="total-row"><th colspan="4" class="right"><strong>Grand Total</strong></th><th class="right"><strong>${Number(sale.net_amount).toFixed(2)}</strong></th></tr>
              </tfoot>
           </table>

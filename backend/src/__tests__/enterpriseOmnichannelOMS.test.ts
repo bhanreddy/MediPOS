@@ -15,7 +15,6 @@ import { OrderLifecycleService } from '../services/oms/orderLifecycleService';
 import { CustomerAddressService } from '../services/oms/customerAddressService';
 import { InventoryPositionService } from '../services/inventoryPosition';
 import { InventoryAvailabilityService } from '../services/inventory/inventoryAvailabilityService';
-import { LoyaltyEngine } from '../services/commercial/loyaltyEngine';
 import { AppError } from '../lib/appError';
 
 describe('Task 8 — Enterprise Omnichannel Order Management & Fulfilment Engine (OMS)', () => {
@@ -239,7 +238,9 @@ describe('Task 8 — Enterprise Omnichannel Order Management & Fulfilment Engine
       });
 
       expect(quote.subtotal).toBe(60.0);
-      expect(quote.grandTotal).toBe(67.0);
+      expect(quote.grandTotal).toBe(60.0);
+      expect(quote.taxTotalPaise).toBe(643);
+      expect(quote.commercialQuote.taxableAmountPaise + quote.taxTotalPaise).toBe(6000);
       expect(quote.expiresAt).toBeDefined();
     });
 
@@ -262,25 +263,19 @@ describe('Task 8 — Enterprise Omnichannel Order Management & Fulfilment Engine
       expect(quote.commercialQuote).toBeDefined();
     });
 
-    it('11. Loyalty redemption — loyalty credits reduce payable amount and save snapshot', () => {
-      LoyaltyEngine.getOrCreateProgram(orgId);
-      LoyaltyEngine.recordTransaction({
-        organizationId: orgId,
-        customerId,
-        transactionType: 'EARN',
-        credits: 500,
-        monetaryValuePaise: 12500,
-      });
-
-      const quote = OrderQuoteService.generateQuote({
-        organizationId: orgId,
-        customerId,
+    it('11. Removed loyalty credits cannot reduce order totals', () => {
+      expect(() => OrderQuoteService.generateQuote({
+        organizationId: orgId, customerId,
         items: [{ medicine_id: otcMedicineId, quantity: 5, unit_type: 'STRIP' }],
         redeemLoyaltyCredits: 50,
+      })).toThrow('Loyalty points have been removed');
+      const quote = OrderQuoteService.generateQuote({
+        organizationId: orgId, customerId,
+        items: [{ medicine_id: otcMedicineId, quantity: 5, unit_type: 'STRIP' }],
       });
-      expect(quote.loyaltyRedemptionCredits).toBe(50);
-      expect(quote.loyaltyRedemptionPaise).toBeGreaterThan(0);
-      expect(quote.grandTotalPaise).toBeLessThan(Math.round(quote.subtotalPaise * 1.12));
+      expect(quote.loyaltyRedemptionCredits).toBe(0);
+      expect(quote.loyaltyRedemptionPaise).toBe(0);
+      expect(quote.commercialQuote.loyaltyCreditsEarnable).toBe(0);
     });
 
     it('12. Quote expiry triggers revalidation — expired quote timestamp flagged', () => {
@@ -299,7 +294,7 @@ describe('Task 8 — Enterprise Omnichannel Order Management & Fulfilment Engine
         createdBy: userId,
       });
 
-      expect(order.order.grand_total).toBe(67.0);
+      expect(order.order.grand_total).toBe(60.0);
     });
   });
 
@@ -1026,7 +1021,7 @@ describe('Task 8 — Enterprise Omnichannel Order Management & Fulfilment Engine
         items: [{ medicine_id: otcMedicineId, quantity: 3 }],
       });
       expect(q.subtotal).toBe(90.0);
-      expect(q.grandTotal).toBe(101.0);
+      expect(q.grandTotal).toBe(90.0);
     });
   });
 
@@ -1308,7 +1303,7 @@ describe('Task 8 — Enterprise Omnichannel Order Management & Fulfilment Engine
         servedByUserId: userId,
       });
 
-      expect(res.sale.net_amount).toBe(67.0);
+      expect(res.sale.net_amount).toBe(60.0);
     });
 
     it('78. Stock deducted once — quantity remaining decremented accurately', () => {
@@ -1325,8 +1320,9 @@ describe('Task 8 — Enterprise Omnichannel Order Management & Fulfilment Engine
       expect(afterBatch.quantity_remaining).toBeLessThanOrEqual(prevBatch.quantity_remaining);
     });
 
-    it('79. Loyalty earned once — loyalty engine called during conversion', () => {
-      expect(true).toBe(true);
+    it('79. Order conversion does not issue legacy loyalty awards', () => {
+      const rows = localDb.prepare("SELECT COUNT(*) AS count FROM loyalty_transactions WHERE organization_id = ? AND transaction_type = 'EARN'").get(orgId) as { count: number };
+      expect(rows.count).toBe(0);
     });
 
     it('80. Dispensing event created where required — Task 4 dispensing events logged for prescription lines', () => {

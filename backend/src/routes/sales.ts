@@ -967,7 +967,7 @@ salesRouter.get("/:id/invoice", requireAuth, async (req, res, next) => {
                .join("")}
              <tr><th colspan="4" class="right">Subtotal</th><th class="right">${escapeInvoiceHtml(sale.subtotal)}</th></tr>
              <tr><th colspan="4" class="right">Discount</th><th class="right">${escapeInvoiceHtml(sale.discount)}</th></tr>
-             <tr><th colspan="4" class="right">GST</th><th class="right">${escapeInvoiceHtml(sale.gst_amount)}</th></tr>
+             <tr><th colspan="4" class="right">${sale.price_includes_tax ? 'GST (included)' : 'GST'}</th><th class="right">${escapeInvoiceHtml(sale.gst_amount)}</th></tr>
              <tr><th colspan="4" class="right"><strong>Grand Total</strong></th><th class="right"><strong>${escapeInvoiceHtml(sale.net_amount)}</strong></th></tr>
              ${Number(sale.nex_coins_earned_paise||0)>0?`<tr><th colspan="4" class="right">Nex Coins earned</th><td class="right">${escapeInvoiceHtml(Number(sale.nex_coins_earned_paise)/100)}</td></tr>`:''}
              ${Number(sale.wallet_redeemed_paise||0)>0?`<tr><th colspan="4" class="right">Nex Coins</th><td class="right">${escapeInvoiceHtml(Number(sale.wallet_redeemed_paise)/100)}</td></tr><tr><th colspan="4" class="right">Collected payment</th><td class="right">${escapeInvoiceHtml(Money.subtract(sale.paid_amount,Number(sale.wallet_redeemed_paise)/100))}</td></tr>`:''}

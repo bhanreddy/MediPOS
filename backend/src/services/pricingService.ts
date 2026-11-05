@@ -123,6 +123,7 @@ export class PricingService {
       discountPct,
       gstRate,
       isInterstate,
+      priceIncludesTax: true,
     });
 
     return {

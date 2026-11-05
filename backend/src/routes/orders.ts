@@ -15,8 +15,10 @@ import { CustomerAddressService } from '../services/oms/customerAddressService';
 import { OrderStateMachine } from '../services/oms/orderStateMachine';
 import { localDb } from '../local-db';
 import { AppError } from '../lib/appError';
+import { rejectLegacyLoyalty } from '../services/commercial/retiredLoyalty';
 
 export const ordersRouter = Router();
+ordersRouter.use(requireAuth, rejectLegacyLoyalty);
 
 // Helper to resolve org ID from user
 function resolveOrgId(req: any): string {

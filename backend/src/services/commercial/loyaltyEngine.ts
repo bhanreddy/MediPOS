@@ -1,6 +1,5 @@
 import { localDb } from '../../local-db';
 import { localMutate } from '../../lib/localMutate';
-import { Money } from '../../lib/money';
 import { v4 as uuidv4 } from 'uuid';
 import {
   LoyaltyProgram,
@@ -8,21 +7,7 @@ import {
   LoyaltyTransaction,
   LoyaltyTransactionType,
 } from '../../domain/commercialTypes';
-import { CustomerGroupService } from './customerGroupService';
-
-export interface CalculateLoyaltyEarnParams {
-  organizationId: string;
-  customerId: string;
-  eligibleSpendPaise: number;
-  asOfDate?: Date;
-}
-
-export interface CalculateLoyaltyRedeemParams {
-  organizationId: string;
-  customerId: string;
-  requestedCredits: number;
-  billTotalPaise: number;
-}
+import { AppError } from '../../lib/appError';
 
 export class LoyaltyEngine {
   /**
@@ -93,93 +78,6 @@ export class LoyaltyEngine {
   }
 
   /**
-   * Calculates points earned on an eligible checkout spend
-   */
-  static calculateEarning(params: CalculateLoyaltyEarnParams): {
-    creditsEarned: number;
-    eligibleSpendPaise: number;
-    multiplier: number;
-  } {
-    const { organizationId, customerId, eligibleSpendPaise } = params;
-    if (eligibleSpendPaise <= 0 || !customerId) {
-      return { creditsEarned: 0, eligibleSpendPaise: 0, multiplier: 1.0 };
-    }
-
-    const program = this.getOrCreateProgram(organizationId);
-    const membership = CustomerGroupService.getActiveMembership(customerId, organizationId);
-    const multiplier = Number(membership?.loyalty_multiplier ?? 1.0);
-
-    const spendUnits = Math.floor(eligibleSpendPaise / Number(program.earn_rate_spend_paise));
-    const baseCredits = spendUnits * Number(program.credits_per_earn_unit);
-    const creditsEarned = Math.floor(baseCredits * multiplier);
-
-    return {
-      creditsEarned,
-      eligibleSpendPaise,
-      multiplier,
-    };
-  }
-
-  /**
-   * Calculates redemption value and validates requested credits
-   */
-  static calculateRedemption(params: CalculateLoyaltyRedeemParams): {
-    allowed: boolean;
-    creditsToRedeem: number;
-    monetaryValuePaise: number;
-    reason?: string;
-  } {
-    const { organizationId, customerId, requestedCredits, billTotalPaise } = params;
-    if (requestedCredits <= 0 || !customerId || billTotalPaise <= 0) {
-      return { allowed: false, creditsToRedeem: 0, monetaryValuePaise: 0 };
-    }
-
-    const account = this.getOrCreateAccount(organizationId, customerId);
-    const program = this.getOrCreateProgram(organizationId);
-
-    const availableCredits = Number(account.available_balance || 0);
-
-    if (requestedCredits > availableCredits) {
-      return {
-        allowed: false,
-        creditsToRedeem: 0,
-        monetaryValuePaise: 0,
-        reason: `Requested ${requestedCredits} credits exceeds available balance (${availableCredits} credits)`,
-      };
-    }
-
-    if (requestedCredits < program.min_redemption_credits && availableCredits >= program.min_redemption_credits) {
-      return {
-        allowed: false,
-        creditsToRedeem: 0,
-        monetaryValuePaise: 0,
-        reason: `Minimum redemption is ${program.min_redemption_credits} credits`,
-      };
-    }
-
-    const valuePaise = requestedCredits * Number(program.redemption_rate_paise_per_credit);
-    const maxAllowedDiscountPaise = Math.round((billTotalPaise * Number(program.max_redemption_pct)) / 100);
-
-    if (valuePaise > maxAllowedDiscountPaise) {
-      // Cap credits to max allowed monetary percentage
-      const maxCredits = Math.floor(maxAllowedDiscountPaise / Number(program.redemption_rate_paise_per_credit));
-      const cappedValuePaise = maxCredits * Number(program.redemption_rate_paise_per_credit);
-      return {
-        allowed: true,
-        creditsToRedeem: maxCredits,
-        monetaryValuePaise: cappedValuePaise,
-        reason: `Redemption capped to maximum allowed ${program.max_redemption_pct}% of bill value`,
-      };
-    }
-
-    return {
-      allowed: true,
-      creditsToRedeem: requestedCredits,
-      monetaryValuePaise: valuePaise,
-    };
-  }
-
-  /**
    * Records an immutable loyalty transaction in ledger
    */
   static recordTransaction(params: {
@@ -205,6 +103,11 @@ export class LoyaltyEngine {
       idempotencyKey,
     } = params;
 
+    if (transactionType !== 'REVERSAL') {
+      throw new AppError(410, 'Loyalty points have been removed. Use Nex Coins instead.', 'LOYALTY_REMOVED');
+    }
+
+    // Historical returns may still reverse credits from earlier sales.
     // Idempotency check: prevent duplicate loyalty credit/debit
     if (idempotencyKey) {
       const existing: any = localDb
@@ -243,16 +146,10 @@ export class LoyaltyEngine {
     let lifetimeEarned = Number(account.lifetime_earned || 0);
     let lifetimeRedeemed = Number(account.lifetime_redeemed || 0);
 
-    if (transactionType === 'EARN' || transactionType === 'BONUS') {
-      lifetimeEarned += credits;
-    } else if (transactionType === 'REDEEM') {
-      lifetimeRedeemed += Math.abs(credits);
-    } else if (transactionType === 'REVERSAL') {
-      if (credits < 0) {
-        lifetimeEarned = Math.max(0, lifetimeEarned - Math.abs(credits));
-      } else {
-        lifetimeRedeemed = Math.max(0, lifetimeRedeemed - credits);
-      }
+    if (credits < 0) {
+      lifetimeEarned = Math.max(0, lifetimeEarned - Math.abs(credits));
+    } else {
+      lifetimeRedeemed = Math.max(0, lifetimeRedeemed - credits);
     }
 
     localDb

@@ -1133,6 +1133,7 @@ export function initLocalDb() {
     { table: 'medicines', col: 'storage_type', type: 'TEXT' },
     { table: 'payment_transactions', col: 'order_id', type: 'TEXT' },
     { table: 'sales', col: 'order_id', type: 'TEXT' },
+    { table: 'sales', col: 'price_includes_tax', type: 'INTEGER NOT NULL DEFAULT 0' },
     { table: 'stores', col: 'fulfilment_enabled', type: 'INTEGER DEFAULT 1' },
     { table: 'stores', col: 'delivery_enabled', type: 'INTEGER DEFAULT 0' },
     { table: 'stores', col: 'home_delivery_enabled', type: 'INTEGER DEFAULT 0' },

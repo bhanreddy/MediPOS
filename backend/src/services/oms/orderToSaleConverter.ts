@@ -5,7 +5,6 @@ import { v4 as uuidv4 } from 'uuid';
 import { DocumentNumberingService } from '../documentNumbering';
 import { InventoryPositionService } from '../inventoryPosition';
 import { InventoryReservationService } from '../inventory/inventoryReservationService';
-import { LoyaltyEngine } from '../commercial/loyaltyEngine';
 import { DispensingEngine } from '../prescription/dispensingEngine';
 import { OrderEventService } from './orderEventService';
 import { Money } from '../../lib/money';
@@ -347,31 +346,6 @@ export class OrderToSaleConverter {
               });
             }
           }
-        }
-      }
-
-      // Settle Loyalty Earning
-      if (order.customer_id) {
-        try {
-          const earnCalc = LoyaltyEngine.calculateEarning({
-            organizationId,
-            customerId: order.customer_id,
-            eligibleSpendPaise: grandTotalPaise,
-          });
-
-          if (earnCalc.creditsEarned > 0) {
-            LoyaltyEngine.recordTransaction({
-              organizationId,
-              customerId: order.customer_id,
-              transactionType: 'EARN',
-              credits: earnCalc.creditsEarned,
-              monetaryValuePaise: grandTotalPaise,
-              saleId,
-              notes: `Loyalty earned on Sale #${invoiceNumber}`,
-            });
-          }
-        } catch {
-          // non-blocking
         }
       }
 

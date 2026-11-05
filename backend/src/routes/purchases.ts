@@ -11,6 +11,7 @@ import { createPurchaseSchema, updatePaymentSchema, csvRowSchema } from '../sche
 import { InventoryPositionService } from '../services/inventoryPosition';
 import { SupplierSchemeEngine } from '../services/commercial/supplierSchemeEngine';
 import { applyReorderReceipt, findReorderReceipt, receiptHash } from '../services/procurement/reorderReceiptService';
+import { findInvoiceImport, importedReceiptCost, normalizeSupplierInvoice } from '../services/procurement/invoiceImportService';
 
 import multer from 'multer';
 import Anthropic from '@anthropic-ai/sdk';
@@ -87,6 +88,20 @@ purchasesRouter.post('/', requireAuth, requireRole('OWNER'), transactionalRoute(
   try {
     const parsed = createPurchaseSchema.parse(req.body);
     const clinicId = req.user!.clinic_id!;
+    // Serialize receipts for a shop: invoice deduplication and batch increments
+    // must be checked under the same transaction lock as the stock writes.
+    await queryRaw('SELECT pg_advisory_xact_lock(hashtextextended(?, 0))', [`purchase:${clinicId}`]);
+    const importHash = parsed.invoice_import ? receiptHash(parsed) : '';
+    if (parsed.invoice_import) {
+      if (!parsed.supplier_id || !parsed.invoice_number?.trim() || !parsed.invoice_date)
+        throw new AppError(400, 'Supplier, invoice number and invoice date are required for invoice imports.');
+      const previous = await findInvoiceImport(clinicId, parsed.invoice_import.request_id, parsed.invoice_import.source_sha256, importHash);
+      if (previous) { res.status(200).json({ data: previous }); return; }
+      const today = new Date().toLocaleDateString('en-CA', { timeZone: 'Asia/Kolkata' });
+      if (parsed.items.some(item => item.expiry_date < today || item.mrp < item.purchase_price))
+        throw new AppError(400, 'Imported stock must be unexpired and MRP must be at least the purchase rate.');
+    }
+
     const linkedReceiptHash = parsed.reorder_order_id ? receiptHash(parsed) : '';
     if (parsed.reorder_order_id) {
       const previous = await findReorderReceipt(clinicId, parsed.reorder_receipt_id, linkedReceiptHash);
@@ -128,6 +143,14 @@ purchasesRouter.post('/', requireAuth, requireRole('OWNER'), transactionalRoute(
       }
     }
 
+    if (parsed.invoice_import && !supplierId) throw new AppError(400, 'Select a supplier belonging to this shop.');
+    if (supplierId && parsed.invoice_number?.trim()) {
+      const [duplicate] = await queryRaw(`SELECT id FROM purchases WHERE clinic_id=? AND supplier_id=?
+        AND upper(regexp_replace(btrim(COALESCE(invoice_number,bill_number,'')), '\\s+', ' ', 'g'))=? LIMIT 1`,
+        [clinicId, supplierId, normalizeSupplierInvoice(parsed.invoice_number)]);
+      if (duplicate) throw new AppError(409, 'This supplier invoice has already been received. Check Purchases before adding stock again.');
+    }
+
     if (parsed.reorder_order_id) await applyReorderReceipt(clinicId, parsed.reorder_order_id, supplierId, parsed.items);
 
     // Insert purchase locally
@@ -162,12 +185,13 @@ purchasesRouter.post('/', requireAuth, requireRole('OWNER'), transactionalRoute(
     for (const { item, lineCalc } of calculatedLines) {
       const med = await queryOne('medicines', '(_local_id=? OR id=?) AND clinic_id=?', [item.medicine_id, item.medicine_id, clinicId]);
       if (!med) {
-        throw new Error(`Medicine not found for ID: ${item.medicine_id}`);
+        throw new AppError(400, `Medicine not found in this shop: ${item.medicine_id}`);
       }
+      if (parsed.invoice_import && !med.is_active) throw new AppError(400, `Medicine ${med.name} is inactive. Activate it before importing stock.`);
       const resolvedMedicineId = (med as any).id;
 
       // Evaluate procurement supplier scheme for effective unit cost & free stock
-      const schemeResult = SupplierSchemeEngine.evaluateInwardScheme({
+      const schemeResult = parsed.invoice_import ? importedReceiptCost(item) : SupplierSchemeEngine.evaluateInwardScheme({
         organizationId: organizationId || clinicId,
         supplierId,
         medicineId: resolvedMedicineId,
@@ -192,6 +216,7 @@ purchasesRouter.post('/', requireAuth, requireRole('OWNER'), transactionalRoute(
           batch_number: item.batch_number,
           expiry_date: item.expiry_date,
           quantity: item.quantity,
+          free_quantity: schemeResult.freeQuantity,
           purchase_price: item.purchase_price,
           mrp: item.mrp,
           gst_rate: item.gst_rate,
@@ -202,14 +227,20 @@ purchasesRouter.post('/', requireAuth, requireRole('OWNER'), transactionalRoute(
       });
 
       // Increment stock on batch with blended weighted average effective purchase rate
-      const existingBatch = await queryOne('medicine_batches', 'medicine_id=? AND batch_number=? AND clinic_id=?', [resolvedMedicineId, item.batch_number, clinicId]);
+      const [existingBatch] = await queryRaw(`SELECT * FROM medicine_batches WHERE medicine_id=? AND batch_number=? AND clinic_id=?
+        AND store_id IS NOT DISTINCT FROM ?::uuid AND deleted_at IS NULL FOR UPDATE`, [resolvedMedicineId, item.batch_number, clinicId, storeId]);
       let batchIdForLedger = '';
       let newQuantityRemaining = effectiveReceivedQuantity;
 
       if (existingBatch) {
+        if (existingBatch.is_disposed) throw new AppError(409, `Batch ${item.batch_number} is disposed. Check the batch number.`);
+        const existingExpiry = existingBatch.expiry_date instanceof Date ? existingBatch.expiry_date.toISOString().slice(0, 10) : String(existingBatch.expiry_date).slice(0, 10);
+        if (parsed.invoice_import && existingExpiry !== item.expiry_date) throw new AppError(409, `Batch ${item.batch_number} has a different expiry in inventory. Correct the invoice before receiving.`);
         const oldQty = Number((existingBatch as any).quantity_remaining ?? 0);
         const oldPp = Number((existingBatch as any).purchase_price ?? 0);
         newQuantityRemaining = oldQty + effectiveReceivedQuantity;
+        if (!Number.isSafeInteger(newQuantityRemaining) || newQuantityRemaining > 2147483647)
+          throw new AppError(400, `Batch ${item.batch_number} would exceed the stock limit.`);
         const blendedPp = Money.calculateBlendedPurchasePrice({
           existingQuantity: oldQty,
           existingPurchasePrice: oldPp,
@@ -315,11 +346,28 @@ purchasesRouter.post('/', requireAuth, requireRole('OWNER'), transactionalRoute(
     if (parsed.reorder_order_id) await queryRaw(`INSERT INTO reorder_receipts
       (clinic_id,request_id,purchase_order_id,purchase_id,payload_hash) VALUES (?,?,?,?,?)`,
       [clinicId, parsed.reorder_receipt_id, parsed.reorder_order_id, purchase.id, linkedReceiptHash]);
+    if (parsed.invoice_import) await queryRaw(`INSERT INTO invoice_import_receipts
+      (clinic_id,request_id,source_sha256,source_filename,source_format,supplier_id,invoice_number,purchase_id,payload_hash)
+      VALUES (?,?,?,?,?,?,?,?,?)`, [clinicId, parsed.invoice_import.request_id, parsed.invoice_import.source_sha256,
+      parsed.invoice_import.source_filename, parsed.invoice_import.source_format, supplierId,
+      normalizeSupplierInvoice(parsed.invoice_number!), purchase.id, importHash]);
     res.status(201).json({ data: purchase });
   } catch (err) {
     next(err);
   }
 }));
+
+// Exact name matches only. Ambiguous products are resolved explicitly in the preview.
+purchasesRouter.post('/invoice-matches', requireAuth, requireRole('OWNER'), async (req, res, next) => {
+  try {
+    const { names } = z.object({ names: z.array(z.string().trim().min(1).max(300)).min(1).max(2000) }).parse(req.body);
+    const normalized = [...new Set(names.map(name => name.trim().toLowerCase()))];
+    const matches = await queryRaw(`SELECT id, name, generic_name, manufacturer, gst_rate, pack_size, base_unit, sale_unit
+      FROM medicines WHERE clinic_id=? AND deleted_at IS NULL AND is_active=true
+      AND lower(btrim(name)) IN (${normalized.map(() => '?').join(',')})`, [req.user!.clinic_id!, ...normalized]);
+    res.json({ data: matches });
+  } catch (error) { next(error); }
+});
 
 // PUT /api/purchases/:id
 purchasesRouter.put('/:id', requireAuth, requireRole('OWNER'), async (req, res, next) => {

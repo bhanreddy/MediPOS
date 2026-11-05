@@ -5,7 +5,6 @@ import { PriceBookService } from '../services/commercial/priceBookService';
 import { PromotionEngine } from '../services/commercial/promotionEngine';
 import { CouponEngine } from '../services/commercial/couponEngine';
 import { CustomerGroupService } from '../services/commercial/customerGroupService';
-import { LoyaltyEngine } from '../services/commercial/loyaltyEngine';
 import { SupplierSchemeEngine } from '../services/commercial/supplierSchemeEngine';
 import { POSSessionService } from '../services/posSession';
 import { localDb } from '../local-db';
@@ -235,47 +234,9 @@ commercialRouter.post('/memberships', requireAuth, requireRole('CASHIER', 'PHARM
   }
 });
 
-// ── 5. LOYALTY PROGRAM & LEDGER ──────────────────────────────────────────────
-commercialRouter.get('/loyalty/program', requireAuth, async (req, res, next) => {
-  try {
-    const session = POSSessionService.resolveSession({
-      userId: req.user!.id,
-      clinicId: req.user!.clinic_id,
-    });
-    const program = LoyaltyEngine.getOrCreateProgram(session.organizationId);
-    res.json({ data: program });
-  } catch (err) {
-    next(err);
-  }
-});
-
-commercialRouter.get('/loyalty/account/:customerId', requireAuth, async (req, res, next) => {
-  try {
-    const history = LoyaltyEngine.getCustomerHistory(req.params.customerId);
-    res.json({ data: history });
-  } catch (err) {
-    next(err);
-  }
-});
-
-commercialRouter.post('/loyalty/adjust', requireAuth, requireRole('OWNER', 'SUPER_ADMIN'), async (req, res, next) => {
-  try {
-    const session = POSSessionService.resolveSession({
-      userId: req.user!.id,
-      clinicId: req.user!.clinic_id,
-    });
-    const { customer_id, credits, notes } = req.body;
-    const tx = LoyaltyEngine.recordTransaction({
-      organizationId: session.organizationId,
-      customerId: customer_id,
-      transactionType: 'ADJUSTMENT',
-      credits: Number(credits),
-      notes: notes || `Manual balance adjustment by ${session.userId}`,
-    });
-    res.status(201).json({ data: tx });
-  } catch (err) {
-    next(err);
-  }
+// Old clients receive an explicit removal response without touching the ledger.
+commercialRouter.use('/loyalty', requireAuth, (_req, _res, next) => {
+  next(new AppError(410, 'Loyalty points have been removed. Use Nex Coins instead.', 'LOYALTY_REMOVED'));
 });
 
 // ── 6. SUPPLIER SCHEMES ──────────────────────────────────────────────────────

@@ -16,7 +16,8 @@ export const createSaleSchema = z.object({
   counter_id: z.string().optional().nullable(),
   terminal_id: z.string().optional().nullable(),
   discount: z.number().finite().min(0).default(0),
-  price_includes_tax: z.boolean().default(false),
+  // Customer prices always include GST, including requests from older clients.
+  price_includes_tax: z.boolean().default(true).transform(() => true),
   payment_mode: z.enum(['cash', 'upi', 'card', 'credit', 'wallet']).default('cash'),
   payment_status: z.enum(['paid', 'partial', 'credit', 'returned']).default('paid'),
   paid_amount: z.number().finite().min(0).default(0),

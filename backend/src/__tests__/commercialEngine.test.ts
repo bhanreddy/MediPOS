@@ -612,54 +612,41 @@ describe('Task 3 — Enterprise Pricing, Promotions, Supplier Schemes & Loyalty 
   // 6. IMMUTABLE LOYALTY LEDGER TESTS
   // ════════════════════════════════════════════════════════════════════════════
   describe('6. Immutable Loyalty Points Ledger & Returns Reversal', () => {
-    test('Loyalty earning respects membership multiplier (₹100 spend -> 1 credit * 1.5x = 1.5 -> 1 floor credit per ₹100)', () => {
-      // Eligible spend = ₹1,000 (100,000 paise). Spend units = 10. Multiplier = 1.5x -> 15 credits
-      const earn = LoyaltyEngine.calculateEarning({
-        organizationId: orgId,
-        customerId,
-        eligibleSpendPaise: 100000,
+    test('quotes no longer earn loyalty credits or expose a redeemable legacy balance', () => {
+      const quote = CommercialEngine.quoteCommercialCart({
+        organizationId: orgId, storeId: storeAId, customerId,
+        items: [{ medicine_id: medParacetamolId, quantity: 2 }],
       });
-
-      expect(earn.multiplier).toBe(1.5);
-      expect(earn.creditsEarned).toBe(15);
+      expect(quote.loyaltyCreditsEarnable).toBe(0);
+      expect(quote.availableLoyaltyCredits).toBe(0);
+      expect(quote.loyaltyRedeemedPaise).toBe(0);
     });
 
-    test('Loyalty points redemption converts credits to rupee value and caps at 50% bill limit', () => {
-      // Give customer 400 credits (worth 400 * 25 paise = 10,000 paise = ₹100)
-      LoyaltyEngine.recordTransaction({
-        organizationId: orgId,
-        customerId,
-        transactionType: 'ADJUSTMENT',
-        credits: 400,
-        notes: 'Initial test points',
-      });
-
-      // Bill total = ₹120 (12,000 paise). Max 50% discount allowed = ₹60 (6,000 paise = 240 credits)
-      const redeem = LoyaltyEngine.calculateRedemption({
-        organizationId: orgId,
-        customerId,
-        requestedCredits: 300, // requests ₹75 off
-        billTotalPaise: 12000,
-      });
-
-      expect(redeem.allowed).toBe(true);
-      expect(redeem.creditsToRedeem).toBe(240); // capped at 240 credits (₹60)
-      expect(redeem.monetaryValuePaise).toBe(6000);
+    test('legacy redemption and manual point adjustments are rejected', () => {
+      expect(() => CommercialEngine.quoteCommercialCart({
+        organizationId: orgId, storeId: storeAId, customerId,
+        items: [{ medicine_id: medParacetamolId, quantity: 2 }],
+        redeemLoyaltyCredits: 100,
+      })).toThrow('Loyalty points have been removed');
+      expect(() => LoyaltyEngine.recordTransaction({
+        organizationId: orgId, customerId,
+        transactionType: 'ADJUSTMENT', credits: 400,
+      })).toThrow('Loyalty points have been removed');
     });
 
     test('Return reversal proportionality deducts earned points on product return', () => {
       const saleId = uuidv4();
       const returnId = uuidv4();
 
-      // Record 20 earned credits on sale
-      LoyaltyEngine.recordTransaction({
-        organizationId: orgId,
-        customerId,
-        transactionType: 'EARN',
-        credits: 20,
-        saleId,
-        notes: 'Sale earn',
-      });
+      // Seed a historical award without issuing new points through the removed feature.
+      const account = LoyaltyEngine.getOrCreateAccount(orgId, customerId);
+      const awardId = uuidv4();
+      localMutate({ table: 'loyalty_transactions', operation: 'INSERT', data: {
+        id: awardId, _local_id: awardId, organization_id: orgId,
+        account_id: account.id, customer_id: customerId,
+        transaction_type: 'EARN', credits: 20, credits_balance_after: 20, sale_id: saleId,
+      } });
+      localDb.prepare('UPDATE loyalty_accounts SET available_balance = 20 WHERE id = ?').run(account.id);
 
       // Process 50% partial return
       LoyaltyEngine.processReturnReversal({
@@ -742,7 +729,7 @@ describe('Task 3 — Enterprise Pricing, Promotions, Supplier Schemes & Loyalty 
       expect(q.customerGroupName).toBe('VIP Gold Members');
     });
 
-    test('POST /api/pos/checkout persists commercial snapshot and loyalty points', async () => {
+    test('POST /api/pos/checkout persists commercial snapshot without loyalty points', async () => {
       const idempotencyKey = `chk_${Date.now()}`;
       const res = await request(app)
         .post('/api/pos/checkout')
@@ -769,6 +756,8 @@ describe('Task 3 — Enterprise Pricing, Promotions, Supplier Schemes & Loyalty 
 
       expect(snapshot).toBeDefined();
       expect(snapshot.gross_margin_pct).toBeGreaterThan(0);
+      expect(Number(snapshot.loyalty_earned_credits)).toBe(0);
+      expect(Number(snapshot.loyalty_redeemed_paise)).toBe(0);
     });
 
     test('Returns accurately quote and restore inventory referencing original commercial snapshot', async () => {
