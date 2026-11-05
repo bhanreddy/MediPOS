@@ -61,7 +61,6 @@ const SettingsScreen = lazy(() => import('./components/Settings/SettingsScreen')
 const PriceBooksPage = lazy(() => import('./components/Commercial/PriceBooksPage').then(module => ({ default: module.PriceBooksPage })));
 const PromotionsPage = lazy(() => import('./components/Commercial/PromotionsPage').then(module => ({ default: module.PromotionsPage })));
 const CouponsPage = lazy(() => import('./components/Commercial/CouponsPage').then(module => ({ default: module.CouponsPage })));
-const LoyaltyAdminPage = lazy(() => import('./components/Commercial/LoyaltyAdminPage').then(module => ({ default: module.LoyaltyAdminPage })));
 const SupplierSchemesPage = lazy(() => import('./components/Commercial/SupplierSchemesPage').then(module => ({ default: module.SupplierSchemesPage })));
 const PrescriptionQueuePage = lazy(() => import('./components/Prescriptions/PrescriptionQueuePage').then(module => ({ default: module.PrescriptionQueuePage })));
 const PatientMedicationHistoryPage = lazy(() => import('./components/Prescriptions/PatientMedicationHistoryPage').then(module => ({ default: module.PatientMedicationHistoryPage })));
@@ -137,7 +136,7 @@ const router = createBrowserRouter([
                     { path: 'price-books', element: <PriceBooksPage /> },
                     { path: 'promotions', element: <PromotionsPage /> },
                     { path: 'coupons', element: <CouponsPage /> },
-                    { path: 'loyalty', element: <LoyaltyAdminPage /> },
+                    { path: 'loyalty', element: <Navigate to="/settings#nex-coins" replace /> },
                     { path: 'supplier-schemes', element: <SupplierSchemesPage /> },
                     { path: 'alerts', element: <ExpiryAlertsScreen /> },
                     { path: 'analytics', element: <BusinessAnalyticsScreen /> },

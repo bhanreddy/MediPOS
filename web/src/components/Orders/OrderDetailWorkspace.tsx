@@ -260,7 +260,7 @@ export const OrderDetailWorkspace: React.FC<OrderDetailWorkspaceProps> = ({
                   )}
                   {Number(data.loyalty_redemption_paise || 0) > 0 && (
                     <div className="flex justify-between text-primary">
-                      <span>Loyalty Redeemed:</span>
+                      <span>Historical rewards applied:</span>
                       <span className="font-mono">-₹{((data.loyalty_redemption_paise || 0) / 100).toFixed(2)}</span>
                     </div>
                   )}

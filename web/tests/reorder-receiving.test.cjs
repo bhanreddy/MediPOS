@@ -4,6 +4,10 @@ const fs = require('node:fs');
 const path = require('node:path');
 const vm = require('node:vm');
 const ts = require('typescript');
+const invoiceCore = { exports: {} };
+vm.runInNewContext(ts.transpileModule(fs.readFileSync(path.join(__dirname, '../src/services/invoiceImportCore.ts'), 'utf8'), {
+  compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.CommonJS },
+}).outputText, { module: invoiceCore, exports: invoiceCore.exports });
 
 function harness(post) {
   let cursor = 0, counter = 0;
@@ -27,6 +31,7 @@ function harness(post) {
       if (name === '../lib/api') return { post };
       if (name === 'uuid') return { v4: () => `request-${++counter}` };
       if (name === '../lib/queryClient') return { queryClient: { invalidateQueries: async () => {} } };
+      if (name === '../services/invoiceImportCore') return invoiceCore.exports;
       throw Error(name);
     },
   });
@@ -66,4 +71,22 @@ test('ordinary purchase entry keeps its existing unlinked request contract', asy
   assert.equal(payload.reorder_order_id, undefined);
   assert.equal(payload.reorder_receipt_id, undefined);
   assert.equal(payload.items[0].gst_rate, 12);
+});
+test('invoice drafts preserve explicit free stock, tax, discount and request identity across an uncertain retry', async () => {
+  const attempts = [];
+  const render = harness(async (_url, body) => { attempts.push(body); if (attempts.length === 1) throw Error('Uncertain receipt response'); });
+  let hook = render();
+  hook.setVendorId('supplier'); hook.setInvoiceNumber('INV-IMPORT');
+  hook.loadInvoiceDraft({ filename: 'invoice.xlsx', sha256: 'a'.repeat(64), format: 'xlsx' }, [{
+    product: { id: 'medicine', gst_rate: 5 }, batchNumber: '0001', expiryDate: '2099-02-28',
+    quantity: 10, freeQuantity: 2, costPrice: 10, mrp: 20, gstRate: 12, discount: 10,
+  }]);
+  hook = render(); assert.equal(hook.items[0].total, 100.8);
+  await hook.commitToLedger(); await render().commitToLedger();
+  assert.equal(attempts.length, 2);
+  assert.equal(attempts[0].invoice_import.request_id, attempts[1].invoice_import.request_id);
+  assert.equal(attempts[0].invoice_import.source_format, 'xlsx');
+  assert.equal(attempts[0].items[0].free_quantity, 2);
+  assert.equal(attempts[0].items[0].gst_rate, 12);
+  assert.equal(attempts[0].items[0].discount, 10);
 });

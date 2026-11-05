@@ -1,6 +1,7 @@
 import React, { useState, useEffect, useMemo } from 'react';
 import { Link, useLocation, useSearchParams } from 'react-router-dom';
-import { Biohazard } from 'lucide-react';
+import { Biohazard, Trash2 } from 'lucide-react';
+import { useQueryClient } from '@tanstack/react-query';
 import toast from 'react-hot-toast';
 import { Button } from '../ui/Button';
 import { Input } from '../ui/Input';
@@ -15,6 +16,8 @@ import {
 import { canDisposeBatch } from '../../services/inventoryRadarCore';
 import { AddBatchModal } from './AddBatchModal';
 import { DisposeBatchModal } from './DisposeBatchModal';
+import { DeleteMedicineModal } from './DeleteMedicineModal';
+import { useAuth } from '../../lib/auth';
 import { INVENTORY_PAGE_COPY } from '../../config/appContent';
 
 /**
@@ -29,6 +32,8 @@ function parseInventoryFocus(raw: string | null): InventoryAttentionFilter | nul
 }
 
 export const InventoryScreen: React.FC = () => {
+    const isOwner = useAuth(state => state.isOwner);
+    const queryClient = useQueryClient();
     const location = useLocation();
     const [searchParams, setSearchParams] = useSearchParams();
     const attentionFilter = useMemo(
@@ -45,6 +50,7 @@ export const InventoryScreen: React.FC = () => {
     );
     const [isAddBatchModalOpen, setIsAddBatchModalOpen] = useState(false);
     const [disposeTarget, setDisposeTarget] = useState<RadarItem | null>(null);
+    const [deleteTarget, setDeleteTarget] = useState<RadarItem | null>(null);
 
     // Notifications must reveal their results even from a searched/disposed view.
     useEffect(() => {
@@ -77,7 +83,7 @@ export const InventoryScreen: React.FC = () => {
 
     const tableData = viewMode === 'active' ? processedInventory : disposedItems;
     const tableHeaders =
-        viewMode === 'active' ? [...INVENTORY_PAGE_COPY.headers] : [...INVENTORY_PAGE_COPY.disposedHeaders];
+        viewMode === 'active' ? [...INVENTORY_PAGE_COPY.headers.slice(0, -1), 'Actions'] : [...INVENTORY_PAGE_COPY.disposedHeaders];
     const lowStockMedicineCount = new Set(processedInventory.map(item => item.productId)).size;
 
     const subtitle =
@@ -269,20 +275,34 @@ export const InventoryScreen: React.FC = () => {
                                     {radar.lowStock && radar.expiring && <span className="block text-xs text-warning mt-1">{radar.expired ? 'Expired stock' : 'Also nearing expiry'}</span>}
                                 </td>
                                 <td className="px-4 py-4 text-center">
-                                    <button
-                                        type="button"
-                                        title={disposeEnabled ? 'Dispose batch' : INVENTORY_PAGE_COPY.disposeDisabledTooltip}
-                                        disabled={!disposeEnabled}
-                                        onClick={() => setDisposeTarget(radar)}
-                                        className={`inline-flex items-center justify-center w-10 h-10 rounded-lg border-2 transition-all ${
-                                            disposeEnabled
-                                                ? 'border-danger/40 text-danger hover:bg-danger/10 hover:border-danger'
-                                                : 'border-border text-muted/40 cursor-not-allowed'
-                                        }`}
-                                        aria-label="Dispose batch"
-                                    >
-                                        <Biohazard className="w-5 h-5" />
-                                    </button>
+                                    <div className="flex items-center justify-center gap-2">
+                                        <button
+                                            type="button"
+                                            title={disposeEnabled ? 'Dispose batch' : INVENTORY_PAGE_COPY.disposeDisabledTooltip}
+                                            disabled={!disposeEnabled}
+                                            onClick={() => setDisposeTarget(radar)}
+                                            className={`inline-flex items-center justify-center w-10 h-10 rounded-lg border-2 transition-all ${
+                                                disposeEnabled
+                                                    ? 'border-danger/40 text-danger hover:bg-danger/10 hover:border-danger'
+                                                    : 'border-border text-muted/40 cursor-not-allowed'
+                                            }`}
+                                            aria-label="Dispose batch"
+                                        >
+                                            <Biohazard className="w-5 h-5" />
+                                        </button>
+                                        {isOwner && (
+                                            <button
+                                                type="button"
+                                                title="Delete medicine (3-step confirmation)"
+                                                aria-label={`Delete medicine ${radar.name}`}
+                                                onClick={() => setDeleteTarget(radar)}
+                                                className="inline-flex items-center justify-center gap-1.5 min-h-10 px-3 rounded-lg border-2 border-danger/40 text-danger hover:bg-danger/10 hover:border-danger transition-colors"
+                                            >
+                                                <Trash2 className="w-4 h-4" aria-hidden />
+                                                <span className="text-xs font-semibold">Delete</span>
+                                            </button>
+                                        )}
+                                    </div>
                                 </td>
                             </tr>
                         );
@@ -307,6 +327,18 @@ export const InventoryScreen: React.FC = () => {
                     refresh();
                 }}
             />
+            {deleteTarget && isOwner && (
+                <DeleteMedicineModal
+                    key={deleteTarget.productId}
+                    medicine={{ id: deleteTarget.productId, name: deleteTarget.name }}
+                    onClose={() => setDeleteTarget(null)}
+                    onSuccess={() => {
+                        toast.success(`${deleteTarget.name} deleted from inventory`);
+                        refresh();
+                        void queryClient.invalidateQueries({ queryKey: ['billing-product-search'] });
+                    }}
+                />
+            )}
         </div>
     );
 };

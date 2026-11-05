@@ -179,7 +179,7 @@ export const WebPos = () => {
     staleTime: 0,
   });
   const walletAvailable = wallet.data?.integrity_verified ? wallet.data.balance_paise : 0;
-  const walletBlocked = store.wallet_amount_paise > 0 && (wallet.isPending || wallet.isError || wallet.isFetching);
+  const walletBlocked = store.use_nex_coins && store.wallet_amount_paise > 0 && (wallet.isPending || wallet.isError || wallet.isFetching);
 
 
   useEffect(() => {
@@ -325,7 +325,7 @@ export const WebPos = () => {
     cgst *= discountRatio;
     sgst *= discountRatio;
     const payable = roundMoney(subtotal - billDiscountAmt);
-    const walletPaise = store.customer_id && store.payment_mode !== 'credit'
+    const walletPaise = store.use_nex_coins && store.customer_id && store.payment_mode !== 'credit'
       ? Math.min(Math.max(0,store.wallet_amount_paise || 0),walletAvailable,Math.floor(Math.round(payable*100)*(wallet.data?.policy?.redemption_limit_percent??100)/100)) : 0;
     const walletAmount = walletPaise / 100;
     const amountToCollect = roundMoney(payable-walletAmount);
@@ -365,6 +365,7 @@ export const WebPos = () => {
     store.paid_amount,
     store.payment_mode,
     store.wallet_amount_paise,
+    store.use_nex_coins,
     store.customer_id,
     walletAvailable,
     wallet.data?.policy?.redemption_limit_percent,
@@ -372,6 +373,8 @@ export const WebPos = () => {
 
   const coinPolicy=wallet.data?.policy;
   const coinRedemptionCap=Math.min(walletAvailable,Math.floor(Math.round(calculation.payable*100)*(coinPolicy?.redemption_limit_percent??100)/100));
+  const usingCoins = store.use_nex_coins;
+  const canUseCoins = wallet.isSuccess && !wallet.isFetching && coinRedemptionCap > 0 && store.payment_mode !== 'credit';
   const expectedCoins = store.customer_id && store.payment_mode!=='credit' && coinPolicy?.enabled && Math.round(calculation.payable*100)>=coinPolicy.minimum_sale_paise
     ? Math.min(coinPolicy.earning_cap_paise||Number.MAX_SAFE_INTEGER,Math.floor(Math.round(calculation.amountToCollect*100)*coinPolicy.rate_bps/10000)) : 0;
   const selectedCoinAmount=store.wallet_amount_paise;
@@ -1146,17 +1149,45 @@ export const WebPos = () => {
 
           {store.customer_id && (
             <div className="rounded-xl border border-primary/20 bg-primary/5 p-3 text-sm">
-              <div className="flex items-center justify-between gap-2"><span className="font-semibold">Nex Coins</span><span className="font-bold text-primary">{wallet.isPending ? 'Checking…' : wallet.isError ? 'Unavailable' : walletMoney(walletAvailable)}</span></div>
+              <div className="flex items-center justify-between gap-2">
+                <span className="font-semibold">Nex Coins</span>
+                <span className="font-bold text-primary">{wallet.isPending ? 'Checking…' : wallet.isError ? 'Unavailable' : `${walletMoney(walletAvailable)} available`}</span>
+              </div>
+              <div className="mt-2 flex items-center justify-between gap-3">
+                <label htmlFor="pos-use-coins" className="cursor-pointer text-sm font-semibold">Use Nex Coins on this bill</label>
+                <button
+                  id="pos-use-coins"
+                  type="button"
+                  role="switch"
+                  aria-checked={usingCoins}
+                  aria-describedby="pos-coins-hint"
+                  disabled={isCommitting || (!usingCoins && !canUseCoins)}
+                  onClick={() => store.setUseNexCoins(!usingCoins, coinRedemptionCap)}
+                  className="inline-flex min-h-11 min-w-11 shrink-0 items-center justify-center rounded-lg focus-visible:outline-2 focus-visible:outline-primary disabled:opacity-50"
+                >
+                  <span aria-hidden className={`relative h-6 w-11 rounded-full transition-colors ${usingCoins ? 'bg-primary' : 'bg-border'}`}>
+                    <span className={`absolute top-0.5 h-5 w-5 rounded-full bg-white shadow-sm transition-transform ${usingCoins ? 'left-[22px]' : 'left-0.5'}`} />
+                  </span>
+                </button>
+              </div>
               {wallet.isError ? <button type="button" className="mt-2 text-xs font-semibold text-primary" onClick={() => void wallet.refetch()}>Retry wallet check</button> : <>
                 {wallet.data?.next_expiry && <p className="mt-1 text-xs text-muted">Next deadline: {walletDate(wallet.data.next_expiry)}</p>}
-                {walletAvailable > 0 && coinRedemptionCap>0 && store.payment_mode !== 'credit' && <div className="mt-3 flex flex-wrap items-center gap-2">
-                  <label htmlFor="pos-wallet-use" className="text-xs font-semibold">Use coins</label>
-                  <input id="pos-wallet-use" aria-label="Nex Coins amount" inputMode="decimal" type="number" min="0" step="0.01" max={coinRedemptionCap/100} value={store.wallet_amount_paise ? (store.wallet_amount_paise/100).toString() : ''} placeholder="0.00" onChange={e => store.setWalletAmount(Math.min(coinRedemptionCap,Math.max(0,Math.round(Number(e.target.value)*100)||0)))} className="w-24 rounded-lg border border-border bg-surface px-2 py-1.5 text-right text-sm"/>
-                  <button type="button" className="text-xs font-semibold text-primary hover:underline" onClick={() => store.setWalletAmount(coinRedemptionCap)}>Use maximum</button>
-                  {store.wallet_amount_paise > 0 && <button type="button" className="text-xs text-muted hover:underline" onClick={() => store.setWalletAmount(0)}>Remove</button>}
+                {usingCoins && <div className="mt-3 flex flex-wrap items-center gap-2">
+                  <label htmlFor="pos-wallet-use" className="text-xs font-semibold">Coins to use</label>
+                  <input id="pos-wallet-use" aria-label="Nex Coins amount" inputMode="decimal" type="number" min="0" step="0.01" max={coinRedemptionCap/100} value={store.wallet_amount_paise ? store.wallet_amount_paise / 100 : ''} placeholder="0.00" disabled={!canUseCoins || isCommitting} onChange={e => store.setWalletAmount(Math.min(coinRedemptionCap,Math.max(0,Math.round(Number(e.target.value)*100)||0)))} className="w-24 rounded-lg border border-border bg-surface px-2 py-1.5 text-right text-sm disabled:opacity-50"/>
+                  <button type="button" disabled={!canUseCoins || isCommitting} className="min-h-9 text-xs font-semibold text-primary hover:underline disabled:opacity-50" onClick={() => store.setWalletAmount(coinRedemptionCap)}>Use maximum</button>
                 </div>}
-                <p className="mt-2 text-xs text-muted">{store.payment_mode === 'credit' ? 'Choose Cash, UPI or Card to redeem Nex Coins.' : `Nearest-expiry coins first · maximum ${coinPolicy?.redemption_limit_percent??100}% of this bill.`}</p>
               </>}
+              <p id="pos-coins-hint" className="mt-2 text-xs text-muted">
+                {store.payment_mode === 'credit' ? 'Choose Cash, UPI or Card to redeem Nex Coins.'
+                  : wallet.isPending ? 'Checking the customer’s available coins.'
+                  : wallet.isError ? 'Coins are unavailable. You can continue without using coins.'
+                  : walletAvailable <= 0 ? 'No Nex Coins available to use.'
+                  : coinPolicy?.redemption_limit_percent === 0 ? 'Coin redemption is disabled in Settings.'
+                  : coinRedemptionCap <= 0 ? 'Add items to the bill to use Nex Coins.'
+                  : usingCoins ? `Nearest-expiry coins first · maximum ${coinPolicy?.redemption_limit_percent ?? 100}% of this bill.`
+                  : 'Coins will stay in the customer’s wallet. Eligible purchases still earn new coins.'}
+              </p>
             </div>
           )}
 
@@ -1210,7 +1241,7 @@ export const WebPos = () => {
           </div>
 
           {store.customer_id && expectedCoins>0 && <p className="rounded-lg bg-primary/5 px-3 py-2 text-xs font-semibold text-primary">Earn {walletMoney(expectedCoins)} Nex Coins after payment · valid {coinPolicy?.expiry_days||90} days</p>}
-          {!store.customer_id && <p className="text-xs text-muted">Save or select a customer to earn Nex Coins automatically.</p>}
+          {!store.customer_id && <p className="text-xs text-muted">Save or select a customer to earn or use Nex Coins.</p>}
           {calculation.walletAmount > 0 && <div className="space-y-1 rounded-lg bg-success/5 px-3 py-2 text-sm"><p className="flex justify-between"><span>Nex Coins</span><strong>−{formatRupee(calculation.walletAmount)}</strong></p><p className="flex justify-between font-semibold"><span>Remaining to collect</span><span>{formatRupee(calculation.amountToCollect)}</span></p></div>}
 
           <div

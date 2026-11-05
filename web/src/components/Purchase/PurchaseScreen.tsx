@@ -9,6 +9,7 @@ import { LoadError } from "../ui/ListFeedback";
 import { Select } from "../ui/Select";
 import { usePurchaseFlow } from "../../hooks/usePurchaseFlow";
 import { PurchaseItemModal } from "./PurchaseItemModal";
+import { InvoiceImportPanel } from './InvoiceImportPanel';
 import { useKeyboardShortcuts } from "../../hooks/useKeyboardShortcuts";
 import { SupplierService } from "../../services/supplierService";
 import { PURCHASE_SCREEN_COPY } from "../../config/appContent";
@@ -54,6 +55,8 @@ export const PurchaseScreen: React.FC = () => {
     error,
     isDraft,
     resetDraft,
+    importSource,
+    loadInvoiceDraft,
   } = usePurchaseFlow(orderId);
 
   useEffect(() => {
@@ -84,7 +87,7 @@ export const PurchaseScreen: React.FC = () => {
   // Keyboard Shortcuts
   useKeyboardShortcuts({
     F4: () => document.getElementById("vendor-select")?.focus(),
-    F6: () => (!isDraft || orderId ? null : setIsModalOpen(true)),
+    F6: () => (!isDraft || orderId || importSource ? null : setIsModalOpen(true)),
     F12: () => (isDraft && orderReceivable ? commitToLedger() : null),
   });
 
@@ -234,7 +237,7 @@ export const PurchaseScreen: React.FC = () => {
             options={[{ value: "", label: "Select a supplier…" }, ...vendors]}
             value={vendorId}
             onChange={(e) => setVendorId(e.target.value)}
-            disabled={!isDraft || !!orderId}
+            disabled={!isDraft || !!orderId || !!importSource}
           />
           <Input
             label="Supplier invoice number"
@@ -245,7 +248,7 @@ export const PurchaseScreen: React.FC = () => {
             disabled={!isDraft}
           />
           <Input
-            label="Received date"
+            label={importSource ? 'Supplier invoice date' : 'Received date'}
             type="date"
             icon="📅"
             value={inwardDate}
@@ -255,11 +258,17 @@ export const PurchaseScreen: React.FC = () => {
         </div>
       </div>
 
+      {!orderId && !importSource && <InvoiceImportPanel key={vendorId} supplierId={vendorId}
+        disabled={!isDraft || isCommitting || items.length > 0} onImport={loadInvoiceDraft} />}
+      {importSource && <div className="rounded-xl border border-primary/20 bg-primary/5 p-4 text-sm select-text">
+        <strong>Imported invoice: {importSource.filename}</strong>
+        <p className="text-muted mt-1">{items.length} reviewed lines. Verify the supplier invoice number and date. Confirm receipt below to update stock. Clear the draft to import a different file.</p>
+      </div>}
       {!orderId && (
         <div className="flex justify-end">
           <Button
             type="button"
-            disabled={!isDraft || isCommitting || !!orderId}
+            disabled={!isDraft || isCommitting || !!orderId || !!importSource}
             onClick={() => {
               setSeed(null);
               setIsModalOpen(true);
@@ -298,7 +307,7 @@ export const PurchaseScreen: React.FC = () => {
               </td>
               <td className="px-6 py-4 font-mono text-sm">{item.expiryDate}</td>
               <td className="px-6 py-4 font-bold text-primary">
-                {item.quantity}
+                {item.quantity}{item.freeQuantity ? ` + ${item.freeQuantity} free` : ''}
               </td>
               <td className="px-6 py-4 tabular-nums">
                 ₹{item.costPrice.toFixed(2)}
@@ -377,7 +386,7 @@ export const PurchaseScreen: React.FC = () => {
             disabled={!isDraft || isCommitting || !orderReceivable}
             isLoading={isCommitting}
           >
-            {!isDraft ? "Purchase saved" : "Save purchase (F12)"}
+            {!isDraft ? "Purchase saved" : importSource ? 'Confirm receipt & update stock (F12)' : "Save purchase (F12)"}
           </Button>
         </div>
       </div>

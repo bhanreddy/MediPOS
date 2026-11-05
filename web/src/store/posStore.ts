@@ -44,7 +44,7 @@ export interface PosCartLine {
 }
 
 export interface PosPaymentTender {
-  tender_type: 'CASH' | 'UPI' | 'CARD' | 'CREDIT' | 'WALLET' | 'LOYALTY';
+  tender_type: 'CASH' | 'UPI' | 'CARD' | 'CREDIT' | 'WALLET';
   amount: number;
   reference_number?: string;
 }
@@ -53,6 +53,8 @@ interface PosState {
   cart: PosCartLine[];
   checkout_request_id: string;
   wallet_amount_paise: number;
+  use_nex_coins: boolean;
+  setUseNexCoins: (enabled: boolean, amountPaise?: number) => void;
   setWalletAmount: (paise: number) => void;
   customer_id: string | null;
   customer_name: string;
@@ -66,7 +68,6 @@ interface PosState {
   bill_discount: string;
   is_percentage_discount: boolean;
   coupon_code: string;
-  redeem_loyalty_credits: number;
   customer_membership: { type: string; tier: string; loyalty_multiplier: number } | null;
   park_id: string | null;
   park_token: string | null;
@@ -79,7 +80,6 @@ interface PosState {
   setPaymentMode: (mode: 'cash' | 'card' | 'upi' | 'credit' | 'mixed') => void;
   setDiscount: (disc: string, isPercentage?: boolean) => void;
   setCouponCode: (code: string) => void;
-  setRedeemLoyaltyCredits: (credits: number) => void;
   setCustomerMembership: (mem: { type: string; tier: string; loyalty_multiplier: number } | null) => void;
   updateQuantity: (batchId: string, qty: number, maxStock?: number) => void;
   removeItem: (batchId: string) => void;
@@ -114,6 +114,11 @@ export const usePosStore = create<PosState>()(
       cart: [],
       checkout_request_id: crypto.randomUUID(),
       wallet_amount_paise: 0,
+      use_nex_coins: false,
+      setUseNexCoins: (enabled, amountPaise = 0) => set({
+        use_nex_coins: enabled,
+        wallet_amount_paise: enabled ? amountPaise : 0,
+      }),
       setWalletAmount: (paise) => set({wallet_amount_paise: paise}),
       customer_id: null,
       customer_name: '',
@@ -127,7 +132,6 @@ export const usePosStore = create<PosState>()(
       bill_discount: '0',
       is_percentage_discount: false,
       coupon_code: '',
-      redeem_loyalty_credits: 0,
       customer_membership: null,
       park_id: null,
       park_token: null,
@@ -139,12 +143,11 @@ export const usePosStore = create<PosState>()(
       setPaymentMode: (mode) =>
         set({
           payment_mode: mode,
-          ...(mode === 'credit' ? {wallet_amount_paise: 0} : {}),
-          payments: [{ tender_type: mode.toUpperCase() as any, amount: 0 }],
+          ...(mode === 'credit' ? {wallet_amount_paise: 0, use_nex_coins: false} : {}),
+          payments: [{ tender_type: mode.toUpperCase() as PosPaymentTender['tender_type'], amount: 0 }],
         }),
       setDiscount: (disc, isPct = false) => set({ bill_discount: disc, is_percentage_discount: isPct }),
       setCouponCode: (code) => set({ coupon_code: code }),
-      setRedeemLoyaltyCredits: (credits) => set({ redeem_loyalty_credits: credits }),
       setCustomerMembership: (mem) => set({ customer_membership: mem }),
       updateQuantity: (batchId, qty) => {
         const { cart } = get();
@@ -252,6 +255,7 @@ export const usePosStore = create<PosState>()(
           cart: [],
           checkout_request_id: crypto.randomUUID(),
           wallet_amount_paise: 0,
+          use_nex_coins: false,
           payments: [{ tender_type: 'CASH', amount: 0 }],
           cash_tendered: '',
           paid_amount: '',
@@ -265,7 +269,7 @@ export const usePosStore = create<PosState>()(
 
       setCustomer: (id, name, phone) => {
         set({ customer_id: id, customer_name: name, customer_phone: phone,
-          ...(get().customer_id !== id ? {wallet_amount_paise: 0} : {}) });
+          ...(get().customer_id !== id ? {wallet_amount_paise: 0, use_nex_coins: false} : {}) });
       },
 
       setDoctor: (name, regNo = '') => {
@@ -301,6 +305,7 @@ export const usePosStore = create<PosState>()(
           cart: [],
           checkout_request_id: crypto.randomUUID(),
           wallet_amount_paise: 0,
+          use_nex_coins: false,
           customer_id: null,
           customer_name: '',
           customer_phone: '',
@@ -315,7 +320,6 @@ export const usePosStore = create<PosState>()(
           bill_discount: '0',
           is_percentage_discount: false,
           coupon_code: '',
-          redeem_loyalty_credits: 0,
           park_id: null,
           park_token: null,
           supervisor_auth_id: null,
@@ -325,6 +329,17 @@ export const usePosStore = create<PosState>()(
     {
       name: 'pos-v2-cart-storage',
       storage: createJSONStorage(() => sessionStorage),
+      version: 2,
+      migrate: (persisted) => {
+        const draft = persisted as Partial<PosState>;
+        const { redeem_loyalty_credits: _retired, ...current } = draft as Partial<PosState> & { redeem_loyalty_credits?: number };
+        void _retired;
+        return {
+          ...current,
+          use_nex_coins: draft.use_nex_coins ?? (draft.wallet_amount_paise ?? 0) > 0,
+          payments: draft.payments?.filter(payment => String(payment.tender_type).toUpperCase() !== 'LOYALTY') ?? [{ tender_type: 'CASH', amount: 0 }],
+        };
+      },
     }
   )
 );

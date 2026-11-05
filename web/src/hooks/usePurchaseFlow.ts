@@ -3,6 +3,7 @@ import api from "../lib/api";
 import { v4 as uuidv4 } from "uuid";
 import type { Product } from "../core/types";
 import { queryClient } from "../lib/queryClient";
+import { invoiceLineTotal, type InvoiceSource } from '../services/invoiceImportCore';
 
 function localDateInput() {
   const today = new Date();
@@ -17,6 +18,9 @@ export interface PurchaseItemDraft {
   quantity: number;
   costPrice: number;
   mrp: number;
+  freeQuantity?: number;
+  gstRate?: number;
+  discount?: number;
   total: number;
 }
 
@@ -25,6 +29,12 @@ export const usePurchaseFlow = (reorderOrderId?: string) => {
   const [invoiceNumber, setInvoiceNumber] = useState("");
   const [inwardDate, setInwardDate] = useState(localDateInput());
   const [items, setItems] = useState<PurchaseItemDraft[]>([]);
+  const [importSource, setImportSource] = useState<(InvoiceSource & { requestId: string }) | null>(null);
+
+  const createDraftItem = (item: Omit<PurchaseItemDraft, 'id' | 'total'>): PurchaseItemDraft => {
+    const gst = Number(item.gstRate ?? item.product.gst_rate ?? 0);
+    return { ...item, id: uuidv4(), total: invoiceLineTotal(item.quantity, item.costPrice, item.discount || 0, gst) };
+  };
 
   const committing = useRef(false);
   const receiptAttempt = useRef<{ signature: string; id: string } | null>(null);
@@ -34,17 +44,7 @@ export const usePurchaseFlow = (reorderOrderId?: string) => {
 
   const addItem = useCallback(
     (item: Omit<PurchaseItemDraft, "id" | "total">) => {
-      const newItem: PurchaseItemDraft = {
-        ...item,
-        id: uuidv4(),
-        total:
-          Math.round(
-            item.quantity *
-              item.costPrice *
-              (1 + Number(item.product.gst_rate || 0) / 100) *
-              100,
-          ) / 100,
-      };
+      const newItem = createDraftItem(item);
       setItems((prev) => [...prev, newItem]);
     },
     [],
@@ -59,9 +59,17 @@ export const usePurchaseFlow = (reorderOrderId?: string) => {
     setInvoiceNumber("");
     setInwardDate(localDateInput());
     setItems([]);
+    setImportSource(null);
     setIsDraft(true);
     setError(null);
   }, []);
+
+  const loadInvoiceDraft = (source: InvoiceSource, lines: Omit<PurchaseItemDraft, 'id' | 'total'>[]) => {
+    if (committing.current || !isDraft || items.length) return;
+    setItems(lines.map(createDraftItem));
+    setImportSource({ filename: source.filename, sha256: source.sha256, format: source.format, requestId: uuidv4() });
+    setError(null);
+  };
 
   useEffect(() => {
     resetDraft();
@@ -90,20 +98,25 @@ export const usePurchaseFlow = (reorderOrderId?: string) => {
     try {
       const payload = {
         ...(reorderOrderId ? { reorder_order_id: reorderOrderId } : {}),
+        ...(importSource ? { invoice_import: {
+          request_id: importSource.requestId, source_sha256: importSource.sha256,
+          source_filename: importSource.filename, source_format: importSource.format,
+        } } : {}),
         supplier_id: vendorId,
         invoice_number: invoiceNumber,
         invoice_date: inwardDate,
         bill_image_url: null,
-        notes: "Created via Web Client POS",
+        notes: importSource ? `Imported ${importSource.format.toUpperCase()} invoice: ${importSource.filename}` : "Created via Web Client POS",
         items: items.map((item) => ({
           medicine_id: item.product.id,
           batch_number: item.batchNumber,
           expiry_date: item.expiryDate,
           quantity: item.quantity,
+          ...(importSource ? { free_quantity: item.freeQuantity || 0 } : {}),
           purchase_price: item.costPrice,
           mrp: item.mrp,
-          gst_rate: Number(item.product.gst_rate || 0),
-          discount: 0,
+          gst_rate: Number(item.gstRate ?? item.product.gst_rate ?? 0),
+          discount: item.discount || 0,
         })),
       };
 
@@ -115,7 +128,7 @@ export const usePurchaseFlow = (reorderOrderId?: string) => {
           ...payload,
           reorder_receipt_id: receiptAttempt.current!.id,
         });
-      } else await api.post("/purchases", payload);
+      } else await api.post("/purchases", payload, { timeout: 120000, 'axios-retry': { retries: 0 } });
       setIsDraft(false);
       void Promise.all(
         [
@@ -125,6 +138,9 @@ export const usePurchaseFlow = (reorderOrderId?: string) => {
           "shortbook",
           "supplier-summary",
           "clinic-header-alerts",
+          "billing-product-search",
+          "inventory",
+          "purchases",
         ].map((key) => queryClient.invalidateQueries({ queryKey: [key] })),
       );
     } catch (err: unknown) {
@@ -161,5 +177,7 @@ export const usePurchaseFlow = (reorderOrderId?: string) => {
     error,
     isDraft,
     resetDraft,
+    importSource,
+    loadInvoiceDraft,
   };
 };

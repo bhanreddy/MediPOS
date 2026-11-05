@@ -93,3 +93,13 @@ test("wallet checkout sends integer promotional credits, external payment, and a
   assert.equal(saved.payload.customer_id,"customer");
   assert.equal(saved.options["axios-retry"].retries,0);
 });
+
+test("opting out of coins collects the full bill without sending a redemption", async () => {
+  let saved;
+  await service(value => (saved = value)).finalizeSale(cart,"customer","cashier","CASH",{
+    supplyType:"INTRA",paidAmount:18,walletAmountPaise:0,
+  });
+  assert.equal(saved.payload.paid_amount,18);
+  assert.equal(saved.payload.customer_id,"customer");
+  assert.equal(Object.hasOwn(saved.payload,"wallet_amount_paise"),false);
+});

@@ -35,7 +35,6 @@ import {
   BookOpen,
   Sparkles,
   Ticket,
-  Award,
   Truck,
   Grid2X2,
   X,
@@ -188,7 +187,6 @@ export const ClinicLayout = () => {
     { name: "Price Books", path: "/price-books", icon: BookOpen },
     { name: "Promotions", path: "/promotions", icon: Sparkles },
     { name: "Coupons", path: "/coupons", icon: Ticket },
-    { name: "Loyalty & Tiers", path: "/loyalty", icon: Award },
     { name: "Supplier Schemes", path: "/supplier-schemes", icon: Truck },
   ];
 

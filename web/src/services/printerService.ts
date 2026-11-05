@@ -19,7 +19,7 @@ export const PrinterService = {
                 return Number.isFinite(parsed) ? parsed : fallback;
             };
 
-            const priceIncludesTax = saleData.price_includes_tax === true;
+            const priceIncludesTax = saleData.price_includes_tax === true || saleData.price_includes_tax === 1;
             const subtotal = toNumber(saleData.subtotal ?? saleData.total_amount);
             const gstAmount = toNumber(saleData.gst_amount ?? saleData.tax_amount);
             const discount = toNumber(saleData.discount ?? saleData.discount_amount);

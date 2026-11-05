@@ -367,7 +367,7 @@ export const REPORTS_SCREEN_COPY = {
 
 export const SETTINGS_SCREEN_COPY = {
     title: 'Settings',
-    subtitle: 'System configuration, backups, alerts, and UPI.',
+    subtitle: 'Manage your business, customer rewards, payments and device preferences.',
 } as const;
 
 export const BILLING_SCREEN_COPY = {

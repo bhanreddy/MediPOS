@@ -55,6 +55,16 @@ test('canonical saved amounts win over legacy aliases without changing the invoi
   assert.equal(receipt.balanceDue, 12.34);
 });
 
+test('local POS receipts recognize the stored inclusive tax flag', async () => {
+  let receipt;
+  await printer(value => { receipt = value; }).printBill({
+    subtotal: 100, discount: 10, gst_amount: 9.64, price_includes_tax: 1,
+  }, [item]);
+  assert.equal(receipt.finalTotal, 90);
+  assert.equal(receipt.items[0].total, 90);
+  assert.equal(receipt.priceIncludesTax, true);
+});
+
 test('legacy exclusive pricing still adds recorded GST and preserves line discounts', async () => {
   let receipt;
   await printer(value => { receipt = value; }).printBill({ total_amount: 100, discount_amount: 10, tax_amount: 18 },

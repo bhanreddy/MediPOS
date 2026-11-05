@@ -1,11 +1,13 @@
 
 import React, { useState, useEffect, useRef } from 'react';
+import { Calculator } from 'lucide-react';
 import { Button } from '../ui/Button';
 import { Input } from '../ui/Input';
 import { useProductSearch } from '../../hooks/useProductSearch';
 import { BillingSearchDropdown } from '../Billing/BillingSearchDropdown';
 import type { Product } from '../../core/types';
 import api from '../../lib/api';
+import { FloatingCalculator } from './FloatingCalculator';
 
 interface AddBatchModalProps {
     isOpen: boolean;
@@ -37,6 +39,8 @@ export const AddBatchModal: React.FC<AddBatchModalProps> = ({ isOpen, onClose, o
     const [salesRate, setSalesRate] = useState('');
 
     const [error, setError] = useState('');
+    const [isCalculatorOpen, setIsCalculatorOpen] = useState(false);
+    const calculatorToggleRef = useRef<HTMLButtonElement>(null);
     const firstInputRef = useRef<HTMLInputElement>(null);
 
     // Reset on Open
@@ -56,6 +60,7 @@ export const AddBatchModal: React.FC<AddBatchModalProps> = ({ isOpen, onClose, o
             setMrp('');
             setSalesRate('');
             setError('');
+            setIsCalculatorOpen(false);
             // Focus hack
             setTimeout(() => firstInputRef.current?.focus(), 100);
         }
@@ -192,7 +197,21 @@ export const AddBatchModal: React.FC<AddBatchModalProps> = ({ isOpen, onClose, o
                     <h3 className="text-xl font-black uppercase tracking-tight text-foreground-strong">
                         {isCreatingNewProduct ? 'Create New Medicine' : 'Add Stock / Batch'}
                     </h3>
-                    <button onClick={onClose} className="text-muted hover:text-foreground text-2xl leading-none">&times;</button>
+                    <div className="flex items-center gap-2">
+                        <button
+                            ref={calculatorToggleRef}
+                            type="button"
+                            aria-label="Toggle calculator"
+                            aria-expanded={isCalculatorOpen}
+                            aria-controls={isCalculatorOpen ? 'stock-calculator' : undefined}
+                            onClick={() => setIsCalculatorOpen(open => !open)}
+                            className={`inline-flex items-center gap-2 rounded-lg border border-border p-2 text-sm font-semibold hover:bg-primary/10 focus-visible:ring-2 focus-visible:ring-primary ${isCalculatorOpen ? 'bg-primary/10 text-primary' : 'text-muted'}`}
+                        >
+                            <Calculator size={18} aria-hidden="true" />
+                            <span className="hidden sm:inline">Calculator</span>
+                        </button>
+                        <button type="button" aria-label="Close add stock" onClick={onClose} className="text-muted hover:text-foreground text-2xl leading-none">&times;</button>
+                    </div>
                 </div>
 
                 <div className="p-6 space-y-6 overflow-y-auto bg-surface">
@@ -349,6 +368,10 @@ export const AddBatchModal: React.FC<AddBatchModalProps> = ({ isOpen, onClose, o
                     </Button>
                 </div>
             </div>
+            {isCalculatorOpen && <FloatingCalculator onClose={() => {
+                setIsCalculatorOpen(false);
+                calculatorToggleRef.current?.focus();
+            }} />}
         </div>
     );
 };

@@ -31,7 +31,6 @@ export const BillingScreen: React.FC = () => {
     prescription_number,
     bill_discount,
     coupon_code,
-    redeem_loyalty_credits,
     park_id,
     park_token,
     supervisor_auth_id,
@@ -46,7 +45,6 @@ export const BillingScreen: React.FC = () => {
     setPrescription,
     setBillDiscount,
     setCouponCode,
-    setRedeemLoyaltyCredits,
     setParkedToken,
     reset,
   } = usePosStore();
@@ -145,7 +143,6 @@ export const BillingScreen: React.FC = () => {
           })),
           customer_id,
           coupon_code: coupon_code || undefined,
-          redeem_loyalty_credits: Number(redeem_loyalty_credits || 0),
           bill_discount: parseFloat(bill_discount) || 0,
         });
         setQuote(res.data?.data);
@@ -157,7 +154,7 @@ export const BillingScreen: React.FC = () => {
     }, 150);
 
     return () => clearTimeout(timer);
-  }, [cart, customer_id, bill_discount, coupon_code, redeem_loyalty_credits]);
+  }, [cart, customer_id, bill_discount, coupon_code]);
 
   // 4. Barcode Scanner Fast Global Listener
   useBarcodeScanner({
@@ -297,7 +294,6 @@ export const BillingScreen: React.FC = () => {
         doctor_registration_number: doctor_registration_number || undefined,
         prescription_number: prescription_number || undefined,
         coupon_code: coupon_code || undefined,
-        redeem_loyalty_credits: Number(redeem_loyalty_credits || 0),
         bill_discount: parseFloat(bill_discount) || 0,
         payments: paymentRows,
         park_id: park_id || undefined,
@@ -597,7 +593,7 @@ export const BillingScreen: React.FC = () => {
           {quote && quote.lines?.length > 0 && (
             <div className="p-2.5 bg-slate-900 border-t border-slate-800 text-[11px] text-slate-400 flex items-center justify-between">
               <span>FEFO Batch Compliance Active</span>
-              <span className="font-mono">Taxable: ₹{quote.taxableAmount?.toFixed(2)} · GST: ₹{quote.totalGst?.toFixed(2)}</span>
+              <span className="font-mono">Taxable: ₹{quote.taxableAmount?.toFixed(2)} · GST included: ₹{quote.totalGst?.toFixed(2)}</span>
             </div>
           )}
         </main>
@@ -660,40 +656,6 @@ export const BillingScreen: React.FC = () => {
               />
             </div>
 
-            {/* Loyalty Points Redemption */}
-            {quote && (quote.availableLoyaltyCredits > 0 || quote.loyaltyCreditsEarnable > 0) && (
-              <div className="bg-slate-900 border border-slate-800 rounded p-2.5">
-                <div className="flex justify-between items-center text-[11px] font-bold text-slate-400 uppercase tracking-wider mb-1">
-                  <span>Loyalty Rewards</span>
-                  <span className="text-purple-400 font-mono text-[10px]">
-                    Bal: {quote.availableLoyaltyCredits || 0} pts (₹{(quote.availableLoyaltyValuePaise || 0) / 100})
-                  </span>
-                </div>
-                {quote.availableLoyaltyCredits > 0 ? (
-                  <div className="flex items-center gap-2">
-                    <input
-                      type="number"
-                      min="0"
-                      max={quote.availableLoyaltyCredits}
-                      placeholder="Redeem points"
-                      value={redeem_loyalty_credits || ''}
-                      onChange={e => setRedeemLoyaltyCredits(parseInt(e.target.value) || 0)}
-                      className="w-full bg-slate-800 border border-slate-700 rounded px-2.5 py-1 text-xs text-white font-mono"
-                    />
-                    {quote.loyaltyRedeemed > 0 && (
-                      <span className="text-purple-400 font-mono text-xs font-bold whitespace-nowrap">
-                        -₹{quote.loyaltyRedeemed.toFixed(2)}
-                      </span>
-                    )}
-                  </div>
-                ) : (
-                  <div className="text-[10px] text-slate-400 font-mono">
-                    Earns +{quote.loyaltyCreditsEarnable} credits on this sale
-                  </div>
-                )}
-              </div>
-            )}
-
             {/* Bill Discount Input */}
             <div className="bg-slate-900 border border-slate-800 rounded p-2.5">
               <label className="block text-[11px] font-bold text-slate-400 uppercase tracking-wider mb-1">
@@ -728,14 +690,8 @@ export const BillingScreen: React.FC = () => {
                 <span>-₹{quote.couponDiscount.toFixed(2)}</span>
               </div>
             )}
-            {quote?.loyaltyRedeemed > 0 && (
-              <div className="flex justify-between text-xs text-purple-400 font-mono">
-                <span>Loyalty Points:</span>
-                <span>-₹{quote.loyaltyRedeemed.toFixed(2)}</span>
-              </div>
-            )}
             <div className="flex justify-between text-xs text-slate-400 font-mono">
-              <span>GST Total:</span>
+              <span>GST (included):</span>
               <span>₹{quote?.totalGst?.toFixed(2) || '0.00'}</span>
             </div>
             {quote?.totalSavings > 0 && (
