@@ -3,24 +3,24 @@ import { requireAuth } from '../middleware/auth';
 import { DoctorService } from '../services/prescription/doctorService';
 import { AppError } from '../lib/appError';
 import { requireRole } from '../middleware/rbac';
-import { localDb } from '../local-db';
+import { businessDb as localDb } from '../lib/businessDb';
 import { z } from 'zod';
 
 export const doctorsRouter = Router();
 
 doctorsRouter.use(requireAuth);
-function organizationId(req: any): string {
+async function organizationId(req: any): Promise<string> {
   if (!req.user?.clinic_id) throw new AppError(403, 'No clinic assigned');
-  const clinic = localDb.prepare('SELECT organization_id FROM clinics WHERE id = ? OR _local_id = ?').get(req.user.clinic_id, req.user.clinic_id) as { organization_id?: string } | undefined;
+  const clinic = (await localDb.prepare('SELECT organization_id FROM clinics WHERE id = ? OR _local_id = ?').get(req.user.clinic_id, req.user.clinic_id)) as { organization_id?: string } | undefined;
   return clinic?.organization_id || req.user.clinic_id;
 }
 
 doctorsRouter.get('/', async (req, res, next) => {
   try {
-    const orgId = organizationId(req);
+    const orgId = (await organizationId(req));
     if (req.query.organization_id && req.query.organization_id !== orgId) throw new AppError(403, 'Cross-organization access denied');
     const query = req.query.q as string;
-    const doctors = DoctorService.getDoctors({ organizationId: orgId, query });
+    const doctors = (await DoctorService.getDoctors({ organizationId: orgId, query }));
     res.json({ success: true, data: doctors });
   } catch (err) {
     next(err);
@@ -29,8 +29,8 @@ doctorsRouter.get('/', async (req, res, next) => {
 
 doctorsRouter.get('/:id', async (req, res, next) => {
   try {
-    const doctor = DoctorService.getDoctorById(req.params.id);
-    if (!doctor || ![organizationId(req), req.user!.clinic_id].includes(doctor.organization_id || '')) {
+    const doctor = (await DoctorService.getDoctorById(req.params.id));
+    if (!doctor || ![(await organizationId(req)), req.user!.clinic_id].includes(doctor.organization_id || '')) {
       throw new AppError(404, 'Doctor not found', 'DOCTOR_NOT_FOUND');
     }
     res.json({ success: true, data: doctor });
@@ -46,8 +46,8 @@ doctorsRouter.post('/', requireRole('OWNER', 'PHARMACIST', 'SUPER_ADMIN'), async
       throw new AppError(400, 'Doctor name and registration number are required', 'MISSING_FIELDS');
     }
 
-    const doctor = DoctorService.createDoctor({
-      organizationId: organizationId(req),
+    const doctor = (await DoctorService.createDoctor({
+      organizationId: (await organizationId(req)),
       name,
       registrationNumber: registration_number,
       registrationAuthority: registration_authority,
@@ -55,7 +55,7 @@ doctorsRouter.post('/', requireRole('OWNER', 'PHARMACIST', 'SUPER_ADMIN'), async
       phone,
       clinicHospital: clinic_hospital,
       address,
-    });
+    }));
 
     res.status(201).json({ success: true, data: doctor });
   } catch (err) {

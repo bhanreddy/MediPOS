@@ -46,23 +46,23 @@ afterAll(() => {
   ])
     localDb.prepare(`DELETE FROM ${table} WHERE id=?`).run(id);
 });
-test("warehouse and supplier lookups never include another default organization", () => {
-  expect(WarehouseOperationsService.listBins(org, warehouse)).toEqual([]);
-  expect(() =>
-    WarehouseOperationsService.getWarehouseDashboard(org, warehouse),
-  ).toThrow("Warehouse not found");
-  expect(() =>
-    SupplierIntelligenceService.getSupplierScorecard(org, supplier),
-  ).toThrow("Supplier not found");
+test("warehouse and supplier lookups never include another default organization", async () => {
+  expect((await WarehouseOperationsService.listBins(org, warehouse))).toEqual([]);
+  await expect((async () =>
+    (await WarehouseOperationsService.getWarehouseDashboard(org, warehouse)))(),
+  ).rejects.toThrow("Warehouse not found");
+  await expect((async () =>
+    (await SupplierIntelligenceService.getSupplierScorecard(org, supplier)))(),
+  ).rejects.toThrow("Supplier not found");
 });
-test("POS search does not expose medicines from default organization", () => {
+test("POS search does not expose medicines from default organization", async () => {
   expect(
-    POSSearchService.search({
+    (await POSSearchService.search({
       query: "Other tenant isolation medicine",
       organizationId: org,
       storeId: randomUUID(),
       limit: 25,
-    }).results,
+    })).results,
   ).toEqual([]);
 });
 
@@ -75,10 +75,10 @@ const foreignBatch = randomUUID();
 beforeAll(() => localDb.prepare(`INSERT INTO medicine_batches(id,_local_id,organization_id,medicine_id,batch_number,quantity_remaining,purchase_price,mrp,expiry_date,_updated_at)
   VALUES(?,?,?,?,?,24,10,20,'2025-01-01',?)`).run(foreignBatch,foreignBatch,'default-org',medicine,'PRIVATE-BATCH',new Date().toISOString()));
 afterAll(() => localDb.prepare('DELETE FROM medicine_batches WHERE id=?').run(foreignBatch));
-test('availability, valuation, ageing, expiry and reconciliation never include another organization’s batches',()=>{
- expect(()=>InventoryAvailabilityService.getAvailability({organizationId:org,medicineId:medicine,locationType:'STORE'})).toThrow('Medicine not found');
- expect(InventoryValuationService.getValuation({organizationId:org}).totalUnitsOnHand).toBe(0);
- expect(InventoryClassificationEngine.getAgeingAnalysis({organizationId:org}).totalStockCostPaise).toBe(0);
- expect(InventoryReconciliationServiceV2.reconcile({organizationId:org}).diagnostics).toEqual([]);
- expect(ExpiryIntelligenceEngine.getExpiryRiskItems({organizationId:org}).items).toEqual([]);
+test('availability, valuation, ageing, expiry and reconciliation never include another organization’s batches',async ()=>{
+ await expect((async ()=>(await InventoryAvailabilityService.getAvailability({organizationId:org,medicineId:medicine,locationType:'STORE'})))()).rejects.toThrow('Medicine not found');
+ expect((await InventoryValuationService.getValuation({organizationId:org})).totalUnitsOnHand).toBe(0);
+ expect((await InventoryClassificationEngine.getAgeingAnalysis({organizationId:org})).totalStockCostPaise).toBe(0);
+ expect((await InventoryReconciliationServiceV2.reconcile({organizationId:org})).diagnostics).toEqual([]);
+ expect((await ExpiryIntelligenceEngine.getExpiryRiskItems({organizationId:org})).items).toEqual([]);
 });

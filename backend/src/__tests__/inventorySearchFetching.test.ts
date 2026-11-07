@@ -35,10 +35,10 @@ test('billing search returns scoped FEFO stock in one bounded query', async () =
   const response = await request(app).get('/inventory/medicines/search?q=Medicine&include_substitutes=false');
   expect(response.status).toBe(200);
   expect(raw).toHaveBeenCalledTimes(1);
-  expect(raw.mock.calls[0][0]).toContain('LEFT JOIN LATERAL');
-  expect(raw.mock.calls[0][0]).toContain('b.clinic_id = page.clinic_id');
-  expect(raw.mock.calls[0][0]).toContain('b.expiry_date >= ?');
-  expect(raw.mock.calls[0][0]).toContain('b.is_disposed = false');
+  expect(raw.mock.calls[0][0]).toContain('WITH page AS MATERIALIZED');
+  expect(raw.mock.calls[0][0]).toContain('keys.clinic_id=b.clinic_id');
+  expect(raw.mock.calls[0][0]).toContain('b.expiry_date>=?');
+  expect(raw.mock.calls[0][0]).toContain('b.is_disposed IS NOT TRUE');
   expect(raw.mock.calls[0][1]).toEqual(['%Medicine%', '%Medicine%', 'clinic-a', 'Medicine', 'Medicine%', 25, expect.any(String), 'Medicine', 'Medicine%']);
   expect(response.body.results[0].total_stock).toBe(10);
   expect(response.body.results[0].medicine_batches.map((batch: any) => batch.id)).toEqual(['early', 'late']);
@@ -80,26 +80,23 @@ test('attention counts use one aggregated query scoped to the clinic and the req
   expect(all).not.toHaveBeenCalled();
 });
 
-test('medicine list reads products and their stock together and groups stock per product', async () => {
-  let resolveMedicines: (rows: any[]) => void = () => {};
-  all.mockReturnValue(new Promise(resolve => { resolveMedicines = resolve; }));
-  raw.mockImplementation(async () => {
-    resolveMedicines([
-      { id: 'med-a', name: 'A', low_stock_threshold: 10 },
-      { id: 'med-b', name: 'B', low_stock_threshold: 3 },
-    ]);
-    return [
-      { id: 'a-1', medicine_id: 'med-a', quantity_remaining: 3 },
-      { id: 'b-1', medicine_id: 'med-b', quantity_remaining: 4 },
-      { id: 'a-2', medicine_id: 'med-a', quantity_remaining: 4 },
-    ];
-  });
+test('medicine list reads batches only for the filtered product IDs and groups stock', async () => {
+  const first = '11111111-1111-4111-8111-111111111111';
+  const second = '22222222-2222-4222-8222-222222222222';
+  all.mockResolvedValue([
+    { id:first, name:'A', low_stock_threshold:10 }, { id:second, name:'B', low_stock_threshold:3 },
+  ]);
+  raw.mockResolvedValue([
+    { id:'a-1', medicine_id:first, quantity_remaining:3 },
+    { id:'b-1', medicine_id:second, quantity_remaining:4 },
+    { id:'a-2', medicine_id:first, quantity_remaining:4 },
+  ]);
   const response = await request(app).get('/inventory/medicines?q=Para&low_stock=true');
   expect(response.status).toBe(200);
   const where = 'is_active=true AND clinic_id=? AND (name ILIKE ? OR generic_name ILIKE ?)';
   expect(all.mock.calls[0].slice(1)).toEqual([where, ['clinic-a', '%Para%', '%Para%']]);
-  expect(raw.mock.calls[0][0]).toContain(`EXISTS (SELECT 1 FROM medicines WHERE deleted_at IS NULL AND (${where})`);
-  expect(raw.mock.calls[0][1]).toEqual(['clinic-a', '%Para%', '%Para%', 'clinic-a']);
+  expect(raw.mock.calls[0][0]).toContain('medicine_batches.medicine_id=ANY(?::uuid[])');
+  expect(raw.mock.calls[0][1]).toEqual([[first,second], 'clinic-a']);
   expect(response.body.data.map((med: any) => [med.id, med.total_stock, med.medicine_batches.map((b: any) => b.id)]))
-    .toEqual([['med-a', 7, ['a-1', 'a-2']]]);
+    .toEqual([[first, 7, ['a-1', 'a-2']]]);
 });

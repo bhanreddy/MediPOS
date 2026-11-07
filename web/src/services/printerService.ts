@@ -14,6 +14,7 @@ export const PrinterService = {
     async printBill(sale: Sale, items: SaleItem[]) {
         try {
             const saleData = sale as any;
+            const snapshot = saleData.invoice_snapshot;
             const toNumber = (value: unknown, fallback = 0) => {
                 const parsed = Number(value);
                 return Number.isFinite(parsed) ? parsed : fallback;
@@ -63,8 +64,16 @@ export const PrinterService = {
                 };
             }
 
+            if (snapshot?.seller) {
+                profile = {
+                    ...profile, medical_name: snapshot.seller.name || profile.medical_name,
+                    gst_number: snapshot.seller.gstin || '', drug_license_number: snapshot.seller.drug_licence || '',
+                    address_line_1: snapshot.seller.address || '', address_line_2: '', city: '', state: '', pincode: '',
+                };
+            }
+
             // 2. Fetch Customer if attached
-            let customerName = saleData.customers?.name;
+            let customerName = snapshot?.buyer?.name || saleData.customers?.name;
             let customerPhone = saleData.customers?.phone;
             if (sale.customer_id && !customerName) {
                 try {
@@ -78,9 +87,10 @@ export const PrinterService = {
 
             // 3. Hydrate Items (Fetch Name & Batch Info)
             const enrichedItems = await Promise.all(items.map(async (item: any) => {
-                let productName = item.medicines?.name || '';
-                let batchNumber = item.medicine_batches?.batch_number || '';
-                let expiryDate = item.medicine_batches?.expiry_date || '';
+                const line = item.invoice_line_snapshot;
+                let productName = line?.product_name || item.medicines?.name || '';
+                let batchNumber = line?.batch_number || item.medicine_batches?.batch_number || '';
+                let expiryDate = line?.expiry_date || item.medicine_batches?.expiry_date || '';
                 const quantity = toNumber(item.quantity);
                 const unitPrice = toNumber(item.unit_price ?? item.mrp ?? item.price);
                 const gstRate = toNumber(item.gst_rate);
@@ -115,7 +125,9 @@ export const PrinterService = {
                     productName,
                     quantity,
                     unitPrice,
-                    total,
+                    total: line ? Number(line.gross_paise) / 100 : total,
+                    manufacturer: line?.manufacturer, hsn: line?.hsn_code, unit: line?.unit,
+                    taxableAmount: line ? Number(line.taxable_paise) / 100 : undefined,
                     gstRate,
                     discountPercent,
                 };
@@ -126,9 +138,19 @@ export const PrinterService = {
                 shopProfile: profile,
                 customerName,
                 customerPhone,
+                customerAddress: snapshot?.buyer?.address, customerGstin: snapshot?.buyer?.gstin,
+                deliveryAddress: snapshot?.delivery_address, placeOfSupply: snapshot?.place_of_supply,
+                taxableAmount: snapshot ? Number(snapshot.taxable_paise) / 100 : undefined,
+                cgst: snapshot ? Number(snapshot.cgst_paise) / 100 : undefined,
+                sgst: snapshot ? Number(snapshot.sgst_paise) / 100 : undefined,
+                igst: snapshot ? Number(snapshot.igst_paise) / 100 : undefined,
+                interstate: snapshot?.is_interstate, isTaxInvoice: !!snapshot?.seller?.gstin,
+                pharmacist: snapshot?.pharmacist ? `${snapshot.pharmacist.name} · ${snapshot.pharmacist.registration}` : undefined,
+                prescriber: snapshot?.prescriber ? `${snapshot.prescriber.name} · ${snapshot.prescriber.registration}` : undefined,
+                prescriptionReference: snapshot?.prescription_reference,
                 invoiceNumber: saleData.invoice_number || 'Draft',
-                date: invoiceDate.toLocaleDateString('en-IN', { day: '2-digit', month: 'short', year: 'numeric' }),
-                time: invoiceDate.toLocaleTimeString('en-IN', { hour: '2-digit', minute: '2-digit', hour12: true }),
+                date: invoiceDate.toLocaleDateString('en-IN', { day: '2-digit', month: 'short', year: 'numeric', timeZone: 'Asia/Kolkata' }),
+                time: invoiceDate.toLocaleTimeString('en-IN', { hour: '2-digit', minute: '2-digit', hour12: true, timeZone: 'Asia/Kolkata' }),
                 items: enrichedItems,
                 subtotal,
                 gstAmount,

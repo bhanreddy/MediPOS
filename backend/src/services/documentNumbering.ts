@@ -1,4 +1,4 @@
-import { localDb } from '../local-db';
+import { businessDb as localDb } from '../lib/businessDb';
 import { v4 as uuidv4 } from 'uuid';
 import { DocumentType } from '../domain/units';
 
@@ -71,7 +71,7 @@ export class DocumentNumberingService {
   /**
    * Generates the next sequential document number atomically.
    */
-  static generate(options: GenerateDocNumberOptions): string {
+  static async generate(options: GenerateDocNumberOptions): Promise<string> {
     const {
       organizationId,
       storeId = null,
@@ -81,15 +81,19 @@ export class DocumentNumberingService {
       customPrefix,
     } = options;
 
+    if (process.env.DATABASE_URL) {
+      const { postgresQuery } = await import('../lib/postgresDb');
+      await postgresQuery('SELECT pg_advisory_xact_lock(hashtextextended($1,0))',[`document:${organizationId}:${storeId || ''}:${documentType}:${financialYearId || ''}`]);
+    }
     const fyCode = this.getFinancialYearCode(date);
     const nowIso = new Date().toISOString();
 
     // Resolve store_code if storeId provided
     let storeCode = 'MAIN';
     if (storeId) {
-      const storeRow: any = localDb
+      const storeRow: any = (await localDb
         .prepare('SELECT store_code FROM stores WHERE id = ? OR _local_id = ?')
-        .get(storeId, storeId);
+        .get(storeId, storeId));
       if (storeRow?.store_code) {
         storeCode = storeRow.store_code;
       }
@@ -98,47 +102,47 @@ export class DocumentNumberingService {
     const defaultPrefix = customPrefix || this.getDefaultPrefix(documentType, storeCode);
 
     // Atomically find or create sequence record inside transaction
-    const getNextNumberTx = localDb.transaction(() => {
+    const getNextNumberTx = localDb.transaction(async () => {
       // Find matching sequence configuration
       let seqRow: any;
       if (storeId && financialYearId) {
-        seqRow = localDb
+        seqRow = (await localDb
           .prepare(
             `SELECT * FROM document_sequences 
              WHERE organization_id = ? AND store_id = ? AND document_type = ? AND financial_year_id = ?
              LIMIT 1`
           )
-          .get(organizationId, storeId, documentType, financialYearId);
+          .get(organizationId, storeId, documentType, financialYearId));
       } else if (storeId && !financialYearId) {
-        seqRow = localDb
+        seqRow = (await localDb
           .prepare(
             `SELECT * FROM document_sequences 
              WHERE organization_id = ? AND store_id = ? AND document_type = ?
              LIMIT 1`
           )
-          .get(organizationId, storeId, documentType);
+          .get(organizationId, storeId, documentType));
       } else if (!storeId && financialYearId) {
-        seqRow = localDb
+        seqRow = (await localDb
           .prepare(
             `SELECT * FROM document_sequences 
              WHERE organization_id = ? AND store_id IS NULL AND document_type = ? AND financial_year_id = ?
              LIMIT 1`
           )
-          .get(organizationId, documentType, financialYearId);
+          .get(organizationId, documentType, financialYearId));
       } else {
-        seqRow = localDb
+        seqRow = (await localDb
           .prepare(
             `SELECT * FROM document_sequences 
              WHERE organization_id = ? AND store_id IS NULL AND document_type = ?
              LIMIT 1`
           )
-          .get(organizationId, documentType);
+          .get(organizationId, documentType));
       }
 
       if (!seqRow) {
         // Insert new sequence configuration
         const newSeqId = uuidv4();
-        localDb
+        (await localDb
           .prepare(
             `INSERT OR REPLACE INTO document_sequences (
                id, _local_id, organization_id, store_id, document_type, financial_year_id,
@@ -156,7 +160,7 @@ export class DocumentNumberingService {
             nowIso,
             nowIso,
             nowIso
-          );
+          ));
 
         return {
           prefix: defaultPrefix,
@@ -167,13 +171,13 @@ export class DocumentNumberingService {
       } else {
         // Increment sequence atomically
         const newSeq = (seqRow.current_sequence || 0) + 1;
-        localDb
+        (await localDb
           .prepare(
             `UPDATE document_sequences 
              SET current_sequence = ?, updated_at = ?, _updated_at = ?
              WHERE _local_id = ? OR id = ?`
           )
-          .run(newSeq, nowIso, nowIso, seqRow._local_id, seqRow.id);
+          .run(newSeq, nowIso, nowIso, seqRow._local_id, seqRow.id));
 
         return {
           prefix: seqRow.prefix || defaultPrefix,
@@ -184,7 +188,7 @@ export class DocumentNumberingService {
       }
     });
 
-    const result = getNextNumberTx();
+    const result = (await getNextNumberTx());
     const paddedSeq = String(result.sequence).padStart(result.padding, '0');
     
     // Format: PREFIX/FY/SEQUENCE or PREFIX-SEQUENCE

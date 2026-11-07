@@ -38,7 +38,7 @@ describe('Task 4 — Prescription Management, Pharmacist Verification & Pharmacy
   let pharmacistToken: string;
   let cashierToken: string;
 
-  beforeAll(() => {
+  beforeAll(async () => {
     orgId = `org_rx_${Date.now()}`;
     storeAId = `store_rx_a_${Date.now()}`;
     storeBId = `store_rx_b_${Date.now()}`;
@@ -53,7 +53,7 @@ describe('Task 4 — Prescription Management, Pharmacist Verification & Pharmacy
     batchAzithro1Id = `btc_azithro_${Date.now()}`;
 
     // 1. Setup Organization & Stores
-    localMutate({
+    (await localMutate({
       table: 'organizations',
       operation: 'INSERT',
       data: {
@@ -66,9 +66,9 @@ describe('Task 4 — Prescription Management, Pharmacist Verification & Pharmacy
         status: 'ACTIVE',
         created_at: new Date().toISOString(),
       },
-    });
+    }));
 
-    localMutate({
+    (await localMutate({
       table: 'stores',
       operation: 'INSERT',
       data: {
@@ -84,9 +84,9 @@ describe('Task 4 — Prescription Management, Pharmacist Verification & Pharmacy
         pincode: '500034',
         created_at: new Date().toISOString(),
       },
-    });
+    }));
 
-    localMutate({
+    (await localMutate({
       table: 'stores',
       operation: 'INSERT',
       data: {
@@ -102,9 +102,9 @@ describe('Task 4 — Prescription Management, Pharmacist Verification & Pharmacy
         pincode: '500003',
         created_at: new Date().toISOString(),
       },
-    });
+    }));
 
-    localMutate({
+    (await localMutate({
       table: 'counters',
       operation: 'INSERT',
       data: {
@@ -116,9 +116,9 @@ describe('Task 4 — Prescription Management, Pharmacist Verification & Pharmacy
         name: 'Counter 1',
         created_at: new Date().toISOString(),
       },
-    });
+    }));
 
-    localMutate({
+    (await localMutate({
       table: 'terminals',
       operation: 'INSERT',
       data: {
@@ -132,10 +132,10 @@ describe('Task 4 — Prescription Management, Pharmacist Verification & Pharmacy
         terminal_name: 'Terminal 1',
         created_at: new Date().toISOString(),
       },
-    });
+    }));
 
     // 2. Setup Cashier & Pharmacist Users
-    localMutate({
+    (await localMutate({
       table: 'users',
       operation: 'INSERT',
       data: {
@@ -147,9 +147,9 @@ describe('Task 4 — Prescription Management, Pharmacist Verification & Pharmacy
         is_active: 1,
         created_at: new Date().toISOString(),
       },
-    });
+    }));
 
-    localMutate({
+    (await localMutate({
       table: 'users',
       operation: 'INSERT',
       data: {
@@ -161,9 +161,9 @@ describe('Task 4 — Prescription Management, Pharmacist Verification & Pharmacy
         is_active: 1,
         created_at: new Date().toISOString(),
       },
-    });
+    }));
 
-    localMutate({
+    (await localMutate({
       table: 'user_organization_access',
       operation: 'INSERT',
       data: {
@@ -175,9 +175,9 @@ describe('Task 4 — Prescription Management, Pharmacist Verification & Pharmacy
         is_active: 1,
         created_at: new Date().toISOString(),
       },
-    });
+    }));
 
-    localMutate({
+    (await localMutate({
       table: 'user_organization_access',
       operation: 'INSERT',
       data: {
@@ -189,9 +189,9 @@ describe('Task 4 — Prescription Management, Pharmacist Verification & Pharmacy
         is_active: 1,
         created_at: new Date().toISOString(),
       },
-    });
+    }));
 
-    localMutate({
+    (await localMutate({
       table: 'user_store_access',
       operation: 'INSERT',
       data: {
@@ -205,9 +205,9 @@ describe('Task 4 — Prescription Management, Pharmacist Verification & Pharmacy
         is_active: 1,
         created_at: new Date().toISOString(),
       },
-    });
+    }));
 
-    localMutate({
+    (await localMutate({
       table: 'user_store_access',
       operation: 'INSERT',
       data: {
@@ -221,10 +221,10 @@ describe('Task 4 — Prescription Management, Pharmacist Verification & Pharmacy
         is_active: 1,
         created_at: new Date().toISOString(),
       },
-    });
+    }));
 
     // 3. Setup Patient & Medicines
-    localMutate({
+    (await localMutate({
       table: 'customers',
       operation: 'INSERT',
       data: {
@@ -235,10 +235,10 @@ describe('Task 4 — Prescription Management, Pharmacist Verification & Pharmacy
         phone: '9876543210',
         created_at: new Date().toISOString(),
       },
-    });
+    }));
 
     // Paracetamol (OTC)
-    localMutate({
+    (await localMutate({
       table: 'medicines',
       operation: 'INSERT',
       data: {
@@ -253,10 +253,10 @@ describe('Task 4 — Prescription Management, Pharmacist Verification & Pharmacy
         schedule_classification: 'NONE',
         created_at: new Date().toISOString(),
       },
-    });
+    }));
 
     // Azithromycin (Rx Required)
-    localMutate({
+    (await localMutate({
       table: 'medicines',
       operation: 'INSERT',
       data: {
@@ -270,12 +270,12 @@ describe('Task 4 — Prescription Management, Pharmacist Verification & Pharmacy
         schedule_classification: 'SCHEDULE_H1',
         created_at: new Date().toISOString(),
       },
-    });
+    }));
 
     // Batches
     const futureDate = new Date(Date.now() + 365 * 24 * 60 * 60 * 1000).toISOString().split('T')[0];
 
-    localMutate({
+    (await localMutate({
       table: 'medicine_batches',
       operation: 'INSERT',
       data: {
@@ -291,9 +291,9 @@ describe('Task 4 — Prescription Management, Pharmacist Verification & Pharmacy
         expiry_date: futureDate,
         created_at: new Date().toISOString(),
       },
-    });
+    }));
 
-    localMutate({
+    (await localMutate({
       table: 'medicine_batches',
       operation: 'INSERT',
       data: {
@@ -309,7 +309,7 @@ describe('Task 4 — Prescription Management, Pharmacist Verification & Pharmacy
         expiry_date: futureDate,
         created_at: new Date().toISOString(),
       },
-    });
+    }));
 
     // 4. User Tokens
     pharmacistToken = jwt.sign(
@@ -325,36 +325,36 @@ describe('Task 4 — Prescription Management, Pharmacist Verification & Pharmacy
 
   // ── 1. Doctor Master & Snapshot Retention ───────────────────
   describe('1. Doctor Master & Snapshot Preservation', () => {
-    test('creates doctor master record and finds by registration number', () => {
+    test('creates doctor master record and finds by registration number', async () => {
       const regNum = `MCI-TEST-${Date.now()}`;
-      const doc = DoctorService.createDoctor({
+      const doc = (await DoctorService.createDoctor({
         organizationId: orgId,
         name: 'Dr. Vikram Seth',
         registrationNumber: regNum,
         specialization: 'Pulmonology',
         clinicHospital: 'Apollo Hospital',
-      });
+      }));
 
       expect(doc.name).toBe('Dr. Vikram Seth');
       expect(doc.registration_number).toBe(regNum);
 
-      const found = DoctorService.findOrCreateByRegistration({
+      const found = (await DoctorService.findOrCreateByRegistration({
         organizationId: orgId,
         name: 'Dr. Vikram Seth Updated',
         registrationNumber: regNum,
-      });
+      }));
 
       expect(found.id || found._local_id).toBe(doc.id || doc._local_id);
     });
 
-    test('retains doctor name and registration snapshots on prescription creation', () => {
-      const { prescription } = PrescriptionService.createPrescription({
+    test('retains doctor name and registration snapshots on prescription creation', async () => {
+      const { prescription } = (await PrescriptionService.createPrescription({
         organizationId: orgId,
         doctorName: 'Dr. Historical Snapshot',
         doctorRegistrationNumber: 'REG-HIST-100',
         documentUrl: 'prescriptions/hist.pdf',
         items: [{ raw_text: 'Tab Paracetamol 650mg', prescribed_name: 'Paracetamol 650mg', prescribed_quantity: 10 }],
-      });
+      }));
 
       expect(prescription.doctor_name_snapshot).toBe('Dr. Historical Snapshot');
       expect(prescription.doctor_registration_number_snapshot).toBe('REG-HIST-100');
@@ -387,24 +387,24 @@ describe('Task 4 — Prescription Management, Pharmacist Verification & Pharmacy
       expect(invalidMime.errorMessage).toContain('Unsupported MIME type');
     });
 
-    test('warns when duplicate document hash is uploaded', () => {
+    test('warns when duplicate document hash is uploaded', async () => {
       const docHash = 'hash_duplicate_12345';
-      const rx1 = PrescriptionService.createPrescription({
+      const rx1 = (await PrescriptionService.createPrescription({
         organizationId: orgId,
         doctorName: 'Dr. Hash',
         doctorRegistrationNumber: 'REG-HASH',
         documentUrl: 'prescriptions/hash1.pdf',
         documentHash: docHash,
-      });
+      }));
       expect(rx1.isDuplicateHashWarning).toBe(false);
 
-      const rx2 = PrescriptionService.createPrescription({
+      const rx2 = (await PrescriptionService.createPrescription({
         organizationId: orgId,
         doctorName: 'Dr. Hash 2',
         doctorRegistrationNumber: 'REG-HASH',
         documentUrl: 'prescriptions/hash2.pdf',
         documentHash: docHash,
-      });
+      }));
       expect(rx2.isDuplicateHashWarning).toBe(true);
     });
   });
@@ -426,8 +426,8 @@ describe('Task 4 — Prescription Management, Pharmacist Verification & Pharmacy
   describe('4. Pharmacist Verification Queue, Review & Rejection', () => {
     let testRxId: string;
 
-    test('creates prescription in NEEDS_REVIEW status and assigns to queue', () => {
-      const { prescription } = PrescriptionService.createPrescription({
+    test('creates prescription in NEEDS_REVIEW status and assigns to queue', async () => {
+      const { prescription } = (await PrescriptionService.createPrescription({
         organizationId: orgId,
         storeId: storeAId,
         patientId,
@@ -435,55 +435,55 @@ describe('Task 4 — Prescription Management, Pharmacist Verification & Pharmacy
         doctorRegistrationNumber: 'REG-QUEUE-100',
         documentUrl: 'prescriptions/q.pdf',
         items: [{ raw_text: 'Tab Azithromycin 500mg 1-0-0 x 3 days', prescribed_name: 'Azithromycin 500mg', matched_product_id: medAzithromycinId, prescribed_quantity: 5 }],
-      });
+      }));
 
       testRxId = prescription.id || prescription._local_id!;
       expect(prescription.status).toBe('NEEDS_REVIEW');
       expect(prescription.verification_status).toBe('UNVERIFIED');
     });
 
-    test('pharmacist claims prescription queue item', () => {
-      const claimed = PrescriptionService.claimPrescription({
+    test('pharmacist claims prescription queue item', async () => {
+      const claimed = (await PrescriptionService.claimPrescription({
         prescriptionId: testRxId,
         pharmacistId,
-      });
+      }));
 
       expect(claimed.assigned_to).toBe(pharmacistId);
       expect(claimed.verification_status).toBe('IN_REVIEW');
     });
 
-    test('pharmacist verifies prescription item match and updates status', () => {
-      const verified = PrescriptionService.verifyPrescription({
+    test('pharmacist verifies prescription item match and updates status', async () => {
+      const verified = (await PrescriptionService.verifyPrescription({
         prescriptionId: testRxId,
         verifiedBy: pharmacistId,
         itemUpdates: [{
-          itemId: PrescriptionService.getPrescriptionById(testRxId)!.items![0].id!,
+          itemId: (await PrescriptionService.getPrescriptionById(testRxId))!.items![0].id!,
           matchedProductId: medAzithromycinId,
           prescribedQuantity: 5,
         }],
         notes: 'Verified against doctor registration database',
-      });
+      }));
 
       expect(verified.verification_status).toBe('VERIFIED');
       expect(verified.status).toBe('VERIFIED');
       expect(verified.verified_by).toBe(pharmacistId);
     });
 
-    test('pharmacist rejects invalid prescription with structured reason', () => {
-      const { prescription } = PrescriptionService.createPrescription({
+    test('pharmacist rejects invalid prescription with structured reason', async () => {
+      const { prescription } = (await PrescriptionService.createPrescription({
         organizationId: orgId,
         doctorName: 'Dr. Blur',
         doctorRegistrationNumber: 'REG-BLUR',
         documentUrl: 'prescriptions/blur.pdf',
-      });
+      }));
 
       const pId = prescription.id || prescription._local_id!;
-      const rejected = PrescriptionService.rejectPrescription({
+      const rejected = (await PrescriptionService.rejectPrescription({
         prescriptionId: pId,
         rejectedBy: pharmacistId,
         rejectionReason: 'UNREADABLE',
         notes: 'Image is completely blurry',
-      });
+      }));
 
       expect(rejected.status).toBe('REJECTED');
       expect(rejected.verification_status).toBe('REJECTED');
@@ -496,8 +496,8 @@ describe('Task 4 — Prescription Management, Pharmacist Verification & Pharmacy
     let rxId: string;
     let rxItemId: string;
 
-    beforeAll(() => {
-      const { prescription } = PrescriptionService.createPrescription({
+    beforeAll(async () => {
+      const { prescription } = (await PrescriptionService.createPrescription({
         organizationId: orgId,
         storeId: storeAId,
         patientId,
@@ -505,23 +505,23 @@ describe('Task 4 — Prescription Management, Pharmacist Verification & Pharmacy
         doctorRegistrationNumber: 'REG-DISP-100',
         documentUrl: 'prescriptions/disp.pdf',
         items: [{ raw_text: 'Tab Azithromycin 500mg 1-0-0 x 30 days', prescribed_name: 'Azithromycin 500mg', matched_product_id: medAzithromycinId, prescribed_quantity: 30, repeats_authorized: 1 }],
-      });
+      }));
 
       rxId = prescription.id || prescription._local_id!;
-      PrescriptionService.verifyPrescription({ prescriptionId: rxId, verifiedBy: pharmacistId });
-      rxItemId = PrescriptionService.getPrescriptionById(rxId)!.items![0].id!;
+      (await PrescriptionService.verifyPrescription({ prescriptionId: rxId, verifiedBy: pharmacistId }));
+      rxItemId = (await PrescriptionService.getPrescriptionById(rxId))!.items![0].id!;
     });
 
-    test('allows partial dispensing of 10 tablets and updates status to PARTIALLY_DISPENSED', () => {
-      const val = DispensingEngine.validateDispensing({
+    test('allows partial dispensing of 10 tablets and updates status to PARTIALLY_DISPENSED', async () => {
+      const val = (await DispensingEngine.validateDispensing({
         prescriptionId: rxId,
         prescriptionItemId: rxItemId,
         requestedQuantity: 10,
-      });
+      }));
 
       expect(val.allowed).toBe(true);
 
-      const event = DispensingEngine.recordDispensing({
+      const event = (await DispensingEngine.recordDispensing({
         organizationId: orgId,
         storeId: storeAId,
         terminalId,
@@ -531,27 +531,27 @@ describe('Task 4 — Prescription Management, Pharmacist Verification & Pharmacy
         batchId: batchAzithro1Id,
         quantityDispensed: 10,
         dispensedBy: pharmacistId,
-      });
+      }));
 
       expect(event.quantity_dispensed).toBe(10);
-      const updatedRx = PrescriptionService.getPrescriptionById(rxId)!;
+      const updatedRx = (await PrescriptionService.getPrescriptionById(rxId))!;
       expect(updatedRx.status).toBe('PARTIALLY_DISPENSED');
       expect(updatedRx.items![0].dispensed_quantity).toBe(10);
     });
 
-    test('blocks over-dispensing beyond remaining allowed quantity', () => {
+    test('blocks over-dispensing beyond remaining allowed quantity', async () => {
       // Total allowed = 30 * (1 + 1 repeat) = 60. Already dispensed: 10. Remaining: 50.
-      const overVal = DispensingEngine.validateDispensing({
+      const overVal = (await DispensingEngine.validateDispensing({
         prescriptionId: rxId,
         prescriptionItemId: rxItemId,
         requestedQuantity: 51,
-      });
+      }));
 
       expect(overVal.allowed).toBe(false);
       expect(overVal.errorMessage).toContain('Dispensing limit exceeded');
 
-      expect(() => {
-        DispensingEngine.recordDispensing({
+      await expect((async () => {
+        (await DispensingEngine.recordDispensing({
           organizationId: orgId,
           storeId: storeAId,
           prescriptionId: rxId,
@@ -560,12 +560,12 @@ describe('Task 4 — Prescription Management, Pharmacist Verification & Pharmacy
           batchId: batchAzithro1Id,
           quantityDispensed: 51,
           dispensedBy: pharmacistId,
-        });
-      }).toThrow('Dispensing limit exceeded');
+        }));
+      })()).rejects.toThrow('Dispensing limit exceeded');
     });
 
-    test('dispenses remaining 50 units and updates status to DISPENSED', () => {
-      DispensingEngine.recordDispensing({
+    test('dispenses remaining 50 units and updates status to DISPENSED', async () => {
+      (await DispensingEngine.recordDispensing({
         organizationId: orgId,
         storeId: storeAId,
         prescriptionId: rxId,
@@ -574,14 +574,14 @@ describe('Task 4 — Prescription Management, Pharmacist Verification & Pharmacy
         batchId: batchAzithro1Id,
         quantityDispensed: 50,
         dispensedBy: pharmacistId,
-      });
+      }));
 
-      const updatedRx = PrescriptionService.getPrescriptionById(rxId)!;
+      const updatedRx = (await PrescriptionService.getPrescriptionById(rxId))!;
       expect(updatedRx.status).toBe('DISPENSED');
       expect(updatedRx.items![0].dispensed_quantity).toBe(60);
 
       // Verify Refill Eligibility transition to EXHAUSTED
-      const refill = DispensingEngine.getRefillEligibility(rxId, rxItemId);
+      const refill = (await DispensingEngine.getRefillEligibility(rxId, rxItemId));
       expect(refill.status).toBe('EXHAUSTED');
     });
   });
@@ -590,8 +590,8 @@ describe('Task 4 — Prescription Management, Pharmacist Verification & Pharmacy
   describe('6. POS Prescription Gating Integration & Mixed Cart', () => {
     let verifiedRxId: string;
 
-    beforeAll(() => {
-      const { prescription } = PrescriptionService.createPrescription({
+    beforeAll(async () => {
+      const { prescription } = (await PrescriptionService.createPrescription({
         organizationId: orgId,
         storeId: storeAId,
         patientId,
@@ -599,10 +599,10 @@ describe('Task 4 — Prescription Management, Pharmacist Verification & Pharmacy
         doctorRegistrationNumber: 'REG-GATE-100',
         documentUrl: 'prescriptions/gate.pdf',
         items: [{ raw_text: 'Tab Azithromycin 500mg x 5 days', prescribed_name: 'Azithromycin 500mg', matched_product_id: medAzithromycinId, prescribed_quantity: 5 }],
-      });
+      }));
 
       verifiedRxId = prescription.id || prescription._local_id!;
-      PrescriptionService.verifyPrescription({ prescriptionId: verifiedRxId, verifiedBy: pharmacistId });
+      (await PrescriptionService.verifyPrescription({ prescriptionId: verifiedRxId, verifiedBy: pharmacistId }));
     });
 
     test('allows OTC product checkout without prescription requirement', async () => {
@@ -656,13 +656,13 @@ describe('Task 4 — Prescription Management, Pharmacist Verification & Pharmacy
       expect(res.body.data.sale).toBeDefined();
 
       // Verify Dispensing Event was automatically created
-      const history = DispensingEngine.getDispensingHistory(verifiedRxId);
+      const history = (await DispensingEngine.getDispensingHistory(verifiedRxId));
       expect(history.length).toBeGreaterThan(0);
       expect(history[0].product_id).toBe(medAzithromycinId);
     });
 
     test('handles mixed cart with OTC items and verified Rx items cleanly', async () => {
-      const { prescription: mixRx } = PrescriptionService.createPrescription({
+      const { prescription: mixRx } = (await PrescriptionService.createPrescription({
         organizationId: orgId,
         storeId: storeAId,
         patientId,
@@ -670,10 +670,10 @@ describe('Task 4 — Prescription Management, Pharmacist Verification & Pharmacy
         doctorRegistrationNumber: 'REG-MIX-100',
         documentUrl: 'prescriptions/mix.pdf',
         items: [{ raw_text: 'Tab Azithromycin 500mg x 3 days', prescribed_name: 'Azithromycin 500mg', matched_product_id: medAzithromycinId, prescribed_quantity: 3 }],
-      });
+      }));
 
       const mRxId = mixRx.id || mixRx._local_id!;
-      PrescriptionService.verifyPrescription({ prescriptionId: mRxId, verifiedBy: pharmacistId });
+      (await PrescriptionService.verifyPrescription({ prescriptionId: mRxId, verifiedBy: pharmacistId }));
 
       const res = await request(app)
         .post('/api/pos/checkout')
@@ -698,20 +698,20 @@ describe('Task 4 — Prescription Management, Pharmacist Verification & Pharmacy
 
   // ── 7. Pharmacy Safety: Allergy, Duplicate Ingredient & Drug Knowledge ─
   describe('7. Pharmacy Safety: Allergy, Duplicate Ingredient & Drug Knowledge', () => {
-    test('records patient allergy and generates warning match during checking', () => {
-      PatientAllergyService.recordAllergy({
+    test('records patient allergy and generates warning match during checking', async () => {
+      (await PatientAllergyService.recordAllergy({
         organizationId: orgId,
         patientId,
         allergen: 'Azithromycin',
         allergenType: 'INGREDIENT',
         severity: 'SEVERE',
-      });
+      }));
 
-      const match = PatientAllergyService.checkAllergyMatch({
+      const match = (await PatientAllergyService.checkAllergyMatch({
         patientId,
         medicineName: 'Azithromycin 500mg Tablet',
         composition: 'Azithromycin 500 mg',
-      });
+      }));
 
       expect(match.hasMatch).toBe(true);
       expect(match.matchedAllergen).toBe('Azithromycin');
@@ -737,7 +737,7 @@ describe('Task 4 — Prescription Management, Pharmacist Verification & Pharmacy
       expect(provider.getInteractions()).toEqual([]);
     });
 
-    test('evaluates substitution policy and logs substitution event', () => {
+    test('evaluates substitution policy and logs substitution event', async () => {
       const evalRes = SubstitutionEngine.evaluateSubstitution({
         prescribedProductId: medParacetamolId,
         dispensedProductId: medAzithromycinId,
@@ -747,7 +747,7 @@ describe('Task 4 — Prescription Management, Pharmacist Verification & Pharmacy
       expect(evalRes.isSubstitution).toBe(true);
       expect(evalRes.policyStatus).toBe('PHARMACIST_APPROVAL_REQUIRED');
 
-      const subEvent = SubstitutionEngine.recordSubstitution({
+      const subEvent = (await SubstitutionEngine.recordSubstitution({
         organizationId: orgId,
         prescriptionId: uuidv4(),
         prescriptionItemId: uuidv4(),
@@ -758,7 +758,7 @@ describe('Task 4 — Prescription Management, Pharmacist Verification & Pharmacy
         substitutedBy: pharmacistId,
         reason: 'Original brand out of stock',
         customerConfirmed: true,
-      });
+      }));
 
       expect(subEvent.prescribed_name).toBe('Dolo 650');
       expect(subEvent.dispensed_name).toBe('Calpol 650');
@@ -768,7 +768,7 @@ describe('Task 4 — Prescription Management, Pharmacist Verification & Pharmacy
   // ── 8. Returns & Medication History Integration ──────────────────
   describe('8. Returns & Medication History Integration', () => {
     test('preserves historical dispensing events when sale return occurs', async () => {
-      const { prescription: retRx } = PrescriptionService.createPrescription({
+      const { prescription: retRx } = (await PrescriptionService.createPrescription({
         organizationId: orgId,
         storeId: storeAId,
         patientId,
@@ -776,10 +776,10 @@ describe('Task 4 — Prescription Management, Pharmacist Verification & Pharmacy
         doctorRegistrationNumber: 'REG-RET',
         documentUrl: 'prescriptions/ret.pdf',
         items: [{ raw_text: 'Tab Azithromycin 500mg x 10', prescribed_name: 'Azithromycin 500mg', matched_product_id: medAzithromycinId, prescribed_quantity: 10 }],
-      });
+      }));
 
       const rRxId = retRx.id || retRx._local_id!;
-      PrescriptionService.verifyPrescription({ prescriptionId: rRxId, verifiedBy: pharmacistId });
+      (await PrescriptionService.verifyPrescription({ prescriptionId: rRxId, verifiedBy: pharmacistId }));
 
       // Checkout
       const chkRes = await request(app)
@@ -799,7 +799,7 @@ describe('Task 4 — Prescription Management, Pharmacist Verification & Pharmacy
       const saleItem = chkRes.body.data.items[0];
 
       // Process Return of 2 items
-      const processRes = ReturnsEngine.processReturn({
+      const processRes = (await ReturnsEngine.processReturn({
         originalSaleId: sale.id || sale._local_id,
         items: [{
           sale_item_id: saleItem.id || saleItem._local_id,
@@ -810,18 +810,18 @@ describe('Task 4 — Prescription Management, Pharmacist Verification & Pharmacy
         organizationId: orgId,
         storeId: storeAId,
         performedBy: cashierId,
-      });
+      }));
 
       expect(processRes.creditNoteNumber).toBeDefined();
 
       // Verify dispensing events history remains intact (8 net physically retained, original 10 event preserved)
-      const history = DispensingEngine.getDispensingHistory(rRxId);
+      const history = (await DispensingEngine.getDispensingHistory(rRxId));
       expect(history.length).toBeGreaterThan(0);
       expect(history[0].quantity_dispensed).toBe(10);
     });
 
-    test('derives comprehensive patient medication history and active medications list', () => {
-      const history = PatientMedicationHistoryService.getPatientHistory(patientId);
+    test('derives comprehensive patient medication history and active medications list', async () => {
+      const history = (await PatientMedicationHistoryService.getPatientHistory(patientId));
       expect(history.patientId).toBe(patientId);
       expect(history.allergies.length).toBeGreaterThan(0);
       expect(history.prescriptions.length).toBeGreaterThan(0);

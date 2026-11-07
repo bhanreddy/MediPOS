@@ -1,8 +1,13 @@
+import { branchesRouter } from './branches';
+import { dispensingRouter } from './dispensing';
+import { counterRouter } from './counter';
+import { registerRouter } from './register';
+import { offlineRouter } from './offline';
 import { Router } from 'express';
 import { adminRouter } from './admin';
 import authRoutes from './auth.routes';
 import { requireAuth } from '../middleware/auth';
-import { localDb } from '../local-db';
+import { businessDb as localDb } from '../lib/businessDb';
 import { ensureCloudReferenceCatalog, invalidateCloudReferenceCatalog } from '../services/cloudReferenceCatalog';
 
 // Import all operational routers
@@ -50,15 +55,14 @@ routes.use((req, res, next) => {
   });
   next();
 });
-routes.use(['/procurement', '/commercial', '/prescriptions', '/patients', '/doctors', '/orders', '/barcodes'], requireAuth, async (req, _res, next) => {
-  try {
-    if (process.env.NODE_ENV === 'test' && process.env.CLOUD_REFERENCE_CATALOG_ENABLED !== 'true') return next();
-    if (req.user?.clinic_id) {
-      const clinic = localDb.prepare('SELECT organization_id FROM clinics WHERE id = ? OR _local_id = ?').get(req.user.clinic_id, req.user.clinic_id) as { organization_id?: string } | undefined;
-      await ensureCloudReferenceCatalog(req.user.clinic_id, clinic?.organization_id || req.user.clinic_id);
-    }
-    next();
-  } catch (error) { next(error); }
+
+const tenantPaths = ['/sales', '/purchases', '/expenses', '/inventory', '/suppliers', '/customers',
+  '/offline', '/wallet', '/devices', '/events', '/reports', '/accounting', '/analytics', '/shortbook',
+  '/whatsapp', '/bills', '/bulk', '/backup', '/barcodes', '/pos', '/commercial',
+  '/doctors', '/prescriptions', '/patients', '/procurement', '/transfers', '/warehouse', '/orders'];
+routes.use(tenantPaths, requireAuth, (req, res, next) => {
+  if (!req.user?.clinic_id) return res.status(403).json({ error: { code: 'TENANT_REQUIRED', message: 'Choose a clinic before accessing business data.' } });
+  next();
 });
 
 // Public routes
@@ -72,6 +76,7 @@ routes.use('/health', healthRouter);
 routes.use('/auth', authRouter);
 routes.use('/admin', adminRouter);
 routes.use('/sales', salesRouter);
+routes.use('/offline',offlineRouter);
 routes.use('/purchases', purchasesRouter);
 routes.use('/expenses', expensesRouter);
 routes.use('/inventory', inventoryRouter);
@@ -96,9 +101,13 @@ routes.use('/clinics', clinicsRouter);
 routes.use('/organizations', organizationsRouter);
 routes.use('/barcodes', barcodesRouter);
 routes.use('/pos', posRouter);
+routes.use('/register', registerRouter);
+routes.use('/counter', counterRouter);
 routes.use('/commercial', commercialRouter);
 routes.use('/doctors', doctorsRouter);
 routes.use('/prescriptions', prescriptionsRouter);
+routes.use('/dispensing', dispensingRouter);
+routes.use('/branches', branchesRouter);
 routes.use('/patients', patientsRouter);
 routes.use('/procurement', procurementRouter);
 routes.use('/transfers', transfersRouter);

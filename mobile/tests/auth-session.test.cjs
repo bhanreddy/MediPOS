@@ -225,6 +225,8 @@ function authStoreHarness(h) {
     '@/lib/secureStorage': { SecureStorage: h.storage },
     '@/lib/authEventEmitter': { authEventEmitter: h.emitter },
     '@/utils/storage': { store: {} },
+    '@/api/queryClient': { queryClient: { clear: () => { h.cleared = (h.cleared || 0) + 1; } } },
+    './cartStore': { useCartStore: { getState: () => ({ clearCart: () => { h.cartCleared = (h.cartCleared || 0) + 1; } }) } },
   }).useAuthStore;
 }
 test('a saved token survives startup even if the optional cached user profile is missing', async () => {
@@ -309,4 +311,43 @@ test('explicit logout clears a memory-only native session', async () => {
   assert.equal(await h.storage.getAccessToken(), null);
   assert.equal(await h.storage.getUser(), null);
   assert.equal(h.disk.size, 0);
+});
+
+test('mobile discards a successful old-account response after a new login', async () => {
+  const h = harness(); await h.storage.saveTokens('old', 'old-refresh');
+  const gate = deferred();
+  const { apiClient } = load('api/client.ts', {
+    axios, 'axios-retry': { __esModule: true, default: () => {}, exponentialDelay: () => 0, isNetworkError: () => false },
+    'react-native': { Platform: { OS: 'ios' } }, '@/lib/secureStorage': { SecureStorage: h.storage },
+    '@/lib/sessionRefresh': { refreshAccessToken: h.refresh },
+  });
+  apiClient.defaults.adapter = async config => {
+    await gate.promise;
+    return { data: { private: 'account-a' }, status: 200, headers: {}, config };
+  };
+  const pending = assert.rejects(apiClient.get('/customers'), /Session changed/);
+  await flush(); await h.storage.saveTokens('new-account', 'new-account-refresh');
+  gate.resolve(); await pending;
+});
+
+test('mobile account changes and logout clear cached queries and customer carts', async () => {
+  const h = harness(), auth = authStoreHarness(h);
+  const user = { id: 'user-a', clinicId: 'clinic-a', name: 'A', email: 'a@example.invalid', role: 'OWNER' };
+  auth.getState().setUser(user);
+  const before = h.cleared;
+  auth.getState().setUser({ ...user, id: 'user-b', clinicId: 'clinic-b' });
+  assert.ok(h.cleared > before); assert.equal(h.cartCleared, h.cleared);
+  const switched = h.cleared;
+  auth.getState().logout();
+  assert.ok(h.cleared > switched); assert.equal(auth.getState().user, null);
+});
+
+test('a restart between new login tokens and profile persistence cannot restore the previous account profile', async () => {
+  const h = harness();
+  await h.storage.saveTokens('account-a', 'refresh-a');
+  await h.storage.saveUser({ id: 'account-a', clinicId: 'clinic-a' });
+  await h.storage.saveTokens('account-b', 'refresh-b');
+  const restarted = load('lib/secureStorage.ts', { 'expo-secure-store': h.native }).SecureStorage;
+  assert.equal(await restarted.getAccessToken(), 'account-b');
+  assert.equal(await restarted.getUser(), null);
 });

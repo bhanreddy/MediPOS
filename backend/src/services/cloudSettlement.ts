@@ -1,3 +1,4 @@
+import { recordSupplierCloudPayment } from './supplierCloudPayments';
 import { WalletService } from "./wallet/walletService";
 import { AppError } from "../lib/appError";
 import { Money } from "../lib/money";
@@ -12,7 +13,12 @@ export async function settleCloudBalance(input: {
   amount: number;
   mode: string;
   note?: string;
+  requestId?: string;
 }) {
+  if (input.kind === 'supplier') {
+    const result=await recordSupplierCloudPayment({...input,supplierId:input.partyId,requestId:input.requestId||''});
+    return {...result.supplier,payment:result.payment,allocations:result.allocations,replayed:result.replayed};
+  }
   const table = input.kind === "customer" ? "customers" : "suppliers";
   const [identity] = await queryRaw(
     `SELECT id FROM ${table} WHERE (_local_id=? OR id::text=?) AND clinic_id=? AND deleted_at IS NULL`,

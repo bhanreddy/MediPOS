@@ -350,8 +350,8 @@ export default function PosScreen() {
                      </View>
                    )}
                    <View style={styles.totalRow}>
-                     <Text style={{ color: theme.colors.text.secondary }}>GST</Text>
-                     <Text style={{ color: theme.colors.text.primary }}>+{formatCurrency(cartStore.getGstTotal())}</Text>
+                     <Text style={{ color: theme.colors.text.secondary }}>GST (included)</Text>
+                     <Text style={{ color: theme.colors.text.primary }}>{formatCurrency(cartStore.getGstTotal())}</Text>
                    </View>
                    <View style={[styles.totalRow, { marginTop: 8, paddingTop: 8, borderTopWidth: 1, borderTopColor: theme.colors.border }]}>
                      <Text style={{ color: theme.colors.text.primary, fontFamily: theme.typography.family.bold, fontSize: 16 }}>Net Total</Text>

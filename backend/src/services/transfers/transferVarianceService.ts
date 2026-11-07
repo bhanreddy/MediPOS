@@ -1,5 +1,5 @@
 // transferVarianceService.ts — Transfer Discrepancy Investigation & Compensating Adjustment Engine
-import { localDb } from '../../local-db';
+import { businessDb as localDb } from '../../lib/businessDb';
 import { localMutate } from '../../lib/localMutate';
 import { v4 as uuidv4 } from 'uuid';
 import { TransferVariance, TransferVarianceResolution } from '../../domain/transferTypes';
@@ -9,11 +9,11 @@ export class TransferVarianceService {
   /**
    * List all variances for an organization or specific transfer
    */
-  static listVariances(params: {
+  static async listVariances(params: {
     organizationId: string;
     transferId?: string;
     status?: string;
-  }): TransferVariance[] {
+  }): Promise<TransferVariance[]> {
     const { organizationId, transferId, status } = params;
     let query = `SELECT tv.*, m.name as medicine_name, mb.batch_number, mb.expiry_date
                  FROM transfer_variances tv
@@ -32,7 +32,7 @@ export class TransferVarianceService {
     }
 
     query += ` ORDER BY tv.created_at DESC`;
-    const rows: any[] = localDb.prepare(query).all(...args);
+    const rows: any[] = (await localDb.prepare(query).all(...args));
     return rows.map((r) => ({
       ...r,
       expected_quantity: Number(r.expected_quantity),
@@ -46,28 +46,28 @@ export class TransferVarianceService {
   /**
    * Resolve a variance case with supervisor authorization and compensating ledger movements
    */
-  static resolveVariance(params: {
+  static async resolveVariance(params: {
     varianceId: string;
     organizationId: string;
     resolution: TransferVarianceResolution;
     resolutionNotes: string;
     resolvedBy: string;
     userRole?: string;
-  }): TransferVariance {
+  }): Promise<TransferVariance> {
     const { varianceId, organizationId, resolution, resolutionNotes, resolvedBy, userRole } = params;
 
-    const variance: any = localDb
+    const variance: any = (await localDb
       .prepare(
         `SELECT * FROM transfer_variances 
          WHERE (id = ? OR _local_id = ?) AND (organization_id = ?) AND _deleted = 0`
       )
-      .get(varianceId, varianceId, organizationId);
+      .get(varianceId, varianceId, organizationId));
 
     if (!variance) throw new Error(`Variance not found: ${varianceId}`);
 
-    const transfer: any = localDb
+    const transfer: any = (await localDb
       .prepare('SELECT * FROM stock_transfers WHERE id = ?')
-      .get(variance.transfer_id);
+      .get(variance.transfer_id));
 
     const nowIso = new Date().toISOString();
     const destStoreId = transfer?.destination_location_type === 'STORE' ? transfer?.destination_location_id : null;
@@ -78,7 +78,7 @@ export class TransferVarianceService {
       if (variance.variance_type === 'EXCESS') {
         const excessQty = Math.abs(Number(variance.variance_quantity));
         // Add excess to destination available
-        InventoryPositionService.adjustStock({
+        (await InventoryPositionService.adjustStock({
           organizationId,
           medicineId: variance.medicine_id,
           batchId: variance.batch_id,
@@ -86,10 +86,10 @@ export class TransferVarianceService {
           storeId: destStoreId,
           warehouseId: destWarehouseId,
           quantityDelta: excessQty,
-        });
+        }));
 
         // Write ledger TRANSFER_EXCESS_ADJUSTMENT
-        localMutate({
+        (await localMutate({
           table: 'stock_ledger',
           operation: 'INSERT',
           data: {
@@ -110,11 +110,11 @@ export class TransferVarianceService {
             created_by: resolvedBy,
             created_at: nowIso,
           },
-        });
+        }));
       }
     }
 
-    const updatedVariance = localMutate({
+    const updatedVariance = (await localMutate({
       table: 'transfer_variances',
       operation: 'UPDATE',
       data: {
@@ -125,17 +125,17 @@ export class TransferVarianceService {
         resolved_by: resolvedBy,
         resolved_at: nowIso,
       },
-    });
+    }));
 
     // Check if all variances for transfer are resolved
-    const openVariances: any[] = localDb
+    const openVariances: any[] = (await localDb
       .prepare(
         `SELECT 1 FROM transfer_variances WHERE transfer_id = ? AND status != 'RESOLVED' AND status != 'REJECTED' AND _deleted = 0`
       )
-      .all(variance.transfer_id);
+      .all(variance.transfer_id));
 
     if (openVariances.length === 0 && transfer) {
-      localMutate({
+      (await localMutate({
         table: 'stock_transfers',
         operation: 'UPDATE',
         data: {
@@ -143,9 +143,9 @@ export class TransferVarianceService {
           status: 'CLOSED',
           completed_at: nowIso,
         },
-      });
+      }));
 
-      localMutate({
+      (await localMutate({
         table: 'transfer_events',
         operation: 'INSERT',
         data: {
@@ -158,7 +158,7 @@ export class TransferVarianceService {
           performed_by: resolvedBy,
           notes: `Transfer closed following complete variance resolution`,
         },
-      });
+      }));
     }
 
     return updatedVariance as any;

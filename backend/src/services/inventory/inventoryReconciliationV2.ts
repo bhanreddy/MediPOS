@@ -1,5 +1,5 @@
 // inventoryReconciliationV2.ts — Enterprise Multi-Layer Reconciliation Engine V2
-import { localDb } from '../../local-db';
+import { businessDb as localDb, cloudBusinessMode } from '../../lib/businessDb';
 import { v4 as uuidv4 } from 'uuid';
 import { LocationType } from '../../domain/units';
 import { InventoryPositionService } from '../inventoryPosition';
@@ -34,12 +34,12 @@ export class InventoryReconciliationServiceV2 {
   /**
    * Run 3-way diagnostic reconciliation across Ledger, Positions, and Legacy Batches
    */
-  static reconcile(params: {
+  static async reconcile(params: {
     organizationId: string;
     storeId?: string | null;
     warehouseId?: string | null;
     medicineId?: string | null;
-  }): {
+  }): Promise<{
     summary: {
       totalBatchesChecked: number;
       matchedCount: number;
@@ -47,7 +47,7 @@ export class InventoryReconciliationServiceV2 {
       invalidNegativeCount: number;
     };
     diagnostics: ReconciliationDiagnosticItem[];
-  } {
+  }> {
     const { organizationId, storeId = null, warehouseId = null, medicineId = null } = params;
 
     const locationCol = storeId ? 'store_id' : 'warehouse_id';
@@ -80,7 +80,7 @@ export class InventoryReconciliationServiceV2 {
       ? [organizationId, targetId, organizationId, organizationId, ...(medicineId ? [medicineId] : [])]
       : [organizationId, organizationId, organizationId, ...(medicineId ? [medicineId] : [])];
 
-    const batchRows: any[] = localDb.prepare(batchesQuery).all(...allParams);
+    const batchRows: any[] = (await localDb.prepare(batchesQuery).all(...allParams));
 
     const diagnostics: ReconciliationDiagnosticItem[] = [];
     let matchedCount = 0;
@@ -100,7 +100,7 @@ export class InventoryReconciliationServiceV2 {
         ledgerParams.push(targetId);
       }
 
-      const ledgerResult: any = localDb.prepare(ledgerQuery).get(...ledgerParams);
+      const ledgerResult: any = (await localDb.prepare(ledgerQuery).get(...ledgerParams));
       const ledgerBalance = Number(ledgerResult?.net_delta || 0);
       const positionOnHand = Number(row.pos_on_hand || 0);
       const legacyRemaining = Number(row.legacy_remaining || 0);
@@ -160,7 +160,7 @@ export class InventoryReconciliationServiceV2 {
   /**
    * Execute compensating repair adjustment movement for a diagnosed discrepancy
    */
-  static repairDiscrepancy(params: {
+  static async repairDiscrepancy(params: {
     organizationId: string;
     medicineId: string;
     batchId: string;
@@ -170,7 +170,7 @@ export class InventoryReconciliationServiceV2 {
     targetPhysicalQuantity: number;
     reason: string;
     approvedBy: string;
-  }): { repairedMovementId: string; newOnHandQuantity: number } {
+  }): Promise<{ repairedMovementId: string; newOnHandQuantity: number }> {
     const {
       organizationId,
       medicineId,
@@ -183,14 +183,19 @@ export class InventoryReconciliationServiceV2 {
       approvedBy,
     } = params;
 
-    const pos = InventoryPositionService.getOrCreatePosition({
+    if(!Number.isSafeInteger(targetPhysicalQuantity)||targetPhysicalQuantity<0)throw new AppError(400,'Physical quantity must be a nonnegative whole number');
+    const cloudBatch = cloudBusinessMode() ? await localDb.prepare(
+      'SELECT id, quantity_remaining FROM medicine_batches WHERE id=? AND medicine_id=? AND organization_id=? AND deleted_at IS NULL FOR UPDATE'
+    ).get(batchId, medicineId, organizationId) : undefined;
+    if (cloudBusinessMode() && !cloudBatch) throw new AppError(404, 'Batch not found');
+    const pos = (await InventoryPositionService.getOrCreatePosition({
       organizationId,
       medicineId,
       batchId,
       locationType,
       storeId,
       warehouseId,
-    });
+    }));
 
     const currentOnHand = Number(pos.quantity_on_hand || 0);
     const delta = targetPhysicalQuantity - currentOnHand;
@@ -201,7 +206,7 @@ export class InventoryReconciliationServiceV2 {
     }
 
     const ledgerId = uuidv4();
-    localDb
+    (await localDb
       .prepare(
         `INSERT INTO stock_ledger (
           id, _local_id, organization_id, store_id, warehouse_id,
@@ -230,10 +235,10 @@ export class InventoryReconciliationServiceV2 {
         approvedBy,
         now,
         now
-      );
+      ));
 
     // Update inventory position
-    InventoryPositionService.adjustStock({
+    (await InventoryPositionService.adjustStock({
       organizationId,
       medicineId,
       batchId,
@@ -241,16 +246,18 @@ export class InventoryReconciliationServiceV2 {
       storeId,
       warehouseId,
       quantityDelta: delta,
-    });
+    }));
 
-    // Update legacy batch balance
-    localDb
+    // The location correction changes the batch's total by this location's delta.
+    const batchBalance = cloudBatch ? Number(cloudBatch.quantity_remaining) + delta : targetPhysicalQuantity;
+    if (batchBalance < 0) throw new AppError(409, 'Batch balance needs reconciliation before this correction');
+    (await localDb
       .prepare(
         `UPDATE medicine_batches 
          SET quantity_remaining = ?, _updated_at = ?
          WHERE id = ?`
       )
-      .run(targetPhysicalQuantity, now, batchId);
+      .run(batchBalance, now, batchId));
 
     return {
       repairedMovementId: ledgerId,

@@ -10,12 +10,29 @@ interface BillItem {
     total: number;
     gstRate: number;
     discountPercent?: number;
+    manufacturer?: string;
+    hsn?: string;
+    unit?: string;
+    taxableAmount?: number;
 }
 
 export interface BillPrintLayoutProps {
     shopProfile: ShopProfile;
     customerName?: string;
     customerPhone?: string;
+    customerAddress?: string;
+    customerGstin?: string;
+    placeOfSupply?: string;
+    deliveryAddress?: string;
+    taxableAmount?: number;
+    cgst?: number;
+    sgst?: number;
+    igst?: number;
+    interstate?: boolean;
+    pharmacist?: string;
+    prescriber?: string;
+    prescriptionReference?: string;
+    isTaxInvoice?: boolean;
     invoiceNumber: string;
     date: string;
     time?: string;
@@ -55,6 +72,8 @@ function expiry(value: string): string {
 export const BillPrintLayout: React.FC<BillPrintLayoutProps> = ({
     shopProfile, customerName, customerPhone, invoiceNumber, date, time, items,
     subtotal, gstAmount, discount, finalTotal, priceIncludesTax = false,
+    customerAddress, customerGstin, placeOfSupply, deliveryAddress, taxableAmount, cgst, sgst, igst, interstate,
+    pharmacist, prescriber, prescriptionReference, isTaxInvoice,
     paymentMethod, paidAmount, walletAmount = 0, earnedCoins = 0, coinExpiry, balanceDue, paperWidthMm = 80,
 }) => {
     const address = [shopProfile.address_line_1, shopProfile.address_line_2,
@@ -84,7 +103,7 @@ export const BillPrintLayout: React.FC<BillPrintLayoutProps> = ({
             </header>
 
             <section className="receipt-invoice" aria-label="Invoice details">
-                <p className="receipt-kicker">Sales invoice</p>
+                <p className="receipt-kicker">{isTaxInvoice ? 'Tax invoice' : 'Sales invoice'}</p>
                 <div className="receipt-invoice-id"><span>Invoice no.</span><strong>{invoiceNumber}</strong></div>
                 <div className="receipt-date"><span>{date}</span>{time && <span>{time}</span>}</div>
                 <div className="receipt-customer">
@@ -92,6 +111,14 @@ export const BillPrintLayout: React.FC<BillPrintLayoutProps> = ({
                     <strong>{customerName?.trim() || (customerPhone ? 'Customer' : 'Walk-in customer')}</strong>
                     {customerPhone && <span className="receipt-customer-phone">{customerPhone}</span>}
                 </div>
+                {customerAddress && <p>Recipient address {customerAddress}</p>}
+                {customerGstin && <p>Recipient GSTIN {customerGstin}</p>}
+                {placeOfSupply && <p>Place of supply (State code) {placeOfSupply}</p>}
+                {deliveryAddress && deliveryAddress !== customerAddress && <p>Delivery address {deliveryAddress}</p>}
+                {pharmacist && <p>Pharmacist {pharmacist}</p>}
+                {prescriber && <p>Prescriber {prescriber}</p>}
+                {prescriptionReference && <p>Prescription {prescriptionReference}</p>}
+                {isTaxInvoice && <p>Reverse charge No</p>}
             </section>
 
             <table className="receipt-items" aria-label="Purchased medicines">
@@ -105,7 +132,7 @@ export const BillPrintLayout: React.FC<BillPrintLayoutProps> = ({
                             <Fragment key={index}>
                                 <tr className="receipt-item-main">
                                     <td className="receipt-item-name">{item.productName}</td>
-                                    <td className="receipt-number">{item.quantity}</td>
+                                    <td className="receipt-number">{item.quantity}{item.unit && <span> {item.unit}</span>}</td>
                                     <td className="receipt-number">{money(item.unitPrice)}</td>
                                     <td className="receipt-number receipt-item-amount">{money(item.total)}</td>
                                 </tr>
@@ -113,6 +140,9 @@ export const BillPrintLayout: React.FC<BillPrintLayoutProps> = ({
                                     <div className="receipt-item-meta">
                                         {batch && <span>Batch: <b>{batch}</b></span>}
                                         {expiryDate && <span>Exp: <b>{expiryDate}</b></span>}
+                                        {item.manufacturer && <span>Manufacturer {item.manufacturer}</span>}
+                                        {item.hsn && <span>HSN {item.hsn}</span>}
+                                        {item.taxableAmount !== undefined && <span>Taxable ₹{money(item.taxableAmount)}</span>}
                                         <span>GST: {item.gstRate}%</span>
                                         {Boolean(item.discountPercent && item.discountPercent > 0) && <span>Disc: {item.discountPercent}%</span>}
                                     </div>
@@ -128,6 +158,10 @@ export const BillPrintLayout: React.FC<BillPrintLayoutProps> = ({
                 <dl className="receipt-summary">
                     <div><dt>Subtotal</dt><dd>₹{money(subtotal)}</dd></div>
                     {discount > 0 && <div><dt>Discount</dt><dd>-₹{money(discount)}</dd></div>}
+                    {taxableAmount !== undefined && <div><dt>Taxable value</dt><dd>₹{money(taxableAmount)}</dd></div>}
+                    {interstate && igst !== undefined && <div><dt>IGST</dt><dd>₹{money(igst)}</dd></div>}
+                    {!interstate && cgst !== undefined && <div><dt>CGST</dt><dd>₹{money(cgst)}</dd></div>}
+                    {!interstate && sgst !== undefined && <div><dt>SGST</dt><dd>₹{money(sgst)}</dd></div>}
                     <div><dt>{priceIncludesTax ? 'GST (included)' : 'GST'}</dt><dd>₹{money(gstAmount)}</dd></div>
                 </dl>
                 <div className="receipt-grand-total"><span>Total</span><strong>₹{money(finalTotal)}</strong></div>
@@ -142,6 +176,7 @@ export const BillPrintLayout: React.FC<BillPrintLayoutProps> = ({
             </section>
 
             <footer className="receipt-footer">
+                {isTaxInvoice && <p>Authorised signature __________________</p>}
                 <p className="receipt-thanks">{BILL_PRINT_COPY.thankYou}</p>
                 <p className="receipt-policy">{BILL_PRINT_COPY.returnPolicy}</p>
                 <p className="receipt-wish">{BILL_PRINT_COPY.closingWish}</p>

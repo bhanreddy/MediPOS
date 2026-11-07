@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useRef, useState, useEffect } from 'react';
 import {
   Truck,
   ArrowRightLeft,
@@ -6,6 +6,7 @@ import {
   Zap,
 } from 'lucide-react';
 import api from '../../lib/api';
+import { loadInventoryCatalogue } from '../../services/inventoryCatalogue';
 import { TransferListView } from './TransferListView';
 import { TransferRequestDrawer } from './TransferRequestDrawer';
 import { TransferDetailWorkspace } from './TransferDetailWorkspace';
@@ -50,12 +51,12 @@ export const TransfersCommandCenter: React.FC<{ initialTab?: 'transfers' | 'repl
 
   const loadMetadata = async () => {
     try {
-      const [locRes, medRes] = await Promise.all([
+      const [locRes, catalogue] = await Promise.all([
         api.get('/transfers/locations'),
-        api.get('/inventory/medicines', { params: { limit: 500 } }),
+        loadInventoryCatalogue(),
       ]);
       setLocations(locRes.data || []);
-      setMedicines(medRes.data?.data || []);
+      setMedicines(catalogue);
     } catch (err: any) {
       console.error('Metadata fetch failed:', err);
     }
@@ -87,8 +88,21 @@ export const TransfersCommandCenter: React.FC<{ initialTab?: 'transfers' | 'repl
     }
   };
 
+  const transferRequests = useRef(new Map<string, { payload: string; id: string }>());
+
+  const postTransfer = async (path: string, data: Record<string, unknown>) => {
+    const payload = JSON.stringify(data);
+    let request = transferRequests.current.get(path);
+    if (request?.payload !== payload) {
+      request = { payload, id: crypto.randomUUID() };
+      transferRequests.current.set(path, request);
+    }
+    await api.post(path, { ...data, idempotencyKey: request.id });
+    if (transferRequests.current.get(path) === request) transferRequests.current.delete(path);
+  };
+
   const handleCreateTransfer = async (data: any) => {
-    await api.post('/transfers', data);
+    await postTransfer('/transfers', data);
     loadTransfers();
     loadSummary();
   };
@@ -122,7 +136,7 @@ export const TransfersCommandCenter: React.FC<{ initialTab?: 'transfers' | 'repl
 
   const handleDispatch = async (carrier: string, tracking: string) => {
     if (!selectedTransfer) return;
-    await api.post(`/transfers/${selectedTransfer.id}/dispatch`, {
+    await postTransfer(`/transfers/${selectedTransfer.id}/dispatch`, {
       carrierName: carrier,
       trackingReference: tracking,
     });
@@ -134,7 +148,7 @@ export const TransfersCommandCenter: React.FC<{ initialTab?: 'transfers' | 'repl
 
   const handleReceive = async (items: any[], condition: string) => {
     if (!selectedTransfer) return;
-    await api.post(`/transfers/${selectedTransfer.id}/receive`, {
+    await postTransfer(`/transfers/${selectedTransfer.id}/receive`, {
       items,
       conditionStatus: condition,
     });

@@ -1,5 +1,5 @@
 // orderEventService.ts — Immutable Order Audit Timeline & Event Dispatcher
-import { localDb } from '../../local-db';
+import { businessDb as localDb } from '../../lib/businessDb';
 import { localMutate } from '../../lib/localMutate';
 import { v4 as uuidv4 } from 'uuid';
 import { OrderEvent, OrderEventType } from '../../domain/orderTypes';
@@ -22,7 +22,7 @@ export class OrderEventService {
   /**
    * Log an immutable order event and notify subscribers
    */
-  static logEvent(params: {
+  static async logEvent(params: {
     orderId: string;
     fulfilmentId?: string | null;
     organizationId: string;
@@ -33,7 +33,7 @@ export class OrderEventService {
     actorName?: string | null;
     details?: Record<string, any>;
     notes?: string | null;
-  }): OrderEvent {
+  }): Promise<OrderEvent> {
     const {
       orderId,
       fulfilmentId = null,
@@ -51,7 +51,7 @@ export class OrderEventService {
     const nowIso = new Date().toISOString();
     const detailsJson = JSON.stringify(details);
 
-    localMutate({
+    (await localMutate({
       table: 'order_events',
       operation: 'INSERT',
       data: {
@@ -69,7 +69,7 @@ export class OrderEventService {
         notes: notes,
         created_at: nowIso,
       },
-    });
+    }));
 
     const event: OrderEvent = {
       id,
@@ -103,14 +103,14 @@ export class OrderEventService {
   /**
    * Fetch complete chronological timeline for an order
    */
-  static getTimeline(orderId: string, organizationId: string): OrderEvent[] {
-    const rows: any[] = localDb
+  static async getTimeline(orderId: string, organizationId: string): Promise<OrderEvent[]> {
+    const rows: any[] = (await localDb
       .prepare(
         `SELECT * FROM order_events 
          WHERE order_id = ? AND organization_id = ? 
          ORDER BY created_at ASC`
       )
-      .all(orderId, organizationId);
+      .all(orderId, organizationId));
 
     return rows.map(r => ({
       ...r,

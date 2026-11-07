@@ -1,5 +1,5 @@
 import { useState, useEffect } from 'react';
-import api from '../lib/api';
+import { loadInventoryCatalogue } from '../services/inventoryCatalogue';
 import type { Product, Batch } from '../core/types';
 
 export type ExpiryFilter = 7 | 30 | 60 | 90;
@@ -34,9 +34,7 @@ export const useExpiryAlerts = (filterDays: ExpiryFilter) => {
             setIsLoading(true);
             setError(null);
             try {
-                // Fetch medicines directly from the backend
-                const res = await api.get('/inventory/medicines');
-                const medicines = res.data?.data || res.data || [];
+                const medicines = await loadInventoryCatalogue();
 
                 const products: Product[] = [];
                 const batches: Batch[] = [];

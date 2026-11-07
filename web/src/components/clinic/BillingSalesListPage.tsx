@@ -1,7 +1,10 @@
+import { SaleVoidDialog } from './SaleVoidDialog';
+import { SaleReturnDialog, printReturnDocument } from './SaleReturnDialog';
+import { useAuth } from '../../lib/auth';
 import React, { useEffect, useMemo, useState } from "react";
 import { Link } from "react-router-dom";
 import { format } from "date-fns";
-import { Plus, Eye, Printer } from "lucide-react";
+import { Plus, Eye, Printer, RotateCcw, Ban } from "lucide-react";
 import api from "../../lib/api";
 import type { Sale } from "../../core/types";
 
@@ -32,6 +35,8 @@ type InvoiceDetail = {
   paid_amount: number;
   wallet_redeemed_paise?: number;
   balance_due: number;
+  payment_transactions?: Array<{ id: string; tender_type: string; amount_paise: string; reference_number?: string }>;
+  void_record?: { reason: string };
   sale_items: {
     id: string;
     quantity: number;
@@ -53,6 +58,9 @@ const primaryLinkClass =
   "inline-flex items-center justify-center gap-2 rounded-lg bg-primary text-on-primary px-5 py-2.5 font-extrabold uppercase tracking-widest text-xs shadow-md shadow-primary/20 border border-white/10 hover:brightness-110 transition-all";
 
 export const BillingSalesListPage: React.FC = () => {
+  const [returnSaleId,setReturnSaleId]=useState<string|null>(null);
+  const [voidInvoice, setVoidInvoice] = useState<Row | null>(null);
+  const role=useAuth(state=>state.user?.role);
   const [detail, setDetail] = useState<InvoiceDetail | null>(null);
   const [detailLoading, setDetailLoading] = useState(false);
   const [rows, setRows] = useState<Row[]>([]);
@@ -89,7 +97,7 @@ export const BillingSalesListPage: React.FC = () => {
             ...s,
             final_amount: Number(s.final_amount ?? s.net_amount ?? 0),
             payment_mode: (s.payment_mode ?? "cash").toUpperCase(),
-            status: s.is_return ? "REFUNDED" : "COMPLETED",
+            status: s.is_return ? "REFUNDED" : s.voided_at ? "CANCELLED" : "COMPLETED",
             payment_status: (s.payment_status ?? "paid").toLowerCase(),
             customerLabel: s.customer_id ? s.customers?.name || "—" : "Walk-in",
           }));
@@ -159,6 +167,7 @@ export const BillingSalesListPage: React.FC = () => {
 
   const handlePrint = async (sale: Sale) => {
     try {
+      if(sale.status==='REFUNDED' || sale.status==='CANCELLED') { await printReturnDocument(sale.id);return; }
       const res = await api.get(`/sales/${sale.id}`);
       const items = res.data?.data?.sale_items || [];
       await (
@@ -172,6 +181,9 @@ export const BillingSalesListPage: React.FC = () => {
 
   return (
     <div className="p-8 max-w-7xl mx-auto space-y-6 animate-slideIn">
+      {voidInvoice && <SaleVoidDialog invoice={voidInvoice} onClose={() => setVoidInvoice(null)}
+        onComplete={() => setRetry(value => value + 1)} />}
+      {returnSaleId&&<SaleReturnDialog saleId={returnSaleId} canRestock={['OWNER','PHARMACIST'].includes(String(role))} onClose={()=>setReturnSaleId(null)} onComplete={()=>setRetry(value=>value+1)}/>}
       <div className="flex flex-col gap-4 sm:flex-row sm:items-end sm:justify-between">
         <div>
           <h1 className="text-2xl font-black text-foreground-strong tracking-tight">
@@ -332,6 +344,10 @@ export const BillingSalesListPage: React.FC = () => {
                   </TableCell>
                   <TableCell className="text-right">
                     <div className="flex justify-end gap-1">
+                      {r.status === 'COMPLETED' && role === 'OWNER' &&
+                        <button type="button" className="rounded-lg p-2 text-muted hover:bg-surface-elevated hover:text-danger"
+                          aria-label={`Void invoice ${r.invoice_number}`} title="Void invoice" onClick={() => setVoidInvoice(r)}><Ban className="h-4 w-4" /></button>}
+                      {r.status==='COMPLETED'&&<button type="button" className="p-2 rounded-lg text-muted hover:bg-surface-elevated hover:text-primary" aria-label={`Return items from invoice ${r.invoice_number}`} title="Return items" onClick={()=>setReturnSaleId(r.id)}><RotateCcw className="w-4 h-4"/></button>}
                       <button
                         type="button"
                         className="p-2 rounded-lg text-muted hover:bg-surface-elevated hover:text-primary"
@@ -389,6 +405,15 @@ export const BillingSalesListPage: React.FC = () => {
       >
         {detail && (
           <div className="space-y-4">
+            {detail.void_record && <p className="rounded-lg bg-warning/10 p-3 text-sm">Cancellation recorded · {detail.void_record.reason}</p>}
+            {!!detail.payment_transactions?.length && <section className="rounded-lg border border-border p-3" aria-label="Payment allocations">
+              <h3 className="font-semibold">Payment allocations</h3>
+              <ul className="mt-1 space-y-1 text-sm">
+                {detail.payment_transactions.map(payment => <li key={payment.id}>
+                  {payment.tender_type} · {formatInr(Number(payment.amount_paise) / 100, 2)}{payment.reference_number && ` · ${payment.reference_number}`}
+                </li>)}
+              </ul>
+            </section>}
             <p>
               Total {formatInr(detail.net_amount, 2)} · Received{" "}
               {formatInr(Number(detail.paid_amount)-Number(detail.wallet_redeemed_paise||0)/100, 2)} · Nex Coins {formatInr(Number(detail.wallet_redeemed_paise||0)/100,2)} · Due{" "}

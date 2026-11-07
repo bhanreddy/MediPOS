@@ -45,20 +45,20 @@ beforeEach(() => {
 afterEach(() => jest.restoreAllMocks());
 afterAll(() => localDb.close());
 
-test('stock queries stay constant with 40 matches and 15 substitutes', () => {
+test('stock queries stay constant with 40 matches and 15 substitutes', async () => {
   for (let i = 0; i < 40; i++) {
     medicine(`med-${i}`, `Cough medicine ${i}`, 'Cough');
     batch(`batch-${i}`, `med-${i}`);
   }
   const prepare = jest.spyOn(localDb, 'prepare');
-  const result = POSSearchService.search({ ...context, query: 'Cough' });
+  const result = (await POSSearchService.search({ ...context, query: 'Cough' }));
   expect(result.results).toHaveLength(25);
   expect(result.substitutes).toHaveLength(15);
   expect(prepare.mock.calls.filter(([query]) => /FROM medicine_batches/.test(query))).toHaveLength(2);
   expect(prepare).toHaveBeenCalledTimes(4);
 });
 
-test('stock includes both medicine IDs and excludes expired, disposed, empty, deleted and other-store batches', () => {
+test('stock includes both medicine IDs and excludes expired, disposed, empty, deleted and other-store batches', async () => {
   medicine('cloud-med', 'Unique product', null, 'local-med');
   batch('late', 'cloud-med', 7);
   batch('early', 'local-med', 3, '2098-01-01', null);
@@ -69,51 +69,51 @@ test('stock includes both medicine IDs and excludes expired, disposed, empty, de
   batch('empty', 'cloud-med', 0);
   localDb.prepare("UPDATE medicine_batches SET is_disposed = 1 WHERE id = 'disposed'").run();
   localDb.prepare("UPDATE medicine_batches SET _deleted = 1 WHERE id = 'deleted'").run();
-  const result = POSSearchService.search({ ...context, query: 'Unique' }).results[0];
+  const result = (await POSSearchService.search({ ...context, query: 'Unique' })).results[0];
   expect(result.total_available_stock).toBe(10);
   expect(result.nearest_expiry).toBe('2098-01-01');
   expect(result.batches.map(b => b.id)).toEqual(['early', 'late']);
 });
 
-test('substitutes use the same disposed-batch exclusions', () => {
+test('substitutes use the same disposed-batch exclusions', async () => {
   medicine('original', 'Original medicine', 'Shared');
   medicine('alternative', 'Alternative medicine', 'Shared');
   batch('alternative-stock', 'alternative', 8);
   batch('disposed-alternative', 'alternative', 100);
   localDb.prepare("UPDATE medicine_batches SET is_disposed = 1 WHERE id = 'disposed-alternative'").run();
-  const result = POSSearchService.search({ ...context, query: 'Original' });
+  const result = (await POSSearchService.search({ ...context, query: 'Original' }));
   expect(result.substitutes[0].total_available_stock).toBe(8);
   expect(result.substitutes[0].batches).toHaveLength(1);
 });
 
-test('alternate barcodes preserve the medicine ID and pack conversion', () => {
+test('alternate barcodes preserve the medicine ID and pack conversion', async () => {
   medicine('med', 'Barcode medicine');
   batch('stock', 'med');
   localDb.prepare(`INSERT INTO product_barcodes VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`)
     .run('barcode-row', 'barcode-local', 'org-a', 'med', '123456', 'PACK', 'BOX', 100, 0);
-  const result = POSSearchService.search({ ...context, barcode: '123456' }).results[0];
+  const result = (await POSSearchService.search({ ...context, barcode: '123456' })).results[0];
   expect(result.id).toBe('med');
   expect(result.total_available_stock).toBe(10);
   expect(result.matched_barcode).toMatchObject({ barcode: '123456', unit_type: 'BOX', conversion_factor: 100 });
 });
 
-test('deleted and foreign-organization barcode rows do not match', () => {
+test('deleted and foreign-organization barcode rows do not match', async () => {
   medicine('med', 'Barcode medicine');
   localDb.prepare('INSERT INTO product_barcodes VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)')
     .run('deleted', 'deleted', 'org-a', 'med', '123456', 'PACK', 'BOX', 100, 1);
-  expect(POSSearchService.search({ ...context, barcode: '123456' }).results).toHaveLength(0);
+  expect((await POSSearchService.search({ ...context, barcode: '123456' })).results).toHaveLength(0);
   localDb.prepare("UPDATE product_barcodes SET _deleted = 0, organization_id = 'org-b'").run();
-  expect(POSSearchService.search({ ...context, barcode: '123456' }).results).toHaveLength(0);
+  expect((await POSSearchService.search({ ...context, barcode: '123456' })).results).toHaveLength(0);
 });
 
-test('an exact name ranks ahead of more than 100 partial matches', () => {
+test('an exact name ranks ahead of more than 100 partial matches', async () => {
   for (let i = 0; i < 110; i++) medicine(`partial-${i}`, `Other aspirin ${i}`);
   medicine('exact', 'Aspirin');
-  expect(POSSearchService.search({ ...context, query: 'Aspirin', limit: 1 }).results[0].id).toBe('exact');
+  expect((await POSSearchService.search({ ...context, query: 'Aspirin', limit: 1 })).results[0].id).toBe('exact');
 });
 
-test('typo tolerance still finds misspellings and bounds invalid limits', () => {
+test('typo tolerance still finds misspellings and bounds invalid limits', async () => {
   medicine('para', 'Paracetamol');
-  expect(POSSearchService.search({ ...context, query: 'paracetmol', limit: -5 }).results[0].id).toBe('para');
-  expect(POSSearchService.search({ ...context, query: '  ' })).toEqual({ results: [], substitutes: [] });
+  expect((await POSSearchService.search({ ...context, query: 'paracetmol', limit: -5 })).results[0].id).toBe('para');
+  expect((await POSSearchService.search({ ...context, query: '  ' }))).toEqual({ results: [], substitutes: [] });
 });

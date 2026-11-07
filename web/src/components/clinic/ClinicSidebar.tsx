@@ -14,6 +14,7 @@ interface ClinicSidebarProps {
   settings: NavigationItem[];
   activePath?: string;
   shopName: string;
+  branchControl?: React.ReactNode;
   logoUrl?: string;
   onLogoError: () => void;
   mobileOpen: boolean;
@@ -23,7 +24,7 @@ interface ClinicSidebarProps {
 
 const PREFERENCE_KEY = 'nexsyrus.sidebar.collapsed';
 
-export function ClinicSidebar({ primary, sections, settings, activePath, shopName, logoUrl, onLogoError, mobileOpen, onClose, onSignOut }: ClinicSidebarProps) {
+export function ClinicSidebar({ primary, sections, settings, activePath, shopName, branchControl, logoUrl, onLogoError, mobileOpen, onClose, onSignOut }: ClinicSidebarProps) {
   const [preference, setPreference] = useState<boolean | null>(() => {
     try {
       const saved = localStorage.getItem(PREFERENCE_KEY);
@@ -126,6 +127,7 @@ export function ClinicSidebar({ primary, sections, settings, activePath, shopNam
         <button type="button" className="liquid-menu-close" onClick={onClose} aria-label="Close navigation"><X size={18} aria-hidden /></button>
       </header>
 
+      {!compact && branchControl && <div className="px-3 pb-2">{branchControl}</div>}
       <div className="sidebar-search-area">
         {compact ? <button type="button" className="sidebar-search-trigger" aria-label="Find a page" title="Find a page (/)" onClick={focusSearch}><Search size={18} aria-hidden /></button> : (
           <div className="sidebar-search">

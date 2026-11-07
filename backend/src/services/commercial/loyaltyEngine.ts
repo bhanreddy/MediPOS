@@ -1,4 +1,4 @@
-import { localDb } from '../../local-db';
+import { businessDb as localDb } from '../../lib/businessDb';
 import { localMutate } from '../../lib/localMutate';
 import { v4 as uuidv4 } from 'uuid';
 import {
@@ -13,15 +13,15 @@ export class LoyaltyEngine {
   /**
    * Fetches or initializes the loyalty program for an organization
    */
-  static getOrCreateProgram(organizationId: string): LoyaltyProgram {
-    const existing: any = localDb
+  static async getOrCreateProgram(organizationId: string): Promise<LoyaltyProgram> {
+    const existing: any = (await localDb
       .prepare('SELECT * FROM loyalty_programs WHERE organization_id = ? AND is_active = 1 AND _deleted = 0')
-      .get(organizationId);
+      .get(organizationId));
 
     if (existing) return existing;
 
     const id = uuidv4();
-    const created = localMutate({
+    const created = (await localMutate({
       table: 'loyalty_programs',
       operation: 'INSERT',
       data: {
@@ -40,25 +40,25 @@ export class LoyaltyEngine {
         status: 'ACTIVE',
         is_active: 1,
       },
-    });
+    }));
     return created as LoyaltyProgram;
   }
 
   /**
    * Fetches or initializes customer loyalty account
    */
-  static getOrCreateAccount(organizationId: string, customerId: string): LoyaltyAccount {
-    const existing: any = localDb
+  static async getOrCreateAccount(organizationId: string, customerId: string): Promise<LoyaltyAccount> {
+    const existing: any = (await localDb
       .prepare(
         'SELECT * FROM loyalty_accounts WHERE (customer_id = ? OR customer_id = ?) AND _deleted = 0'
       )
-      .get(customerId, customerId);
+      .get(customerId, customerId));
 
     if (existing) return existing;
 
-    const program = this.getOrCreateProgram(organizationId);
+    const program = (await this.getOrCreateProgram(organizationId));
     const id = uuidv4();
-    const created = localMutate({
+    const created = (await localMutate({
       table: 'loyalty_accounts',
       operation: 'INSERT',
       data: {
@@ -73,14 +73,14 @@ export class LoyaltyEngine {
         lifetime_redeemed: 0,
         status: 'ACTIVE',
       },
-    });
+    }));
     return created as LoyaltyAccount;
   }
 
   /**
    * Records an immutable loyalty transaction in ledger
    */
-  static recordTransaction(params: {
+  static async recordTransaction(params: {
     organizationId: string;
     customerId: string;
     transactionType: LoyaltyTransactionType;
@@ -90,7 +90,7 @@ export class LoyaltyEngine {
     returnId?: string | null;
     notes?: string;
     idempotencyKey?: string;
-  }): LoyaltyTransaction {
+  }): Promise<LoyaltyTransaction> {
     const {
       organizationId,
       customerId,
@@ -110,18 +110,18 @@ export class LoyaltyEngine {
     // Historical returns may still reverse credits from earlier sales.
     // Idempotency check: prevent duplicate loyalty credit/debit
     if (idempotencyKey) {
-      const existing: any = localDb
+      const existing: any = (await localDb
         .prepare('SELECT * FROM loyalty_transactions WHERE idempotency_key = ? AND _deleted = 0')
-        .get(idempotencyKey);
+        .get(idempotencyKey));
       if (existing) return existing;
     }
 
-    const account = this.getOrCreateAccount(organizationId, customerId);
+    const account = (await this.getOrCreateAccount(organizationId, customerId));
     const currentBalance = Number(account.available_balance || 0);
     const newBalance = Math.max(0, currentBalance + credits);
 
     const txId = uuidv4();
-    const tx = localMutate({
+    const tx = (await localMutate({
       table: 'loyalty_transactions',
       operation: 'INSERT',
       data: {
@@ -140,7 +140,7 @@ export class LoyaltyEngine {
         idempotency_key: idempotencyKey || null,
         created_at: new Date().toISOString(),
       },
-    });
+    }));
 
     // Update account balances
     let lifetimeEarned = Number(account.lifetime_earned || 0);
@@ -152,13 +152,13 @@ export class LoyaltyEngine {
       lifetimeRedeemed = Math.max(0, lifetimeRedeemed - credits);
     }
 
-    localDb
+    (await localDb
       .prepare(
         `UPDATE loyalty_accounts 
          SET available_balance = ?, lifetime_earned = ?, lifetime_redeemed = ?, updated_at = ? 
          WHERE id = ? OR _local_id = ?`
       )
-      .run(newBalance, lifetimeEarned, lifetimeRedeemed, new Date().toISOString(), account.id, account._local_id);
+      .run(newBalance, lifetimeEarned, lifetimeRedeemed, new Date().toISOString(), account.id, account._local_id));
 
     return tx as LoyaltyTransaction;
   }
@@ -166,7 +166,7 @@ export class LoyaltyEngine {
   /**
    * Reverses loyalty points for a return transaction
    */
-  static processReturnReversal(params: {
+  static async processReturnReversal(params: {
     organizationId: string;
     customerId: string;
     originalSaleId: string;
@@ -177,18 +177,18 @@ export class LoyaltyEngine {
     if (!customerId || returnRatio <= 0) return;
 
     // 1. Check if original sale earned loyalty
-    const earnTx: any = localDb
+    const earnTx: any = (await localDb
       .prepare(
         `SELECT * FROM loyalty_transactions 
          WHERE sale_id = ? AND transaction_type = 'EARN' AND _deleted = 0`
       )
-      .get(originalSaleId);
+      .get(originalSaleId));
 
     if (earnTx && Number(earnTx.credits) > 0) {
       const earnedCredits = Number(earnTx.credits);
       const creditsToReverse = Math.round(earnedCredits * Math.min(1.0, returnRatio));
       if (creditsToReverse > 0) {
-        this.recordTransaction({
+        (await this.recordTransaction({
           organizationId,
           customerId,
           transactionType: 'REVERSAL',
@@ -197,23 +197,23 @@ export class LoyaltyEngine {
           returnId,
           notes: `Reversal of ${creditsToReverse} earned credits for return (Invoice #${originalSaleId.slice(-6)})`,
           idempotencyKey: `rev_earn_${returnId}`,
-        });
+        }));
       }
     }
 
     // 2. Check if original sale used redeemed loyalty
-    const redeemTx: any = localDb
+    const redeemTx: any = (await localDb
       .prepare(
         `SELECT * FROM loyalty_transactions 
          WHERE sale_id = ? AND transaction_type = 'REDEEM' AND _deleted = 0`
       )
-      .get(originalSaleId);
+      .get(originalSaleId));
 
     if (redeemTx && Number(redeemTx.credits) < 0) {
       const redeemedCredits = Math.abs(Number(redeemTx.credits));
       const creditsToRestore = Math.round(redeemedCredits * Math.min(1.0, returnRatio));
       if (creditsToRestore > 0) {
-        this.recordTransaction({
+        (await this.recordTransaction({
           organizationId,
           customerId,
           transactionType: 'REVERSAL',
@@ -222,7 +222,7 @@ export class LoyaltyEngine {
           returnId,
           notes: `Restoration of ${creditsToRestore} redeemed credits on return refund`,
           idempotencyKey: `rest_red_${returnId}`,
-        });
+        }));
       }
     }
   }
@@ -230,22 +230,22 @@ export class LoyaltyEngine {
   /**
    * Fetches customer loyalty history
    */
-  static getCustomerHistory(customerId: string): {
+  static async getCustomerHistory(customerId: string): Promise<{
     account: LoyaltyAccount;
     program: LoyaltyProgram;
     transactions: LoyaltyTransaction[];
-  } {
-    const accountRow: any = localDb
+  }> {
+    const accountRow: any = (await localDb
       .prepare('SELECT * FROM loyalty_accounts WHERE customer_id = ? AND _deleted = 0')
-      .get(customerId);
+      .get(customerId));
 
-    const programRow: any = localDb
+    const programRow: any = (await localDb
       .prepare('SELECT * FROM loyalty_programs WHERE (id = ? OR _local_id = ?) AND _deleted = 0')
-      .get(accountRow?.program_id, accountRow?.program_id);
+      .get(accountRow?.program_id, accountRow?.program_id));
 
-    const transactions: any[] = localDb
+    const transactions: any[] = (await localDb
       .prepare('SELECT * FROM loyalty_transactions WHERE customer_id = ? AND _deleted = 0 ORDER BY created_at DESC')
-      .all(customerId);
+      .all(customerId));
 
     return {
       account: accountRow,

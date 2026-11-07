@@ -1,3 +1,4 @@
+import { useAuth } from '../../lib/auth';
 import React, { useId, useState } from "react";
 import { Link } from "react-router-dom";
 import { Plus, History } from "lucide-react";
@@ -25,6 +26,10 @@ export const CustomersListPage: React.FC = () => {
   const [q, setQ] = useState("");
   const [modalOpen, setModalOpen] = useState(false);
   const [saving, setSaving] = useState(false);
+  const [editing, setEditing] = useState<string | null>(null);
+  const [address, setAddress] = useState('');
+  const [gstin, setGstin] = useState('');
+  const role = useAuth(state => state.role);
 
   const [name, setName] = useState("");
   const [phone, setPhone] = useState("");
@@ -38,10 +43,24 @@ export const CustomersListPage: React.FC = () => {
     setPhone("");
     setEmail("");
     setCreditLimit("");
+    setEditing(null);
+    setAddress("");
+    setGstin("");
   };
 
   const openModal = () => {
     resetForm();
+    setModalOpen(true);
+  };
+
+  const editCustomer = (customer: Customer) => {
+    setEditing(customer.id || customer._local_id || null);
+    setName(customer.name);
+    setPhone(customer.phone || '');
+    setEmail(customer.email || '');
+    setCreditLimit(String(customer.credit_limit ?? 0));
+    setAddress(customer.address || '');
+    setGstin(customer.gstin || '');
     setModalOpen(true);
   };
 
@@ -82,14 +101,18 @@ export const CustomersListPage: React.FC = () => {
 
     setSaving(true);
     try {
-      await CustomerService.addCustomer({
+      const payload = {
         name: trimmedName,
         phone: trimmedPhone,
         ...(trimmedEmail ? { email: trimmedEmail } : {}),
+        address: address.trim(),
+        gstin: gstin.trim() || null,
         credit_limit: Number.isFinite(limitNum) ? limitNum : 0,
-      });
+      };
+      if (editing) await CustomerService.updateCustomer(editing, payload);
+      else await CustomerService.addCustomer(payload);
       await refresh();
-      toast.success("Customer added");
+      toast.success(editing ? 'Customer updated' : 'Customer added');
       setModalOpen(false);
       resetForm();
     } catch (e: unknown) {
@@ -188,7 +211,10 @@ export const CustomersListPage: React.FC = () => {
                   <TableCell className="text-right font-black tabular-nums text-warning">
                     {formatInr(c.outstanding_balance ?? c.credit_balance ?? 0)}
                   </TableCell>
-                  <TableCell className="text-right"><Link to={`/customers/${encodeURIComponent(c.id || c._local_id || "")}`} className="whitespace-nowrap text-xs font-semibold text-primary hover:underline" aria-label={`View purchase history for ${c.name}`}>View history</Link></TableCell>
+                  <TableCell className="text-right"><Link to={`/customers/${encodeURIComponent(c.id || c._local_id || "")}`} className="whitespace-nowrap text-xs font-semibold text-primary hover:underline" aria-label={`View purchase history for ${c.name}`}>View history</Link>
+                    {['OWNER','PHARMACIST'].includes(String(role)) &&
+                      <button type="button" className="ml-3 text-xs font-semibold text-primary" onClick={() => editCustomer(c)}>Edit details</button>}
+                  </TableCell>
                 </TableRow>
               ))
             )}
@@ -200,7 +226,7 @@ export const CustomersListPage: React.FC = () => {
       <Modal
         isOpen={modalOpen}
         onClose={closeModal}
-        title="Add customer"
+        title={editing ? "Edit customer" : "Add customer"}
         footer={
           <>
             <Button
@@ -245,6 +271,8 @@ export const CustomersListPage: React.FC = () => {
             onChange={(e) => setEmail(e.target.value)}
             placeholder="optional@email.com"
           />
+          <Input label="Patient or billing address" value={address} maxLength={500} onChange={event => setAddress(event.target.value)} />
+          <Input label="GSTIN, if registered" value={gstin} maxLength={15} onChange={event => setGstin(event.target.value.toUpperCase())} />
           <Input
             label="Credit limit (₹)"
             value={creditLimit}

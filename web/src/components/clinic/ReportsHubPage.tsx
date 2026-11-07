@@ -1,3 +1,5 @@
+import { BranchAnalyticsPanel } from './BranchAnalyticsPanel';
+import { PharmacyReportsPanel } from './PharmacyReportsPanel';
 import React, { useMemo, useState } from 'react';
 import { format } from 'date-fns';
 import { LineChart as LineChartIcon, ShoppingCart, Wallet, FileText, PieChart } from 'lucide-react';
@@ -390,6 +392,8 @@ export const ReportsHubPage: React.FC = () => {
                 )}
             </Card>
             </div>
+            <BranchAnalyticsPanel from={fromDate} to={toDate} />
+            <PharmacyReportsPanel from={fromDate} to={toDate} />
         </div>
     );
 };

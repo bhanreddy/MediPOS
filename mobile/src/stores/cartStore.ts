@@ -127,8 +127,8 @@ export const useCartStore = create<CartStore>((set, get) => ({
   },
 
   getGstTotal: () => {
-    const { items } = get();
-    return items.reduce((sum, item) => sum + calcLineGst(item), 0);
+    const { items, discountPct } = get();
+    return items.reduce((sum, item) => sum + calcLineGst(item), 0) * (1 - discountPct / 100);
   },
 
   getItemCount: () => {

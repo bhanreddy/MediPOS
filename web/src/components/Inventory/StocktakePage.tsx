@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { 
   ClipboardCheck, 
   Plus, 
@@ -29,6 +29,9 @@ export const StocktakePage: React.FC = () => {
   const [barcodeInput, setBarcodeInput] = useState('');
   const [countQty, setCountQty] = useState(1);
   const [selectedMedicineId, setSelectedMedicineId] = useState('');
+  const countRequest=useRef({fingerprint:'',id:''});
+  const countSaving=useRef(false);
+  const [counterRole,setCounterRole]=useState('COUNTER_A');
 
   const loadSessions = async () => {
     try {
@@ -99,19 +102,29 @@ export const StocktakePage: React.FC = () => {
       return;
     }
 
+    if(countSaving.current)return;
+    const selected=sessionItems.find(item=>item.id===selectedMedicineId);
+    if(!selected)return;
+    const fingerprint=JSON.stringify([selectedSession.id,selectedMedicineId,countQty,counterRole,barcodeInput]);
+    if(countRequest.current.fingerprint!==fingerprint)countRequest.current={fingerprint,id:crypto.randomUUID()};
+    countSaving.current=true;
     try {
       await api.post(`/inventory/stocktakes/${selectedSession.id}/count`, {
-        medicineId: selectedMedicineId,
+        medicineId: selected.medicine_id,
+        batchId:selected.batch_id,
+        requestId:countRequest.current.id,
+        counterRole,
         scannedBarcode: barcodeInput,
         rawQuantity: countQty,
       });
+      countRequest.current={fingerprint:'',id:''};
       toast.success('Count logged!');
       setBarcodeInput('');
       setCountQty(1);
       loadSessionDetails(selectedSession.id);
     } catch (err: any) {
       toast.error(err.response?.data?.error?.message || 'Failed to record count');
-    }
+    } finally {countSaving.current=false;}
   };
 
   const handleApproveSession = async () => {
@@ -285,20 +298,21 @@ export const StocktakePage: React.FC = () => {
                     >
                       <option value="">-- Choose Medicine to Count --</option>
                       {sessionItems.map((it) => (
-                        <option key={it.medicine_id} value={it.medicine_id}>
+                        <option key={it.id} value={it.id}>
                           {it.medicine_name} {it.batch_number ? `(Batch #${it.batch_number})` : ''}
                         </option>
                       ))}
                     </select>
                   </div>
 
+                  {selectedSession.is_double_count&&<label className="text-xs">Independent counter<select value={counterRole} onChange={event=>setCounterRole(event.target.value)} className="block bg-bg-surface"><option value="COUNTER_A">Counter A</option><option value="COUNTER_B">Counter B</option></select></label>}
                   <div className="w-32">
                     <label className="text-[10px] uppercase font-bold text-muted block mb-1">Quantity</label>
                     <input
                       type="number"
-                      min="1"
+                      min="0"
                       value={countQty}
-                      onChange={(e) => setCountQty(parseInt(e.target.value) || 1)}
+                      onChange={(e) => setCountQty(Math.max(0,parseInt(e.target.value)||0))}
                       className="w-full bg-bg-surface border border-border rounded-lg px-2.5 py-1.5 text-xs text-foreground font-mono focus:outline-none"
                     />
                   </div>

@@ -25,6 +25,7 @@ export interface Sale {
   subtotal: number;
   discount: number;
   gstTotal: number;
+  priceIncludesTax?: boolean;
   grandTotal: number;
   paymentMode: string;
   paymentStatus: string;
@@ -47,6 +48,7 @@ interface SalesParams {
 
 /** Matches Medical POS Backend createSaleSchema (sale.schema.ts) — wire format only (snake_case). */
 export interface CreateSaleBody {
+  price_includes_tax?: boolean;
   customer_id?: string | null;
   discount: number;
   payment_mode: 'cash' | 'upi' | 'card' | 'credit';
@@ -76,7 +78,7 @@ interface InvoiceData {
   html: string;
 }
 
-const ALLOWED_GST_RATES = [0, 5, 12, 18] as const;
+const ALLOWED_GST_RATES = [0, 5, 12, 18, 28] as const;
 type AllowedGstRate = (typeof ALLOWED_GST_RATES)[number];
 
 function normalizeGstRate(rate: number): AllowedGstRate {
@@ -87,7 +89,6 @@ function normalizeGstRate(rate: number): AllowedGstRate {
 /** Build POST /sales body — mirrors web `BillingService.finalizeSale` + backend `createSaleSchema`. */
 export function buildCreateSalePayload(body: CreateSaleBody): CreateSaleBody {
   let subtotal = 0;
-  let gst_amount = 0;
 
   const items = body.items.map((item) => {
     const qty = Math.max(1, Math.floor(Number(item.quantity)));
@@ -95,8 +96,7 @@ export function buildCreateSalePayload(body: CreateSaleBody): CreateSaleBody {
     const discount_pct = Math.min(100, Math.max(0, Number(item.discount_pct ?? 0)));
     const gst_rate = normalizeGstRate(item.gst_rate);
 
-    subtotal += qty * mrp * (1 - discount_pct / 100);
-    gst_amount += (qty * mrp * gst_rate) / 100;
+    subtotal += Math.round(qty * mrp * (1 - discount_pct / 100) * 100) / 100;
 
     return {
       medicine_id: String(item.medicine_id),
@@ -108,8 +108,8 @@ export function buildCreateSalePayload(body: CreateSaleBody): CreateSaleBody {
     };
   });
 
-  const discount = Math.max(0, Number(body.discount ?? 0));
-  const net_amount = subtotal - discount + gst_amount;
+  const discount = Math.min(subtotal, Math.max(0, Number(body.discount ?? 0)));
+  const net_amount = Math.round((subtotal - discount) * 100) / 100;
 
   let paid_amount = Number(body.paid_amount);
   let payment_status = body.payment_status;
@@ -121,6 +121,7 @@ export function buildCreateSalePayload(body: CreateSaleBody): CreateSaleBody {
   }
 
   return {
+    price_includes_tax: true,
     ...(body.customer_id ? { customer_id: body.customer_id } : {}),
     discount,
     payment_mode: body.payment_mode,
@@ -169,6 +170,7 @@ function normalizeSaleRow(raw: Record<string, any>): Sale {
     subtotal: Number(raw.subtotal ?? 0),
     discount: Number(raw.discount ?? 0),
     gstTotal: Number(raw.gst_amount ?? raw.gstTotal ?? 0),
+    priceIncludesTax: raw.price_includes_tax === true || raw.price_includes_tax === 1,
     grandTotal: Number(raw.net_amount ?? raw.grandTotal ?? 0),
     paymentMode: String(raw.payment_mode ?? raw.paymentMode ?? 'cash'),
     paymentStatus: String(raw.payment_status ?? raw.paymentStatus ?? 'paid'),

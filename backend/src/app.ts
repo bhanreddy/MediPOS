@@ -58,13 +58,21 @@ export function createApp(): express.Application {
   }
 
   app.use(helmetConfig);
+  // Authenticated data must never be reused by shared caches or browser history caches.
+  app.use('/api', (_req, res, next) => {
+    res.setHeader('Cache-Control', 'private, no-store');
+    res.vary('Authorization');
+    res.vary('x-impersonate-clinic');
+    res.vary('x-store-id');
+    next();
+  });
   app.use(express.json({ limit: '2mb' }));
   app.use(express.urlencoded({ limit: '2mb', extended: true }));
   app.use(sanitizeInput);
   morgan.token('url', req => { const url = 'originalUrl' in req && typeof req.originalUrl === 'string' ? req.originalUrl : req.url || ''; return url.replace(/([?&]token=)[^&]+/gi, '$1[redacted]'); });
   app.use(morgan('dev'));
 
-  app.use('/public', publicRouter);
+  app.use('/public', durableRuntime, publicRouter);
 
   app.use(['/api/auth/login', '/api/auth/register'], authRateLimit);
   app.use('/api', apiRateLimit, durableRuntime, routes);

@@ -84,7 +84,12 @@ apiClient.interceptors.request.use(
 /* ─── Response Interceptor — Silent Token Refresh ───── */
 
 apiClient.interceptors.response.use(
-  (response) => response,
+  (response) => {
+    const config = response.config as InternalAxiosRequestConfig & { _sessionRevision?: number };
+    if (config._sessionRevision !== SecureStorage.getRevision())
+      throw new axios.CanceledError('Session changed.');
+    return response;
+  },
   async (error: AxiosError) => {
     const original = error.config as
       | (InternalAxiosRequestConfig & {

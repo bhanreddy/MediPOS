@@ -1,3 +1,4 @@
+import { supplierInvoiceBalance } from '../services/supplierCloudPayments';
 import { recordPaymentSchema } from "../schemas/customer.schema";
 import { transactionalRoute } from "../lib/transactionalRoute";
 import { settleCloudBalance } from "../services/cloudSettlement";
@@ -199,7 +200,9 @@ suppliersRouter.get("/:id/outstanding", requireAuth, async (req, res, next) => {
 
     res.json({
       data: {
-        outstanding_balance: (supplier as any).outstanding_balance,
+        outstanding_balance: await supplierInvoiceBalance(suppId,clinicId),
+        payments: await queryRaw('SELECT * FROM supplier_payments WHERE supplier_id=? AND clinic_id=? ORDER BY created_at DESC LIMIT 100',[suppId,clinicId]),
+        ledger: await queryRaw('SELECT * FROM supplier_payable_ledger WHERE supplier_id=? AND clinic_id=? ORDER BY created_at DESC LIMIT 200',[suppId,clinicId]),
         purchases: purchases.slice(0, 10),
       },
     });
@@ -227,6 +230,7 @@ suppliersRouter.post(
         amount: parsed.amount,
         mode: parsed.payment_mode,
         note: parsed.note,
+        requestId: String(req.get('Idempotency-Key') || req.body._local_id || ''),
       });
       res.json({ data });
     } catch (error) {

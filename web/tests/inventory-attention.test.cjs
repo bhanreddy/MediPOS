@@ -17,7 +17,7 @@ function load(file, dependencies) {
 }
 function core() {
   return load('services/inventoryRadarCore.ts', {
-    '../lib/api': {}, '../config/appContent': { RADAR_CONFIG: { expiryWarningDays: 30 } },
+    '../lib/api': {}, './inventoryCatalogue': {}, '../config/appContent': { RADAR_CONFIG: { expiryWarningDays: 30 } },
     './appSettingsService': { AppSettingsService: { getString: async (_key, fallback) => fallback } },
   });
 }

@@ -1,4 +1,5 @@
-import { localDb } from "../local-db";
+import { randomUUID } from 'node:crypto';
+import { businessDb as localDb } from "../lib/businessDb";
 import { AppError } from "../lib/appError";
 import type { AuthUser } from "../types";
 
@@ -18,36 +19,47 @@ async function loadClinic(clinicId: string): Promise<Record<string, any> | undef
   return data ?? undefined;
 }
 
-const recent = new Map<string, { organizationId: string | null; at: number }>();
 const loading = new Map<string, Promise<string | null>>();
 /** Mirror an already verified cloud identity into the embedded POS directory. Never writes cloud data. */
 export async function ensureCloudPosDirectory(
   user: AuthUser,
   fullName?: string,
 ): Promise<string | null> {
-  const key = `${user.id}:${user.clinic_id || ""}:${user.role}`;
-  const cached = process.env.DURABLE_RUNTIME === 'postgres' ? undefined : recent.get(key);
-  if (cached && Date.now() - cached.at < 30_000) return cached.organizationId;
-  const current = loading.get(key);
+  const key = `${user.id}:${user.clinic_id || ""}:${user.role}:${Boolean(user.isImpersonating)}`;
+  const current = process.env.DATABASE_URL ? undefined : loading.get(key);
   if (current) return current;
   const attempt = (async () => {
     let clinic: Record<string, any> | undefined;
     if (user.clinic_id) {
-      clinic = localDb
+      clinic = process.env.DATABASE_URL ? await loadClinic(user.clinic_id) : (await localDb
         .prepare("SELECT * FROM clinics WHERE id = ? OR _local_id = ?")
-        .get(user.clinic_id, user.clinic_id) as Record<string, any> | undefined;
+        .get(user.clinic_id, user.clinic_id)) as Record<string, any> | undefined;
       if (!clinic) {
         clinic = await loadClinic(user.clinic_id);
         if (!clinic)
           throw new AppError(403, "Your assigned clinic is unavailable.");
       }
     }
+    if (clinic && (clinic.deleted_at || clinic._deleted || clinic.is_active === false || clinic.is_active === 0))
+      throw new AppError(403, "Your assigned clinic is unavailable.");
+    if (process.env.DATABASE_URL && user.isImpersonating) return clinic?.organization_id || user.clinic_id || null;
     const organizationId = clinic
       ? String(clinic.organization_id || user.clinic_id)
       : null;
+    if (process.env.DATABASE_URL && clinic && organizationId) {
+      const { postgresQuery } = await import('../lib/postgresDb');
+      const ready = await postgresQuery(`SELECT s.id FROM stores s
+        JOIN user_organization_access oa ON oa.organization_id=s.organization_id AND oa.user_id=$1 AND oa.is_active=true
+        JOIN user_store_access sa ON sa.store_id=s.id AND sa.user_id=$1 AND sa.is_active=true
+        WHERE s.clinic_id=$2 AND s.deleted_at IS NULL LIMIT 1`, [user.id,user.clinic_id]);
+      if (ready.length) return organizationId;
+      // Serialize first-time directory provisioning only. Established requests
+      // do not take this lock and can checkout concurrently.
+      await postgresQuery('SELECT pg_advisory_xact_lock(hashtextextended($1,0))', [`directory:${user.clinic_id}`]);
+    }
     const now = new Date().toISOString();
-    localDb.transaction(() => {
-      localDb
+    (await localDb.transaction(async () => {
+      if (!process.env.DATABASE_URL && !user.isImpersonating) (await localDb
         .prepare(
           `INSERT INTO users (id, _local_id, clinic_id, full_name, email, role, _synced, _updated_at)
         VALUES (?, ?, ?, ?, ?, ?, 1, ?) ON CONFLICT(_local_id) DO UPDATE SET
@@ -61,9 +73,9 @@ export async function ensureCloudPosDirectory(
           user.email,
           user.role,
           now,
-        );
+        ));
       if (!clinic || !organizationId || !user.clinic_id) return;
-      localDb
+      (await localDb
         .prepare(
           `INSERT OR IGNORE INTO organizations (id, _local_id, legal_name, display_name, code, timezone, currency, _synced, _updated_at)
         VALUES (?, ?, ?, ?, ?, ?, 'INR', 1, ?)`,
@@ -76,8 +88,8 @@ export async function ensureCloudPosDirectory(
           organizationId,
           clinic.timezone || "Asia/Kolkata",
           now,
-        );
-      localDb
+        ));
+      (await localDb
         .prepare(
           `INSERT INTO clinics (id, _local_id, name, organization_id, plan, is_active, _synced, _updated_at)
         VALUES (?, ?, ?, ?, ?, ?, 1, ?) ON CONFLICT(_local_id) DO UPDATE SET organization_id=excluded.organization_id, name=excluded.name, _synced=1`,
@@ -90,15 +102,15 @@ export async function ensureCloudPosDirectory(
           clinic.plan || "trial",
           clinic.is_active === false ? 0 : 1,
           now,
-        );
-      let store = localDb
+        ));
+      let store = (await localDb
         .prepare(
           "SELECT id FROM stores WHERE organization_id = ? AND clinic_id = ? AND _deleted = 0 LIMIT 1",
         )
-        .get(organizationId, user.clinic_id) as { id: string } | undefined;
+        .get(organizationId, user.clinic_id)) as { id: string } | undefined;
       if (!store) {
         const id = user.clinic_id;
-        localDb
+        (await localDb
           .prepare(
             `INSERT OR IGNORE INTO stores (id, _local_id, organization_id, clinic_id, store_code, name, timezone, _synced, _updated_at)
           VALUES (?, ?, ?, ?, ?, ?, ?, 1, ?)`,
@@ -112,59 +124,61 @@ export async function ensureCloudPosDirectory(
             clinic.name || "Medical Store",
             clinic.timezone || "Asia/Kolkata",
             now,
-          );
+          ));
         store = { id };
       }
-      const organizationAccess = localDb
+      if(process.env.DATABASE_URL) {
+        for(const table of ['medicines','medicine_batches','customers','suppliers','sales','sale_items','purchases','purchase_items','expenses','stock_ledger']) {
+          await localDb.prepare(`UPDATE ${table} SET organization_id=? WHERE clinic_id=? AND organization_id IS NULL`).run(organizationId,user.clinic_id);
+        }
+      }
+      if (user.isImpersonating) return;
+      const organizationAccess = (await localDb
         .prepare(
           "SELECT id FROM user_organization_access WHERE user_id = ? AND organization_id = ?",
         )
-        .get(user.id, organizationId);
+        .get(user.id, organizationId));
       if (!organizationAccess) {
-        const id = `${user.id}:${organizationId}`;
-        localDb
+        const id = randomUUID();
+        (await localDb
           .prepare(
             `INSERT OR IGNORE INTO user_organization_access (id, _local_id, user_id, organization_id, role, is_active, _synced, _updated_at)
           VALUES (?, ?, ?, ?, ?, 1, 1, ?)`,
           )
-          .run(id, id, user.id, organizationId, user.role, now);
+          .run(id, id, user.id, organizationId, user.role === 'SUPER_ADMIN' ? 'OWNER' : user.role, now));
       } else {
-        localDb
+        (await localDb
           .prepare(
             "UPDATE user_organization_access SET role = ? WHERE user_id = ? AND organization_id = ?",
           )
-          .run(user.role, user.id, organizationId);
+          .run(user.role === 'SUPER_ADMIN' ? 'OWNER' : user.role, user.id, organizationId));
       }
-      const storeAccess = localDb
+      const storeAccess = (await localDb
         .prepare(
           "SELECT id FROM user_store_access WHERE user_id = ? AND store_id = ?",
         )
-        .get(user.id, store.id);
+        .get(user.id, store.id));
       if (!storeAccess) {
-        const id = `${user.id}:${store.id}`;
-        localDb
+        const id = randomUUID();
+        (await localDb
           .prepare(
             `INSERT OR IGNORE INTO user_store_access (id, _local_id, user_id, organization_id, store_id, role, is_default, is_active, _synced, _updated_at)
           VALUES (?, ?, ?, ?, ?, ?, 1, 1, 1, ?)`,
           )
-          .run(id, id, user.id, organizationId, store.id, user.role, now);
+          .run(id, id, user.id, organizationId, store.id, ['OWNER','SUPER_ADMIN','REGIONAL_MANAGER'].includes(user.role) ? 'STORE_MANAGER' : user.role, now));
       } else {
-        localDb
+        (await localDb
           .prepare(
             "UPDATE user_store_access SET role = ? WHERE user_id = ? AND store_id = ?",
           )
-          .run(user.role, user.id, store.id);
+          .run(['OWNER','SUPER_ADMIN','REGIONAL_MANAGER'].includes(user.role) ? 'STORE_MANAGER' : user.role, user.id, store.id));
       }
-    })();
+    })());
     return organizationId;
   })();
-  loading.set(key, attempt);
+  if (!process.env.DATABASE_URL) loading.set(key, attempt);
   try {
     const organizationId = await attempt;
-    recent.set(key, { organizationId, at: Date.now() });
-    if (recent.size > 2000)
-      for (const [k, v] of recent)
-        if (Date.now() - v.at >= 30_000) recent.delete(k);
     return organizationId;
   } finally {
     if (loading.get(key) === attempt) loading.delete(key);

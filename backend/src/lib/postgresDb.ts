@@ -6,11 +6,12 @@ const transactions = new AsyncLocalStorage<{
   executor: typeof sql;
   afterCommit: Array<() => void>;
   beforeCommit: Array<() => void | Promise<void>>;
+  failed?: unknown;
 }>();
 export async function withPostgresTransaction<T>(
   operation: () => Promise<T>,
 ): Promise<T> {
-  if (transactions.getStore()) return operation();
+  if (transactions.getStore()) return (await operation());
   const callbacks: Array<() => void> = [];
   const beforeCommit: Array<() => void | Promise<void>> = [];
   const result = await sql.begin(async (tx) =>
@@ -18,7 +19,9 @@ export async function withPostgresTransaction<T>(
       { executor: tx as unknown as typeof sql, afterCommit: callbacks, beforeCommit },
       async () => {
         const value = await operation();
+        if(transactions.getStore()?.failed)throw transactions.getStore()!.failed;
         for (const callback of beforeCommit) await callback();
+        if(transactions.getStore()?.failed)throw transactions.getStore()!.failed;
         return value;
       },
     ),
@@ -36,20 +39,40 @@ export async function withPostgresTransaction<T>(
   return result as T;
 }
 
-/** Local projections must join the durable checkpoint before its SQL transaction commits. */
+export function inPostgresTransaction(): boolean { return Boolean(transactions.getStore()); }
+
+export function markPostgresFailure(error: unknown): never {
+  const context=transactions.getStore();if(context)context.failed=error;throw error;
+}
+/** Isolate a rejected offline command without discarding its durable inbox record. */
+export async function withPostgresSavepoint<T>(operation:()=>Promise<T>):Promise<T> {
+  const parent=transactions.getStore();
+  if(!parent)return withPostgresTransaction(operation);
+  const child={executor:parent.executor,afterCommit:[] as Array<()=>void>,beforeCommit:[] as Array<()=>void|Promise<void>>,failed:undefined as unknown};
+  const result=await (parent.executor as unknown as import('postgres').TransactionSql).savepoint(async executor=>transactions.run({...child,executor:executor as unknown as typeof sql},async()=>{
+    const result=await operation();if(transactions.getStore()?.failed)throw transactions.getStore()!.failed;return result;
+  }));
+  parent.afterCommit.push(...child.afterCommit);parent.beforeCommit.push(...child.beforeCommit);
+  return result as T;
+}
+
+/** Register work that must succeed before the PostgreSQL transaction commits. */
 export function beforePostgresCommit(callback: () => void | Promise<void>): void {
-  if (process.env.DURABLE_RUNTIME !== 'postgres') {
-    afterPostgresCommit(() => { void callback(); });
-    return;
-  }
   const transaction = transactions.getStore();
   if (transaction) transaction.beforeCommit.push(callback);
   else void callback();
 }
 
+/** postgres.js runs with fetch_types=false; serialize array parameters explicitly. */
+export function postgresParameter(value: any): any {
+  if (!Array.isArray(value)) return value;
+  return '{'+value.map(item=>item===null ? 'NULL' : Array.isArray(item) ? postgresParameter(item) : '"'+String(item).replace(/\\/g,'\\\\').replace(/"/g,'\\"')+'"').join(',')+'}';
+}
+
 /** Native PostgreSQL parameters, including bytea, without SQLite syntax rewriting. */
 export async function postgresQuery<T = Record<string, any>>(query: string, params: any[] = []): Promise<T[]> {
-  return await (transactions.getStore()?.executor || sql).unsafe(query, params) as unknown as T[];
+  const executor=transactions.getStore()?.executor || sql;
+  return await executor.unsafe(query,params.map(postgresParameter)).catch(markPostgresFailure) as unknown as T[];
 }
 export function afterPostgresCommit(callback: () => void): void {
   const transaction = transactions.getStore();
@@ -77,8 +100,8 @@ export async function queryRaw<T = any>(
 
   return (await (transactions.getStore()?.executor || sql).unsafe(
     pgQuery,
-    params,
-  )) as T[];
+    params.map(postgresParameter),
+  ).catch(markPostgresFailure)) as unknown as T[];
 }
 
 export async function queryAll<T = any>(
@@ -120,7 +143,7 @@ export async function queryCount(
   return Number(rows[0]?.cnt || 0);
 }
 
-export async function localMutate({
+async function performCloudMutation({
   table,
   operation,
   data,
@@ -129,6 +152,7 @@ export async function localMutate({
   operation: "INSERT" | "UPDATE" | "DELETE";
   data: Record<string, any>;
 }) {
+  if (!/^[a-z_][a-z0-9_]*$/.test(table)) throw new Error('Invalid table identifier');
   const sql = transactions.getStore()?.executor || defaultSql;
   const localId = data._local_id || data.id || uuidv4();
   const now = new Date().toISOString();
@@ -148,13 +172,15 @@ export async function localMutate({
     return { _local_id: localId, _deleted: 1, deleted_at: now };
   }
 
-  const payload: any = { ...data };
+  const { normalizeCloudRecord } = await import('./businessDb');
+  const payload: any = await normalizeCloudRecord(table, data);
   for (const key of Object.keys(payload))
     if (payload[key] === undefined) delete payload[key];
   delete payload._synced;
   delete payload._updated_at;
   delete payload._deleted;
 
+  if (operation === 'INSERT' && !payload.id && uuidId) payload.id = uuidId;
   payload._local_id = localId;
   payload.updated_at = now;
 
@@ -180,6 +206,10 @@ export async function localMutate({
     `;
     return updated;
   }
+}
+
+export async function localMutate(input:Parameters<typeof performCloudMutation>[0]) {
+  try{return await performCloudMutation(input);}catch(error){return markPostgresFailure(error);}
 }
 
 /** One round trip for a homogeneous set of rows, using the current transaction. */

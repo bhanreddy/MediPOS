@@ -1,9 +1,13 @@
+import api from '../../lib/api';
+import { getBranchSelection, setBranchSelection } from '../../lib/branchSelection';
+import { usePosStore } from '../../store/posStore';
+import { BranchSelector, type BranchOption } from './BranchSelector';
 import { useEffect, useRef, useState } from "react";
 import * as Dialog from '@radix-ui/react-dialog';
 import type { LucideIcon } from "lucide-react";
 import { Link, useLocation, useNavigate } from "react-router-dom";
 import { ConnectionStatus, WorkspaceRoute } from '../layout/WorkspaceRoute';
-import { useQueryClient } from "@tanstack/react-query";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 import toast from "react-hot-toast";
 import { useAuth } from "../../lib/auth";
 import { useClinicNavHotkeys } from "../../hooks/useClinicNavHotkeys";
@@ -46,7 +50,37 @@ import { LiquidSurface } from "../glass/LiquidGlass";
 type NavItem = { name: string; path: string; icon: LucideIcon; fKey?: number };
 
 export const ClinicLayout = () => {
-  const { signOut, user, session } = useAuth();
+  const { signOut, user, session, clinic_id } = useAuth();
+  const clinic = sessionStorage.getItem('impersonate_clinic_id') || clinic_id;
+  const branchDirectory = useQuery({
+    queryKey: ['branch-directory', user?.id, clinic],
+    enabled: !!user?.id && !!clinic,
+    retry: false,
+    queryFn: async () => (await api.get('/branches/accessible')).data as { data: BranchOption[]; default_store_id: string | null },
+  });
+  const [branchReady, setBranchReady] = useState(false);
+  const preferred = getBranchSelection(user?.id, clinic);
+  const branches = branchDirectory.data?.data ?? [];
+  const activeBranch = branches.some(branch => branch.id === preferred) ? preferred : branchDirectory.data?.default_store_id ?? null;
+  useEffect(() => {
+    if (!user?.id || !clinic) return;
+    if (branchDirectory.isError) { setBranchReady(true); return; }
+    if (!branchDirectory.isSuccess) return;
+    if (preferred !== activeBranch) setBranchSelection(user.id, clinic, activeBranch);
+    setBranchReady(true);
+  }, [activeBranch, branchDirectory.isError, branchDirectory.isSuccess, clinic, preferred, user?.id]);
+
+  function switchBranch(id: string) {
+    if (!user?.id || !clinic || id === activeBranch || !branches.some(branch => branch.id === id)) return;
+    const cart = usePosStore.getState();
+    if (cart.cart.length) {
+      toast.error('Park or complete the current bill before switching branches.');
+      return;
+    }
+    cart.reset();
+    setBranchSelection(user.id, clinic, id);
+    window.location.reload();
+  }
   const { theme, toggleTheme } = useTheme();
   const queryClient = useQueryClient();
   const navigate = useNavigate();
@@ -247,6 +281,7 @@ export const ClinicLayout = () => {
         settings={SYSTEM_NAV}
         activePath={activeNav?.path}
         shopName={shopDisplayName}
+        branchControl={<BranchSelector branches={branches} value={activeBranch} onChange={switchBranch} label="Branch in navigation" />}
         logoUrl={showShopLogo ? logoUrl : undefined}
         onLogoError={() => logoUrl && setFailedLogoUrl(logoUrl)}
         mobileOpen={mobileMenuOpen}
@@ -306,6 +341,7 @@ export const ClinicLayout = () => {
           <div className="workspace-breadcrumb">
             <span>Workspace</span><ChevronRight size={13} aria-hidden /><strong>{pageLabel}</strong>
           </div>
+          <BranchSelector branches={branches} value={activeBranch} onChange={switchBranch} />
           <button
             type="button"
             onClick={handleSync}
@@ -402,7 +438,8 @@ export const ClinicLayout = () => {
         )}
         <ConnectionStatus />
         <main id="workspace-content" tabIndex={-1} className="premium-content flex-1 min-w-0 overflow-y-auto overflow-x-hidden relative bg-background">
-          <WorkspaceRoute label={pageLabel} />
+          {branchReady ? <WorkspaceRoute label={pageLabel} />
+            : <p role="status" className="p-6 text-sm text-muted">Loading your branches…</p>}
 
           <Dialog.Root open={alertsOpen} onOpenChange={setAlertsOpen}>
             <Dialog.Portal>

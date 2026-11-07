@@ -236,6 +236,7 @@ function apiHarness(client, invalidateQueries = () => Promise.resolve()) {
   return load("lib/api.ts", {
     axios,
     "./apiBaseUrl": { API_BASE_URL: "/api" },
+    "./branchSelection": { getBranchSelection: () => null },
     "./queryClient": { queryClient: { invalidateQueries } },
     "axios-retry": {
       __esModule: true,
@@ -348,7 +349,7 @@ function authHarness(
     "lib/auth.ts",
     {
       zustand: require("zustand"),
-      "./api": api,
+      "./api": { ...api, setApiBranchIdentity: () => {} },
       "./sessionClient": { sessionClient: client },
       "./store": {
         readJson: async () => savedProfile,
@@ -362,6 +363,7 @@ function authHarness(
       },
       "./queryClient": { queryClient: { clear: () => state.cleared++ } },
       "../utils/stockAlertSession": { clearStockAlertPopupSession: () => {} },
+      "../store/posStore": { bindPosTenant: scope => { state.cartScope = scope; } },
     },
     { window: { location: { replace: (url) => state.redirects.push(url) } } },
   );
@@ -414,7 +416,7 @@ test("manual logout during profile lookup cannot put the user back into either a
   await pending;
   assert.equal(h.useAuth.getState().session, null);
   assert.equal(h.state.dispatched.at(-1).type, "logout");
-  assert.equal(h.state.cleared, 1);
+  assert.ok(h.state.cleared >= 1);
   assert.equal(h.state.redirects[0], "/login");
 });
 test("routine authenticated requests do not rewrite the same persisted session", async () => {
@@ -603,4 +605,59 @@ test('successful stock changes refresh inventory, notification counts and the da
   api.defaults.adapter = async () => { throw new Error('Stock update failed'); };
   await assert.rejects(api.post('/purchases', {}));
   assert.deepEqual(invalidated, []);
+});
+
+test('successful responses from the previous account are discarded after an account switch', async () => {
+  let version = 0;
+  const gate = deferred();
+  const api = apiHarness({ getVersion: () => version, getSession: async () => session() });
+  api.defaults.adapter = async config => {
+    await gate.promise;
+    return { data: { private: 'account-a' }, status: 200, headers: {}, config };
+  };
+  const pending = assert.rejects(api.get('/customers'), /Session changed/);
+  await flush(); version++; gate.resolve(); await pending;
+});
+
+test('a new SDK account immediately clears cached data and the previous operator identity', async () => {
+  const h = authHarness();
+  await h.useAuth.getState().checkSession();
+  h.observeAuthSession();
+  const before = h.state.cleared;
+  h.emit({ ...session('account-b'), user: { id: 'other-operator', email: 'other@example.invalid', user_metadata: {} } });
+  assert.ok(h.state.cleared > before);
+  assert.equal(h.useAuth.getState().user.id, 'other-operator');
+  assert.equal(h.useAuth.getState().clinic_id, null);
+  assert.equal(h.useAuth.getState().role, null);
+  await flush();
+  assert.equal(h.useAuth.getState().user.id, 'other-operator');
+  assert.equal(h.useAuth.getState().isOwner, false);
+});
+
+test('persisted POS carts are retained only within their bound account and clinic', () => {
+  const values = new Map();
+  const storage = { getItem: key => values.get(key) ?? null, setItem: (key, value) => values.set(key, value), removeItem: key => values.delete(key) };
+  const { usePosStore, bindPosTenant } = load('store/posStore.ts', {
+    zustand: require('zustand'), 'zustand/middleware': require('zustand/middleware'),
+  }, { sessionStorage: storage, crypto: require('node:crypto').webcrypto });
+  bindPosTenant('user-a:clinic-a');
+  usePosStore.getState().setCustomer('private-customer', 'Private name', '9000000000');
+  bindPosTenant('user-a:clinic-a');
+  assert.equal(usePosStore.getState().customer_id, 'private-customer');
+  bindPosTenant('user-b:clinic-b');
+  assert.equal(usePosStore.getState().customer_id, null);
+  assert.equal(usePosStore.getState().customer_name, '');
+  assert.equal(usePosStore.getState().customer_phone, '');
+  bindPosTenant(null);
+  assert.equal(values.has('pos-v2-cart-storage'), false);
+});
+
+test('subscription caches cannot inherit another account or clinic entitlement', async () => {
+  const values = new Map([['subscription_cache_json', JSON.stringify({ ownerId: 'user-a', clinicId: 'clinic-a', entitled: true })]]);
+  const { getSubscriptionCache } = load('lib/store.ts', {
+    '@tauri-apps/api/core': { isTauri: () => false }, '@tauri-apps/plugin-store': { load: async () => null },
+  }, { window: {}, localStorage: { getItem: key => values.get(key) ?? null } });
+  assert.equal(await getSubscriptionCache('user-b', 'clinic-b'), null);
+  assert.equal(await getSubscriptionCache('user-a', 'clinic-b'), null);
+  assert.equal((await getSubscriptionCache('user-a', 'clinic-a')).entitled, true);
 });

@@ -1,3 +1,6 @@
+import { activeRegister } from '../services/cashRegister';
+import { discountLimit } from '../services/counterDiscounts';
+import { z } from 'zod';
 import { Router } from 'express';
 import { requireAuth } from '../middleware/auth';
 import { requireRole } from '../middleware/rbac';
@@ -15,11 +18,23 @@ import { PromotionEngine } from '../services/commercial/promotionEngine';
 import { Money } from '../lib/money';
 import { PrescriptionService } from '../services/prescription/prescriptionService';
 import { DispensingEngine } from '../services/prescription/dispensingEngine';
-import { localDb } from '../local-db';
+import { businessDb as localDb, cloudBusinessMode } from '../lib/businessDb';
 import { localMutate } from '../lib/localMutate';
 import { v4 as uuidv4 } from 'uuid';
 import { AppError } from '../lib/appError';
 import { rejectLegacyLoyalty } from '../services/commercial/retiredLoyalty';
+import { quoteCloudSaleReturn } from '../services/cloudSaleReturns';
+import { resolveCloudStoreContext } from '../services/cloudStoreContext';
+import { saleReturnHandler } from './sales';
+import { saleReturnSchema } from '../schemas/sale.schema';
+import { queryRaw } from '../lib/postgresDb';
+
+const legacyCloudReturn = saleReturnHandler(true);
+const legacyReturnItems = (items: unknown) => Array.isArray(items) ? items.map(item => ({
+  sale_item_id: item.sale_item_id, batch_id: item.batch_id, quantity: item.quantity,
+  reason: item.reason || item.notes || item.reason_code || 'Customer return',
+  restock: item.restock === true,
+})) : [];
 
 export const posRouter = Router();
 posRouter.use(requireAuth, rejectLegacyLoyalty);
@@ -27,14 +42,14 @@ posRouter.use(requireAuth, rejectLegacyLoyalty);
 // ── 1. GET /api/pos/session ──────────────────────────────────────────────────
 posRouter.get('/session', requireAuth, async (req, res, next) => {
   try {
-    const session = POSSessionService.resolveSession({
+    const session = (await POSSessionService.resolveSession({
       userId: req.user!.id,
       clinicId: req.user!.clinic_id,
       requestedStoreId: (req.headers['x-store-id'] as string) || (req.query.store_id as string) || null,
       requestedCounterId: (req.headers['x-counter-id'] as string) || (req.query.counter_id as string) || null,
       requestedTerminalId: (req.headers['x-terminal-id'] as string) || (req.query.terminal_id as string) || null,
       deviceUuid: (req.headers['x-device-uuid'] as string) || null,
-    });
+    }));
     res.json({ data: session });
   } catch (err) {
     next(err);
@@ -44,23 +59,23 @@ posRouter.get('/session', requireAuth, async (req, res, next) => {
 // ── 2. GET /api/pos/search ───────────────────────────────────────────────────
 posRouter.get('/search', requireAuth, async (req, res, next) => {
   try {
-    const session = POSSessionService.resolveSession({
+    const session = (await POSSessionService.resolveSession({
       userId: req.user!.id,
       clinicId: req.user!.clinic_id,
       requestedStoreId: (req.headers['x-store-id'] as string) || (req.query.store_id as string) || null,
-    });
+    }));
 
     const query = (req.query.q as string) || '';
     const barcode = (req.query.barcode as string) || '';
     const limit = Math.max(1, Math.min(parseInt(req.query.limit as string) || 25, 100));
 
-    const data = POSSearchService.search({
+    const data = (await POSSearchService.search({
       query,
       barcode,
       organizationId: session.organizationId,
       storeId: session.storeId,
       limit,
-    });
+    }));
 
     res.json(data);
   } catch (err) {
@@ -71,13 +86,13 @@ posRouter.get('/search', requireAuth, async (req, res, next) => {
 // ── 3. POST /api/pos/quote ───────────────────────────────────────────────────
 posRouter.post('/quote', requireAuth, async (req, res, next) => {
   try {
-    const session = POSSessionService.resolveSession({
+    const session = (await POSSessionService.resolveSession({
       userId: req.user!.id,
       clinicId: req.user!.clinic_id,
       requestedStoreId: req.body.store_id || (req.headers['x-store-id'] as string) || null,
       requestedCounterId: req.body.counter_id || (req.headers['x-counter-id'] as string) || null,
       requestedTerminalId: req.body.terminal_id || (req.headers['x-terminal-id'] as string) || null,
-    });
+    }));
 
     const {
       items,
@@ -90,7 +105,7 @@ posRouter.post('/quote', requireAuth, async (req, res, next) => {
       is_offline,
     } = req.body;
 
-    const quote = POSCartService.generateQuote({
+    const quote = (await POSCartService.generateQuote({
       items: items || [],
       organizationId: session.organizationId,
       storeId: session.storeId,
@@ -103,7 +118,7 @@ posRouter.post('/quote', requireAuth, async (req, res, next) => {
       paidAmount: Number(paid_amount || 0),
       isInterstate: Boolean(is_interstate),
       isOffline: Boolean(is_offline),
-    });
+    }));
 
     res.json({ data: quote });
   } catch (err) {
@@ -116,16 +131,27 @@ posRouter.post('/checkout', requireAuth, requireRole('CASHIER', 'PHARMACIST', 'O
   try {
     const idempotencyKey = (req.headers['x-idempotency-key'] as string) || req.body.idempotency_key || req.body._local_id;
 
+    const session = (await POSSessionService.resolveSession({
+      userId: req.user!.id,
+      clinicId: req.user!.clinic_id,
+      requestedStoreId: req.body.store_id || (req.headers['x-store-id'] as string) || null,
+      requestedCounterId: req.body.counter_id || (req.headers['x-counter-id'] as string) || null,
+      requestedTerminalId: req.body.terminal_id || (req.headers['x-terminal-id'] as string) || null,
+      deviceUuid: (req.headers['x-device-uuid'] as string) || null,
+    }));
+
     // Idempotency Check: return original sale if repeated
     if (idempotencyKey) {
-      const existingSale: any = localDb
-        .prepare('SELECT * FROM sales WHERE (idempotency_key = ? OR _local_id = ?) AND _deleted = 0')
-        .get(idempotencyKey, idempotencyKey);
+      if(cloudBusinessMode()) await queryRaw('SELECT pg_advisory_xact_lock(hashtextextended(?,0))',
+        [`legacy-pos:${session.organizationId}:${session.storeId}:${idempotencyKey}`]);
+      const existingSale: any = (await localDb
+        .prepare('SELECT * FROM sales WHERE (idempotency_key = ? OR _local_id = ?) AND organization_id = ? AND store_id = ? AND _deleted = 0')
+        .get(idempotencyKey, idempotencyKey, session.organizationId, session.storeId));
 
       if (existingSale) {
-        const saleItems = localDb.prepare('SELECT * FROM sale_items WHERE sale_id = ?').all(existingSale.id || existingSale._local_id);
-        const paymentTxs = localDb.prepare('SELECT * FROM payment_transactions WHERE sale_id = ?').all(existingSale.id || existingSale._local_id);
-        const snapshot = localDb.prepare('SELECT * FROM sale_commercial_snapshots WHERE sale_id = ?').get(existingSale.id || existingSale._local_id);
+        const saleItems = (await localDb.prepare('SELECT * FROM sale_items WHERE sale_id = ?').all(existingSale.id || existingSale._local_id));
+        const paymentTxs = (await localDb.prepare('SELECT * FROM payment_transactions WHERE sale_id = ?').all(existingSale.id || existingSale._local_id));
+        const snapshot = (await localDb.prepare('SELECT * FROM sale_commercial_snapshots WHERE sale_id = ?').get(existingSale.id || existingSale._local_id));
         return res.json({
           data: {
             ...existingSale,
@@ -138,14 +164,7 @@ posRouter.post('/checkout', requireAuth, requireRole('CASHIER', 'PHARMACIST', 'O
       }
     }
 
-    const session = POSSessionService.resolveSession({
-      userId: req.user!.id,
-      clinicId: req.user!.clinic_id,
-      requestedStoreId: req.body.store_id || (req.headers['x-store-id'] as string) || null,
-      requestedCounterId: req.body.counter_id || (req.headers['x-counter-id'] as string) || null,
-      requestedTerminalId: req.body.terminal_id || (req.headers['x-terminal-id'] as string) || null,
-      deviceUuid: (req.headers['x-device-uuid'] as string) || null,
-    });
+
 
     const {
       items,
@@ -169,8 +188,23 @@ posRouter.post('/checkout', requireAuth, requireRole('CASHIER', 'PHARMACIST', 'O
       throw new AppError(400, 'Cart is empty. Add at least one product.', 'EMPTY_CART');
     }
 
+    if (cloudBusinessMode()) {
+      const ids = [...new Set(items.map((item:{medicine_id:string})=>item.medicine_id))];
+      const medicines=await queryRaw(`SELECT * FROM medicines WHERE clinic_id=? AND deleted_at IS NULL
+        AND (id::text=ANY(?::text[]) OR _local_id=ANY(?::text[])) ORDER BY id FOR SHARE`,[req.user!.clinic_id,ids,ids]);
+      if (ids.some(id=>!medicines.some(row=>row.id===id || row._local_id===id))) throw new AppError(404,'Medicine not found');
+      if (medicines.some(product=>product.prescription_required || product.is_schedule_h1 || (product.schedule_classification && product.schedule_classification!=='NONE'))) {
+        throw new AppError(409, 'Restricted dispensing is blocked until the verified prescription and pharmacist workflow is available.', 'RESTRICTED_DISPENSING_BLOCKED');
+      }
+      await queryRaw(`SELECT id FROM medicine_batches WHERE clinic_id=? AND medicine_id=ANY(?::uuid[])
+        AND deleted_at IS NULL ORDER BY id FOR UPDATE`,[req.user!.clinic_id,medicines.map(row=>row.id)]);
+      if (customer_id && !(await queryRaw('SELECT id FROM customers WHERE id::text=? AND clinic_id=? AND deleted_at IS NULL FOR UPDATE',[customer_id,req.user!.clinic_id])).length)
+        throw new AppError(404,'Customer not found');
+      if (park_id) await ParkedSalesService.requireClaim(z.string().uuid().parse(park_id), session.storeId, session.userId);
+    }
+
     // 1. Generate Authoritative Server Quote
-    const quote = POSCartService.generateQuote({
+    const quote = (await POSCartService.generateQuote({
       items,
       organizationId: session.organizationId,
       storeId: session.storeId,
@@ -182,9 +216,19 @@ posRouter.post('/checkout', requireAuth, requireRole('CASHIER', 'PHARMACIST', 'O
       billDiscount: Number(bill_discount || 0),
       isInterstate: Boolean(is_interstate),
       isOffline: Boolean(is_offline),
-    });
+    }));
 
-    if (quote.requiresSupervisorApproval && !supervisor_auth_id) {
+    if (cloudBusinessMode() && quote.lines.some(line => line.prescriptionRequired || line.scheduleClassification !== 'NONE')) {
+      throw new AppError(409, 'Restricted dispensing is blocked until the verified prescription and pharmacist workflow is available.', 'RESTRICTED_DISPENSING_BLOCKED');
+    }
+    if (cloudBusinessMode() && req.user!.role !== 'OWNER') {
+      const limit = await discountLimit({ clinicId: req.user!.clinic_id!, storeId: session.storeId, userId: session.userId, role: req.user!.role });
+      const subtotalPaise = Money.toPaise(quote.subtotal);
+      if (Money.toPaise(quote.totalDiscount) * 10000 > subtotalPaise * limit || quote.requiresSupervisorApproval) {
+        throw new AppError(403, 'Complete this bill in the main counter with an authorized discount approval.', 'SUPERVISOR_APPROVAL_REQUIRED');
+      }
+    }
+    if (quote.requiresSupervisorApproval && !supervisor_auth_id && (!cloudBusinessMode() || req.user!.role !== 'OWNER')) {
       throw new AppError(403, `Supervisor authorization required: ${quote.approvalReasons.join(', ')}`, 'SUPERVISOR_APPROVAL_REQUIRED');
     }
 
@@ -197,27 +241,27 @@ posRouter.post('/checkout', requireAuth, requireRole('CASHIER', 'PHARMACIST', 'O
           let matchedItem: any = null;
 
           if (prescription_id) {
-            matchedRx = localDb
-              .prepare('SELECT * FROM prescriptions WHERE (id = ? OR _local_id = ?) AND _deleted = 0')
-              .get(prescription_id, prescription_id);
+            matchedRx = (await localDb
+              .prepare('SELECT * FROM prescriptions WHERE (id = ? OR _local_id = ?) AND organization_id = ? AND _deleted = 0')
+              .get(prescription_id, prescription_id, session.organizationId));
             if (matchedRx) {
-              matchedItem = localDb
+              matchedItem = (await localDb
                 .prepare('SELECT * FROM prescription_items WHERE prescription_id = ? AND (matched_product_id = ? OR prescribed_name = ?) AND _deleted = 0')
-                .get(matchedRx.id || matchedRx._local_id, line.medicineId, line.medicineName);
+                .get(matchedRx.id || matchedRx._local_id, line.medicineId, line.medicineName));
             }
           }
 
           if (!matchedItem && customer_id) {
-            const rxRow: any = localDb
+            const rxRow: any = (await localDb
               .prepare(
-                `SELECT p.id as rx_id, pi.id as rx_item_id, p.verification_status, p.status 
-                 FROM prescriptions p 
+                `SELECT p.id as rx_id, pi.id as rx_item_id, p.verification_status, p.status
+                 FROM prescriptions p
                  JOIN prescription_items pi ON (p.id = pi.prescription_id OR p._local_id = pi.prescription_id)
-                 WHERE p.patient_id = ? AND (pi.matched_product_id = ? OR pi.prescribed_name = ?) 
+                 WHERE p.organization_id = ? AND p.patient_id = ? AND (pi.matched_product_id = ? OR pi.prescribed_name = ?)
                    AND p.verification_status = 'VERIFIED' AND p._deleted = 0 AND pi._deleted = 0
                  ORDER BY p.created_at DESC LIMIT 1`
               )
-              .get(customer_id, line.medicineId, line.medicineName);
+              .get(session.organizationId, customer_id, line.medicineId, line.medicineName));
 
             if (rxRow) {
               matchedRx = { id: rxRow.rx_id, verification_status: rxRow.verification_status };
@@ -250,13 +294,23 @@ posRouter.post('/checkout', requireAuth, requireRole('CASHIER', 'PHARMACIST', 'O
     for (const p of paymentTxsInput) {
       const amt = Number(p.amount || 0);
       if (amt < 0) throw new AppError(400, 'Payment amount cannot be negative', 'INVALID_PAYMENT_AMOUNT');
-      totalTenderedPaise += Money.toPaise(amt);
+      if (!cloudBusinessMode() || String(p.tender_type).toUpperCase() !== 'CREDIT') totalTenderedPaise += Money.toPaise(amt);
     }
 
     const totalTendered = Money.toRupees(totalTenderedPaise);
     const balanceDuePaise = Math.max(0, quote.grandTotalPaise - totalTenderedPaise);
     const changeReturnedPaise = Math.max(0, totalTenderedPaise - quote.grandTotalPaise);
     const changeReturned = Money.toRupees(changeReturnedPaise);
+
+    if (cloudBusinessMode()) {
+      const creditPaise = paymentTxsInput.filter(p => String(p.tender_type).toUpperCase() === 'CREDIT')
+        .reduce((sum, p) => sum + Money.toPaise(Number(p.amount)), 0);
+      const cashPaise = paymentTxsInput.filter(p => String(p.tender_type).toUpperCase() === 'CASH')
+        .reduce((sum, p) => sum + Money.toPaise(Number(p.amount)), 0);
+      if ((balanceDuePaise && !customer_id) || (creditPaise && creditPaise !== balanceDuePaise) || changeReturnedPaise > cashPaise) {
+        throw new AppError(400, 'Payment totals, credit, or cash change do not match the invoice.', 'TENDER_TOTAL_MISMATCH');
+      }
+    }
 
     // If balance due > 0 and not marked as credit with customer
     if (balanceDuePaise > 0 && !customer_id && !paymentTxsInput.some(p => p.tender_type === 'CREDIT')) {
@@ -268,16 +322,16 @@ posRouter.post('/checkout', requireAuth, requireRole('CASHIER', 'PHARMACIST', 'O
     }
 
     // 3. Atomic Database Transaction Execution
-    const executeCheckoutTx = localDb.transaction(() => {
+    const executeCheckoutTx = localDb.transaction(async () => {
       const saleId = uuidv4();
-      const invoiceNumber = DocumentNumberingService.generate({
+      const invoiceNumber = (await DocumentNumberingService.generate({
         organizationId: session.organizationId,
         storeId: session.storeId,
         documentType: 'SALE_INVOICE',
-      });
+      }));
 
       // Insert Sale Master
-      const saleRecord = localMutate({
+      const saleRecord = (await localMutate({
         table: 'sales',
         operation: 'INSERT',
         data: {
@@ -287,7 +341,7 @@ posRouter.post('/checkout', requireAuth, requireRole('CASHIER', 'PHARMACIST', 'O
           store_id: session.storeId,
           counter_id: session.counterId,
           terminal_id: session.terminalId,
-          clinic_id: req.user!.clinic_id || 'default-clinic',
+          clinic_id: req.user!.clinic_id,
           customer_id: customer_id || null,
           invoice_number: invoiceNumber,
           doctor_name: doctor_name || null,
@@ -308,7 +362,7 @@ posRouter.post('/checkout', requireAuth, requireRole('CASHIER', 'PHARMACIST', 'O
           payment_status: balanceDuePaise === 0 ? 'paid' : (totalTenderedPaise > 0 ? 'partial' : 'credit'),
           served_by: session.userId,
         },
-      });
+      }));
 
       // Insert Sale Items, Batch Allocations, Stock Ledger & Deduct Positions
       const insertedItems: any[] = [];
@@ -318,7 +372,7 @@ posRouter.post('/checkout', requireAuth, requireRole('CASHIER', 'PHARMACIST', 'O
         const saleItemId = uuidv4();
         const primaryBatchId = line.batchAllocations[0]?.batchId || null;
 
-        const saleItem = localMutate({
+        const saleItem = (await localMutate({
           table: 'sale_items',
           operation: 'INSERT',
           data: {
@@ -326,7 +380,7 @@ posRouter.post('/checkout', requireAuth, requireRole('CASHIER', 'PHARMACIST', 'O
             _local_id: saleItemId,
             organization_id: session.organizationId,
             store_id: session.storeId,
-            clinic_id: req.user!.clinic_id || 'default-clinic',
+            clinic_id: req.user!.clinic_id,
             sale_id: saleId,
             medicine_id: line.medicineId,
             batch_id: primaryBatchId,
@@ -347,13 +401,13 @@ posRouter.post('/checkout', requireAuth, requireRole('CASHIER', 'PHARMACIST', 'O
             gst_rate: line.pricing.gstRate,
             total: line.pricing.lineTotal,
           },
-        });
+        }));
         insertedItems.push(saleItem);
 
         // Process fine-grained FEFO Batch Allocations
         for (const alloc of line.batchAllocations) {
           const allocId = uuidv4();
-          const allocRecord = localMutate({
+          const allocRecord = (await localMutate({
             table: 'sale_batch_allocations',
             operation: 'INSERT',
             data: {
@@ -371,13 +425,13 @@ posRouter.post('/checkout', requireAuth, requireRole('CASHIER', 'PHARMACIST', 'O
               unit_price: alloc.mrp,
               cost_price: alloc.purchasePrice,
             },
-          });
+          }));
           insertedAllocations.push(allocRecord);
 
           // Atomic deduction from medicine_batches
-          const batchRow: any = localDb
+          const batchRow: any = (await localDb
             .prepare('SELECT quantity_remaining FROM medicine_batches WHERE id = ? OR _local_id = ?')
-            .get(alloc.batchId, alloc.batchId);
+            .get(alloc.batchId, alloc.batchId));
 
           const currentStock = Number(batchRow?.quantity_remaining || 0);
           if (currentStock < alloc.allocatedQuantity) {
@@ -389,33 +443,30 @@ posRouter.post('/checkout', requireAuth, requireRole('CASHIER', 'PHARMACIST', 'O
           }
 
           const newStock = currentStock - alloc.allocatedQuantity;
-          localDb
-            .prepare('UPDATE medicine_batches SET quantity_remaining = ? WHERE id = ? OR _local_id = ?')
-            .run(newStock, alloc.batchId, alloc.batchId);
-
           // Deduct Inventory Position
-          try {
-            InventoryPositionService.adjustStock({
-              organizationId: session.organizationId,
-              medicineId: line.medicineId,
-              batchId: alloc.batchId,
-              locationType: 'STORE',
-              storeId: session.storeId,
-              quantityDelta: -alloc.allocatedQuantity,
-            });
-          } catch {
-            InventoryPositionService.getOrCreatePosition({
-              organizationId: session.organizationId,
-              medicineId: line.medicineId,
-              batchId: alloc.batchId,
-              locationType: 'STORE',
-              storeId: session.storeId,
-              initialStock: newStock,
-            });
+          if (cloudBusinessMode()) {
+            const positionArgs = {organizationId:session.organizationId,medicineId:line.medicineId,batchId:alloc.batchId,
+              locationType:'STORE' as const,storeId:session.storeId};
+            const position = await InventoryPositionService.getOrCreatePosition(positionArgs);
+            if (position.quantity_available < alloc.allocatedQuantity) throw new AppError(409,'Available stock changed during checkout');
+            await InventoryPositionService.adjustStock({...positionArgs,quantityDelta:-alloc.allocatedQuantity});
+          }
+          (await localDb
+            .prepare('UPDATE medicine_batches SET quantity_remaining = ? WHERE id = ? OR _local_id = ?')
+            .run(newStock, alloc.batchId, alloc.batchId));
+
+          if (!cloudBusinessMode()) {
+            const position = {organizationId:session.organizationId,medicineId:line.medicineId,batchId:alloc.batchId,
+              locationType:'STORE' as const,storeId:session.storeId};
+            try {
+              await InventoryPositionService.adjustStock({...position,quantityDelta:-alloc.allocatedQuantity});
+            } catch {
+              await InventoryPositionService.getOrCreatePosition({...position,initialStock:newStock});
+            }
           }
 
           // Write Stock Ledger
-          localMutate({
+          (await localMutate({
             table: 'stock_ledger',
             operation: 'INSERT',
             data: {
@@ -424,7 +475,7 @@ posRouter.post('/checkout', requireAuth, requireRole('CASHIER', 'PHARMACIST', 'O
               store_id: session.storeId,
               counter_id: session.counterId,
               terminal_id: session.terminalId,
-              clinic_id: req.user!.clinic_id || 'default-clinic',
+              clinic_id: req.user!.clinic_id,
               medicine_id: line.medicineId,
               batch_id: alloc.batchId,
               movement_type: 'SALE',
@@ -433,12 +484,12 @@ posRouter.post('/checkout', requireAuth, requireRole('CASHIER', 'PHARMACIST', 'O
               reference_id: saleId,
               performed_by: session.userId,
             },
-          });
+          }));
 
           // Record Dispensing Event if Rx-Required
           if (line.prescriptionRequired && rxLinksMap.has(line.medicineId)) {
             const rxInfo = rxLinksMap.get(line.medicineId)!;
-            DispensingEngine.recordDispensing({
+            (await DispensingEngine.recordDispensing({
               organizationId: session.organizationId,
               storeId: session.storeId,
               terminalId: session.terminalId,
@@ -450,18 +501,31 @@ posRouter.post('/checkout', requireAuth, requireRole('CASHIER', 'PHARMACIST', 'O
               batchId: alloc.batchId,
               quantityDispensed: alloc.allocatedQuantity,
               dispensedBy: session.userId,
-            });
+            }));
           }
         }
       }
 
       // Process Payment Transactions
       const insertedPayments: any[] = [];
-      for (const p of paymentTxsInput) {
+      const drawer = cloudBusinessMode() ? await activeRegister({
+        clinicId: req.user!.clinic_id!, storeId: session.storeId, userId: session.userId, role: req.user!.role,
+      }, req.body.register_required === true && paymentTxsInput.some(p => String(p.tender_type).toUpperCase() === 'CASH')) : undefined;
+      let unallocatedChange = changeReturnedPaise;
+      const paymentEntries = [...paymentTxsInput];
+      if (cloudBusinessMode() && balanceDuePaise && !paymentEntries.some(p => String(p.tender_type).toUpperCase() === 'CREDIT')) {
+        paymentEntries.push({ tender_type: 'CREDIT', amount: Money.toRupees(balanceDuePaise) });
+      }
+      for (const p of paymentEntries) {
         const txId = uuidv4();
         const tenderType = (p.tender_type || 'CASH').toUpperCase();
-        const amt = Number(p.amount || 0);
-        const pRecord = localMutate({
+        const receivedPaise = Money.toPaise(Number(p.amount || 0));
+        const changePaise = tenderType === 'CASH'
+          ? cloudBusinessMode() ? Math.min(receivedPaise, unallocatedChange) : changeReturnedPaise
+          : 0;
+        if (cloudBusinessMode()) unallocatedChange -= changePaise;
+        const amt = Money.toRupees(cloudBusinessMode() ? receivedPaise - changePaise : receivedPaise);
+        const pRecord = (await localMutate({
           table: 'payment_transactions',
           operation: 'INSERT',
           data: {
@@ -477,15 +541,16 @@ posRouter.post('/checkout', requireAuth, requireRole('CASHIER', 'PHARMACIST', 'O
             reference_number: p.reference_number || null,
             status: 'COMPLETED',
             provider: p.provider || 'MANUAL_CONFIRMED',
-            change_returned_paise: tenderType === 'CASH' ? changeReturnedPaise : 0,
+            ...(cloudBusinessMode() ? { actor_id: session.userId, register_session_id: drawer?.id } : {}),
+            change_returned_paise: changePaise,
           },
-        });
+        }));
         insertedPayments.push(pRecord);
       }
 
       // Insert Authoritative Commercial Snapshot
       const snapshotId = uuidv4();
-      const commercialSnapshot = localMutate({
+      const commercialSnapshot = (await localMutate({
         table: 'sale_commercial_snapshots',
         operation: 'INSERT',
         data: {
@@ -512,47 +577,49 @@ posRouter.post('/checkout', requireAuth, requireRole('CASHIER', 'PHARMACIST', 'O
             customerGroupName: quote.customerGroupName,
           }),
         },
-      });
+      }));
 
       // Record Applied Promotions
       if (quote.appliedPromotions && quote.appliedPromotions.length > 0) {
-        PromotionEngine.recordApplications({
+        (await PromotionEngine.recordApplications({
           organizationId: session.organizationId,
           storeId: session.storeId,
           saleId,
           applications: quote.appliedPromotions,
-        });
+        }));
       }
 
       // Atomically Consume Coupon
       if (quote.couponValidation?.isValid && quote.couponValidation.coupon) {
         const cpnId = quote.couponValidation.coupon.id || quote.couponValidation.coupon._local_id!;
-        CouponEngine.redeemCoupon({
+        (await CouponEngine.redeemCoupon({
           organizationId: session.organizationId,
           couponId: cpnId,
           customerId: customer_id || null,
           saleId,
           discountAmountPaise: quote.couponDiscountPaise,
-        });
+        }));
       }
 
       // Update Customer Receivables if credit balance remains
       if (customer_id && balanceDuePaise > 0) {
-        localDb
+        (await localDb
           .prepare('UPDATE customers SET outstanding_balance = outstanding_balance + ? WHERE id = ? OR _local_id = ?')
-          .run(Money.toRupees(balanceDuePaise), customer_id, customer_id);
+          .run(Money.toRupees(balanceDuePaise), customer_id, customer_id));
       }
 
       // Complete parked sale if resumed from hold
-      if (park_id) {
-        localMutate({
+      if (park_id && cloudBusinessMode()) {
+        await ParkedSalesService.completeClaim(park_id, saleId);
+      } else if (park_id) {
+        (await localMutate({
           table: 'parked_sales',
           operation: 'UPDATE',
           data: {
             _local_id: park_id,
             status: 'COMPLETED',
           },
-        });
+        }));
       }
 
       return {
@@ -566,7 +633,7 @@ posRouter.post('/checkout', requireAuth, requireRole('CASHIER', 'PHARMACIST', 'O
       };
     });
 
-    const result = executeCheckoutTx();
+    const result = (await executeCheckoutTx());
 
     res.status(201).json({ data: result });
   } catch (err) {
@@ -578,17 +645,30 @@ posRouter.post('/checkout', requireAuth, requireRole('CASHIER', 'PHARMACIST', 'O
 // ── 5. POST /api/pos/park ────────────────────────────────────────────────────
 posRouter.post('/park', requireAuth, async (req, res, next) => {
   try {
-    const session = POSSessionService.resolveSession({
+    const session = (await POSSessionService.resolveSession({
       userId: req.user!.id,
       clinicId: req.user!.clinic_id,
       requestedStoreId: req.body.store_id || (req.headers['x-store-id'] as string) || null,
       requestedCounterId: req.body.counter_id || (req.headers['x-counter-id'] as string) || null,
       requestedTerminalId: req.body.terminal_id || (req.headers['x-terminal-id'] as string) || null,
-    });
+    }));
 
     const { cart, customer, totals, notes, expires_in_minutes } = req.body;
+    const requestId = req.body.request_id;
+    const resumeId = req.body.resume_id;
+    if (cloudBusinessMode()) {
+      z.array(z.record(z.unknown())).min(1).max(500).parse(cart);
+      z.number().int().min(5).max(10080).optional().parse(expires_in_minutes);
+      z.string().max(500).optional().parse(notes);
+      z.string().uuid().optional().parse(requestId);
+      z.string().uuid().optional().parse(resumeId);
+      if (customer?.id && !(await queryRaw(
+        'SELECT id FROM customers WHERE id::text = ? AND clinic_id = ? AND deleted_at IS NULL',
+        [customer.id, req.user!.clinic_id],
+      )).length) throw new AppError(404, 'Customer not found.');
+    }
 
-    const parked = ParkedSalesService.parkSale({
+    const parked = (await ParkedSalesService.parkSale({
       organizationId: session.organizationId,
       storeId: session.storeId,
       counterId: session.counterId,
@@ -600,7 +680,8 @@ posRouter.post('/park', requireAuth, async (req, res, next) => {
       totalsSnapshot: totals || {},
       notes: notes || '',
       expiresInMinutes: expires_in_minutes,
-    });
+      requestId, resumeId,
+    }));
 
     res.status(201).json({ data: parked });
   } catch (err) {
@@ -611,13 +692,13 @@ posRouter.post('/park', requireAuth, async (req, res, next) => {
 // ── 6. GET /api/pos/parked ───────────────────────────────────────────────────
 posRouter.get('/parked', requireAuth, async (req, res, next) => {
   try {
-    const session = POSSessionService.resolveSession({
+    const session = (await POSSessionService.resolveSession({
       userId: req.user!.id,
       clinicId: req.user!.clinic_id,
       requestedStoreId: (req.headers['x-store-id'] as string) || (req.query.store_id as string) || null,
-    });
+    }));
 
-    const list = ParkedSalesService.listParked(session.storeId);
+    const list = (await ParkedSalesService.listParked(session.storeId, session.userId, z.string().max(120).optional().parse(req.query.q)));
     res.json({ data: list });
   } catch (err) {
     next(err);
@@ -627,21 +708,21 @@ posRouter.get('/parked', requireAuth, async (req, res, next) => {
 // ── 7. POST /api/pos/parked/:id/resume ───────────────────────────────────────
 posRouter.post('/parked/:id/resume', requireAuth, async (req, res, next) => {
   try {
-    const session = POSSessionService.resolveSession({
+    const session = (await POSSessionService.resolveSession({
       userId: req.user!.id,
       clinicId: req.user!.clinic_id,
       requestedStoreId: (req.headers['x-store-id'] as string) || (req.query.store_id as string) || null,
       requestedCounterId: (req.headers['x-counter-id'] as string) || null,
       requestedTerminalId: (req.headers['x-terminal-id'] as string) || null,
-    });
+    }));
 
-    const resumed = ParkedSalesService.resumeParked({
+    const resumed = (await ParkedSalesService.resumeParked({
       parkedId: req.params.id,
       storeId: session.storeId,
       resumingCounterId: session.counterId,
       resumingTerminalId: session.terminalId,
       resumingUserId: session.userId,
-    });
+    }));
 
     res.json({ data: resumed });
   } catch (err) {
@@ -652,13 +733,13 @@ posRouter.post('/parked/:id/resume', requireAuth, async (req, res, next) => {
 // ── 8. POST /api/pos/parked/:id/cancel ───────────────────────────────────────
 posRouter.post('/parked/:id/cancel', requireAuth, async (req, res, next) => {
   try {
-    const session = POSSessionService.resolveSession({
+    const session = (await POSSessionService.resolveSession({
       userId: req.user!.id,
       clinicId: req.user!.clinic_id,
       requestedStoreId: (req.headers['x-store-id'] as string) || (req.query.store_id as string) || null,
-    });
+    }));
 
-    const result = ParkedSalesService.cancelParked(req.params.id, session.storeId);
+    const result = (await ParkedSalesService.cancelParked(z.string().uuid().parse(req.params.id), session.storeId, session.userId, req.user!.role === "OWNER"));
     res.json({ data: result });
   } catch (err) {
     next(err);
@@ -669,10 +750,23 @@ posRouter.post('/parked/:id/cancel', requireAuth, async (req, res, next) => {
 posRouter.post('/returns/quote', requireAuth, async (req, res, next) => {
   try {
     const { original_sale_id, items } = req.body;
-    const quote = ReturnsEngine.quoteReturn({
+    if (cloudBusinessMode()) {
+      const parsed = saleReturnSchema.parse({ original_sale_id, items: legacyReturnItems(items) });
+      const quote = await quoteCloudSaleReturn(req.user!.clinic_id!, parsed.original_sale_id, parsed.items);
+      await resolveCloudStoreContext(req.user!.clinic_id!, {store_id:quote.original.store_id});
+      return void res.json({data:{
+        originalInvoiceNumber:quote.original.invoice_number,commercialSnapshot:null,
+        totalRefund:quote.total_refund_paise/100,totalRefundPaise:quote.total_refund_paise,
+        lines:quote.selected.map(line=>({saleItemId:line.sale_item_id,batchId:line.batch_id,medicineId:line.medicine_id,
+          purchasedQuantity:line.item.quantity,returnQuantity:line.quantity,unitPrice:Number(line.item.unit_price),
+          discountPct:Number(line.item.discount_pct),effectiveUnitPrice:line.refund_paise/line.quantity/100,
+          lineRefund:line.refund_paise/100,lineRefundPaise:line.refund_paise,reasonCode:line.reason})),
+      }});
+    }
+    const quote = (await ReturnsEngine.quoteReturn({
       originalSaleId: original_sale_id,
       items: items || [],
-    });
+    }));
     res.json({ data: quote });
   } catch (err) {
     next(err);
@@ -682,17 +776,24 @@ posRouter.post('/returns/quote', requireAuth, async (req, res, next) => {
 // ── 10. POST /api/pos/returns ───────────────────────────────────────────────
 posRouter.post('/returns', requireAuth, requireRole('PHARMACIST', 'OWNER', 'SUPER_ADMIN'), async (req, res, next) => {
   try {
-    const session = POSSessionService.resolveSession({
+    if (cloudBusinessMode()) {
+      const method = String(req.body.refund_method || 'CASH').toUpperCase();
+      const refundMethods: Record<string,string> = {CASH:'cash',UPI:'upi',CARD:'card',ORIGINAL_TENDER:'original',ORIGINAL:'original'};
+      if (!Object.hasOwn(refundMethods, method)) throw new AppError(400, 'Choose cash, UPI, card, or the original tender for this return.');
+      req.body = {...req.body, refund_method:refundMethods[method], items:legacyReturnItems(req.body.items)};
+      return legacyCloudReturn(req,res,next);
+    }
+    const session = (await POSSessionService.resolveSession({
       userId: req.user!.id,
       clinicId: req.user!.clinic_id,
       requestedStoreId: req.body.store_id || (req.headers['x-store-id'] as string) || null,
       requestedCounterId: req.body.counter_id || (req.headers['x-counter-id'] as string) || null,
       requestedTerminalId: req.body.terminal_id || (req.headers['x-terminal-id'] as string) || null,
-    });
+    }));
 
     const { original_sale_id, items, refund_method, refund_reference, supervisor_auth_id } = req.body;
 
-    const result = ReturnsEngine.processReturn({
+    const result = (await ReturnsEngine.processReturn({
       originalSaleId: original_sale_id,
       items: items || [],
       refundMethod: refund_method || 'CASH',
@@ -703,7 +804,7 @@ posRouter.post('/returns', requireAuth, requireRole('PHARMACIST', 'OWNER', 'SUPE
       terminalId: session.terminalId,
       performedBy: session.userId,
       supervisorAuthId: supervisor_auth_id,
-    });
+    }));
 
     res.status(201).json({ data: result });
   } catch (err) {
@@ -714,17 +815,17 @@ posRouter.post('/returns', requireAuth, requireRole('PHARMACIST', 'OWNER', 'SUPE
 // ── 11. POST /api/pos/authorize ─────────────────────────────────────────────
 posRouter.post('/authorize', requireAuth, async (req, res, next) => {
   try {
-    const session = POSSessionService.resolveSession({
+    const session = (await POSSessionService.resolveSession({
       userId: req.user!.id,
       clinicId: req.user!.clinic_id,
       requestedStoreId: req.body.store_id || (req.headers['x-store-id'] as string) || null,
       requestedCounterId: req.body.counter_id || (req.headers['x-counter-id'] as string) || null,
       requestedTerminalId: req.body.terminal_id || (req.headers['x-terminal-id'] as string) || null,
-    });
+    }));
 
     const { action_type, supervisor_pin, supervisor_user_id, entity_type, entity_id, reason, old_value, new_value } = req.body;
 
-    const authResult = SupervisorAuthService.authorize({
+    const authResult = (await SupervisorAuthService.authorize({
       organizationId: session.organizationId,
       storeId: session.storeId,
       counterId: session.counterId,
@@ -738,7 +839,7 @@ posRouter.post('/authorize', requireAuth, async (req, res, next) => {
       reason: reason || 'Operator requested override',
       oldValue: old_value,
       newValue: new_value,
-    });
+    }));
 
     res.json({ data: authResult });
   } catch (err) {

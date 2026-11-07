@@ -1,6 +1,6 @@
 // inventoryAvailabilityService.ts — Centralized Inventory Availability Service
 import { AppError } from '../../lib/appError';
-import { localDb } from '../../local-db';
+import { businessDb as localDb } from '../../lib/businessDb';
 import {
   InventoryAvailabilityResult,
   BatchAvailabilitySummary,
@@ -13,7 +13,7 @@ export class InventoryAvailabilityService {
   /**
    * Check inventory availability for a medicine at a specific location
    */
-  static getAvailability(params: {
+  static async getAvailability(params: {
     organizationId: string;
     medicineId: string;
     locationType: LocationType;
@@ -21,7 +21,7 @@ export class InventoryAvailabilityService {
     warehouseId?: string | null;
     batchId?: string | null;
     requestedQuantity?: number;
-  }): InventoryAvailabilityResult {
+  }): Promise<InventoryAvailabilityResult> {
     const {
       organizationId,
       medicineId,
@@ -32,9 +32,9 @@ export class InventoryAvailabilityService {
       requestedQuantity = 0,
     } = params;
 
-    const medRow: any = localDb
+    const medRow: any = (await localDb
       .prepare('SELECT id, name FROM medicines WHERE (id = ? OR _local_id = ?) AND organization_id = ? AND _deleted = 0')
-      .get(medicineId, medicineId, organizationId);
+      .get(medicineId, medicineId, organizationId));
 
     if (!medRow) throw new AppError(404, 'Medicine not found');
     const medicineName = medRow.name;
@@ -42,12 +42,12 @@ export class InventoryAvailabilityService {
     const locationCol = locationType === 'STORE' ? 'store_id' : 'warehouse_id';
 
     // Retrieve active recalls affecting this medicine or batches
-    const activeRecalls: any[] = localDb
+    const activeRecalls: any[] = (await localDb
       .prepare(
         `SELECT product_id, batch_id FROM product_recalls 
          WHERE organization_id = ? AND status = 'ACTIVE' AND (product_id = ? OR product_id = ?)`
       )
-      .all(organizationId, medicineId, medicineId);
+      .all(organizationId, medicineId, medicineId));
 
     const isProductRecalled = activeRecalls.some(
       (r) => !r.batch_id || r.batch_id === null
@@ -59,8 +59,8 @@ export class InventoryAvailabilityService {
     // Retrieve batches for this medicine
     let batchQuery = `
       SELECT mb.*, 
-             COALESCE(ip.quantity_on_hand, (CASE WHEN mb.store_id = ? OR (? IS NULL AND mb.store_id IS NULL) THEN mb.quantity_remaining ELSE 0 END)) as pos_on_hand,
-             COALESCE(ip.quantity_available, (CASE WHEN mb.store_id = ? OR (? IS NULL AND mb.store_id IS NULL) THEN mb.quantity_remaining ELSE 0 END)) as pos_available,
+             COALESCE(ip.quantity_on_hand, (CASE WHEN mb.store_id IS NOT DISTINCT FROM ? THEN mb.quantity_remaining ELSE 0 END)) as pos_on_hand,
+             COALESCE(ip.quantity_available, (CASE WHEN mb.store_id IS NOT DISTINCT FROM ? THEN mb.quantity_remaining ELSE 0 END)) as pos_available,
              COALESCE(ip.quantity_reserved, 0) as pos_reserved,
              COALESCE(ip.quantity_quarantined, 0) as pos_quarantined,
              COALESCE(ip.quantity_damaged, 0) as pos_damaged,
@@ -78,8 +78,8 @@ export class InventoryAvailabilityService {
     `;
 
     const queryParams: any[] = targetId
-      ? [targetId, targetId, targetId, targetId, organizationId, locationType, targetId, medRow.id, organizationId]
-      : [null, null, null, null, organizationId, locationType, medRow.id, organizationId];
+      ? [targetId, targetId, organizationId, locationType, targetId, medRow.id, organizationId]
+      : [null, null, organizationId, locationType, medRow.id, organizationId];
 
     if (batchId) {
       batchQuery += ` AND (mb.id = ? OR mb._local_id = ?)`;
@@ -88,7 +88,7 @@ export class InventoryAvailabilityService {
 
     batchQuery += ` ORDER BY mb.expiry_date ASC`;
 
-    const rawBatches: any[] = localDb.prepare(batchQuery).all(...queryParams);
+    const rawBatches: any[] = (await localDb.prepare(batchQuery).all(...queryParams));
     const todayStr = new Date().toISOString().split('T')[0];
 
     const batches: BatchAvailabilitySummary[] = [];
@@ -218,11 +218,11 @@ export class InventoryAvailabilityService {
   /**
    * Search cross-store availability for a product across other stores/warehouses in the organization
    */
-  static getCrossLocationAvailability(params: {
+  static async getCrossLocationAvailability(params: {
     organizationId: string;
     medicineId: string;
     currentStoreId?: string | null;
-  }): {
+  }): Promise<{
     currentStoreAvailable: number;
     otherLocations: {
       locationType: 'STORE' | 'WAREHOUSE';
@@ -232,37 +232,37 @@ export class InventoryAvailabilityService {
       availableUnits: number;
       onHandUnits: number;
     }[];
-  } {
+  }> {
     const { organizationId, medicineId, currentStoreId = null } = params;
 
     let currentStoreAvailable = 0;
     if (currentStoreId) {
-      const cur = this.getAvailability({
+      const cur = (await this.getAvailability({
         organizationId,
         medicineId,
         locationType: 'STORE',
         storeId: currentStoreId,
-      });
+      }));
       currentStoreAvailable = cur.totalAvailable;
     }
 
     const otherLocations: any[] = [];
 
     // Other Stores
-    const stores: any[] = localDb
+    const stores: any[] = (await localDb
       .prepare(
         `SELECT id, store_code, name FROM stores 
          WHERE organization_id = ? ${currentStoreId ? 'AND id != ?' : ''}`
       )
-      .all(...(currentStoreId ? [organizationId, currentStoreId] : [organizationId]));
+      .all(...(currentStoreId ? [organizationId, currentStoreId] : [organizationId])));
 
     for (const s of stores) {
-      const avail = this.getAvailability({
+      const avail = (await this.getAvailability({
         organizationId,
         medicineId,
         locationType: 'STORE',
         storeId: s.id,
-      });
+      }));
       if (avail.totalOnHand > 0) {
         otherLocations.push({
           locationType: 'STORE',
@@ -276,17 +276,17 @@ export class InventoryAvailabilityService {
     }
 
     // Warehouses
-    const warehouses: any[] = localDb
+    const warehouses: any[] = (await localDb
       .prepare('SELECT id, warehouse_code, name FROM warehouses WHERE organization_id = ?')
-      .all(organizationId);
+      .all(organizationId));
 
     for (const w of warehouses) {
-      const avail = this.getAvailability({
+      const avail = (await this.getAvailability({
         organizationId,
         medicineId,
         locationType: 'WAREHOUSE',
         warehouseId: w.id,
-      });
+      }));
       if (avail.totalOnHand > 0) {
         otherLocations.push({
           locationType: 'WAREHOUSE',

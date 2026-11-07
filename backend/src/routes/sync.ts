@@ -59,6 +59,7 @@ function cleanPayloadForSupabase(
 
 syncRouter.post('/push', requireAuth, async (req: Request, res: Response, next: NextFunction) => {
   try {
+    if(process.env.DATABASE_URL) return void res.status(409).json({success:false,error:{code:'ROW_SYNC_RETIRED',message:'Keep the local outbox. Send complete sales or returns to /api/offline/commands; direct business-row synchronization is disabled.'}});
     const parsed = pushBodySchema.parse(req.body);
     const clinicId = req.user?.clinic_id;
     const userId = req.user!.id;

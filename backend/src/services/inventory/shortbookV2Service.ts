@@ -1,33 +1,35 @@
 // shortbookV2Service.ts — Shortbook V2 Multi-Source Request Consolidation Service
-import { localDb } from '../../local-db';
+import { businessDb as localDb } from '../../lib/businessDb';
 import { v4 as uuidv4 } from 'uuid';
 import { ShortbookConsolidatedItem } from '../../domain/inventoryTypes';
+import { AppError } from '../../lib/appError';
 
 export class ShortbookV2Service {
   /**
    * Add or aggregate an out-of-stock request into Shortbook V2
    */
-  static recordShortageRequest(params: {
+  static async recordShortageRequest(params: {
     clinicId?: string | null;
     medicineId: string;
     quantityNeeded?: number;
     reason?: string;
     source?: 'LOW_STOCK' | 'STOCKOUT' | 'CUSTOMER_REQUEST' | 'PRESCRIPTION_UNAVAILABLE' | 'MANUAL';
     preferredSupplierId?: string | null;
-  }): any {
+  }): Promise<any> {
     const {
-      clinicId = 'default-clinic',
+      clinicId,
       medicineId,
       quantityNeeded = 1,
       reason = 'Out of Stock',
       source = 'CUSTOMER_REQUEST',
       preferredSupplierId = null,
     } = params;
+    if (!clinicId) throw new AppError(403, 'Clinic context is required');
 
     const id = uuidv4();
     const now = new Date().toISOString();
 
-    localDb
+    (await localDb
       .prepare(
         `INSERT INTO shortbook (
           id, _local_id, clinic_id, medicine_id, reason, quantity_needed,
@@ -44,7 +46,7 @@ export class ShortbookV2Service {
         preferredSupplierId,
         now,
         now
-      );
+      ));
 
     return { id, medicineId, quantityNeeded, source, recordedAt: now };
   }
@@ -52,7 +54,8 @@ export class ShortbookV2Service {
   /**
    * Fetch consolidated shortbook entries aggregating repeat requests
    */
-  static getConsolidatedShortbook(clinicId?: string | null): ShortbookConsolidatedItem[] {
+  static async getConsolidatedShortbook(clinicId?: string | null): Promise<ShortbookConsolidatedItem[]> {
+    if (!clinicId) return [];
     let query = `
       SELECT sb.*, m.name as medicine_name, m.generic_name,
              s.name as supplier_name
@@ -68,7 +71,7 @@ export class ShortbookV2Service {
     }
     query += ` ORDER BY sb.created_at DESC`;
 
-    const rows: any[] = localDb.prepare(query).all(...params);
+    const rows: any[] = (await localDb.prepare(query).all(...params));
 
     const consolidatedMap = new Map<string, ShortbookConsolidatedItem>();
 

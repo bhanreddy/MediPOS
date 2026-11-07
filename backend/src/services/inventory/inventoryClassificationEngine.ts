@@ -1,5 +1,5 @@
 // inventoryClassificationEngine.ts — ABC, Movement Velocity, Days of Cover, Ageing & Dead Stock Engine
-import { localDb } from '../../local-db';
+import { businessDb as localDb } from '../../lib/businessDb';
 import { v4 as uuidv4 } from 'uuid';
 import { ABCClass, MovementClass } from '../../domain/inventoryTypes';
 
@@ -33,10 +33,10 @@ export class InventoryClassificationEngine {
   /**
    * Compute and cache ABC & Movement Velocity classifications for an organization/store
    */
-  static computeClassifications(params: {
+  static async computeClassifications(params: {
     organizationId: string;
     storeId?: string | null;
-  }): ClassificationMetric[] {
+  }): Promise<ClassificationMetric[]> {
     const { organizationId, storeId = null } = params;
     const now = new Date();
     const nowIso = now.toISOString();
@@ -66,18 +66,18 @@ export class InventoryClassificationEngine {
       salesQuery += ` AND (s.store_id = ? OR s.store_id IS NULL)`;
       salesParams.push(storeId);
     }
-    salesQuery += ` GROUP BY si.medicine_id`;
+    salesQuery += ` GROUP BY si.medicine_id,m.id,m.name,m.category`;
 
-    const salesRows: any[] = localDb.prepare(salesQuery).all(...salesParams);
+    const salesRows: any[] = (await localDb.prepare(salesQuery).all(...salesParams));
     const salesMap = new Map<string, any>();
     for (const r of salesRows) {
       salesMap.set(r.medicine_id, r);
     }
 
     // 2. Fetch all active medicines in the organization
-    const allMedicines: any[] = localDb
-      .prepare('SELECT id, name, category FROM medicines WHERE (_deleted = 0 OR _deleted IS NULL) AND (is_active = 1 OR is_active IS NULL)')
-      .all();
+    const allMedicines: any[] = (await localDb
+      .prepare('SELECT id, name, category FROM medicines WHERE organization_id=? AND (_deleted = 0 OR _deleted IS NULL) AND (is_active = 1 OR is_active IS NULL)')
+      .all(organizationId));
 
     // 3. Fetch current stock availability per medicine
     let stockQuery = `
@@ -94,7 +94,7 @@ export class InventoryClassificationEngine {
     }
     stockQuery += ` GROUP BY ip.medicine_id`;
 
-    const stockRows: any[] = localDb.prepare(stockQuery).all(...stockParams);
+    const stockRows: any[] = (await localDb.prepare(stockQuery).all(...stockParams));
     const stockMap = new Map<string, { onHand: number; available: number }>();
     for (const s of stockRows) {
       stockMap.set(s.medicine_id, {
@@ -198,7 +198,7 @@ export class InventoryClassificationEngine {
 
       // Upsert into inventory_classifications cache
       const classId = uuidv4();
-      localDb
+      (await localDb
         .prepare(
           `INSERT OR REPLACE INTO inventory_classifications (
             id, _local_id, organization_id, store_id, warehouse_id,
@@ -228,7 +228,7 @@ export class InventoryClassificationEngine {
           nowIso,
           nowIso,
           nowIso
-        );
+        ));
     }
 
     return results;
@@ -237,14 +237,14 @@ export class InventoryClassificationEngine {
   /**
    * Compute inventory ageing buckets (0-30, 31-60, 61-90, 91-180, 181-365, 365+ days)
    */
-  static getAgeingAnalysis(params: {
+  static async getAgeingAnalysis(params: {
     organizationId: string;
     storeId?: string | null;
-  }): {
+  }): Promise<{
     buckets: AgeingBucketSummary[];
     totalStockCostPaise: number;
     totalStockMrpPaise: number;
-  } {
+  }> {
     const { organizationId, storeId = null } = params;
     const now = new Date();
 
@@ -263,7 +263,7 @@ export class InventoryClassificationEngine {
       queryParams.push(storeId, storeId);
     }
 
-    const batches: any[] = localDb.prepare(query).all(...queryParams);
+    const batches: any[] = (await localDb.prepare(query).all(...queryParams));
 
     const bucketDefs = [
       { name: '0-30 days', min: 0, max: 30 },

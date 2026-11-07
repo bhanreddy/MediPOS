@@ -1,5 +1,6 @@
+import { tenantRecord } from '../../lib/tenantRecords';
 // purchaseOrderService.ts — Enterprise Purchase Order, Versioning & Supplier Confirmation Engine
-import { localDb } from '../../local-db';
+import { businessDb as localDb } from '../../lib/businessDb';
 import { localMutate } from '../../lib/localMutate';
 import { Money } from '../../lib/money';
 import { v4 as uuidv4 } from 'uuid';
@@ -50,7 +51,7 @@ export class PurchaseOrderService {
   /**
    * Create a new Purchase Order
    */
-  static createPurchaseOrder(params: CreatePurchaseOrderParams): PurchaseOrder {
+  static async createPurchaseOrder(params: CreatePurchaseOrderParams): Promise<PurchaseOrder> {
     const {
       organizationId,
       regionId = null,
@@ -74,21 +75,39 @@ export class PurchaseOrderService {
 
     // Duplicate PO Protection via idempotencyKey
     if (idempotencyKey) {
-      const existingPo = this.getPoByIdempotencyKey(organizationId, idempotencyKey);
+      const existingPo = (await this.getPoByIdempotencyKey(organizationId, idempotencyKey));
       if (existingPo) {
         return existingPo;
       }
     }
 
+    (await tenantRecord('suppliers', supplierId, organizationId));
+    if (storeId) (await tenantRecord('stores', storeId, organizationId));
+    if (warehouseId) (await tenantRecord('warehouses', warehouseId, organizationId));
+    if (regionId) (await tenantRecord('regions', regionId, organizationId));
+    if (deliveryLocationId) (await tenantRecord(deliveryLocationType === 'WAREHOUSE' ? 'warehouses' : 'stores', deliveryLocationId, organizationId));
+    for (const item of items) {
+      (await tenantRecord('medicines', item.medicineId, organizationId));
+      if (item.supplierSchemeId) (await tenantRecord('supplier_schemes', item.supplierSchemeId, organizationId));
+      if (item.requisitionId) (await tenantRecord('purchase_requisitions', item.requisitionId, organizationId));
+      if (item.requisitionItemId) {
+        const linked = (await tenantRecord('purchase_requisition_items', item.requisitionItemId, organizationId));
+        const medicine = (await tenantRecord('medicines', item.medicineId, organizationId));
+        if (![medicine.id, medicine._local_id].includes(linked.medicine_id) ||
+            (item.requisitionId && linked.requisition_id !== item.requisitionId))
+          throw new Error('Requisition item does not match purchase order');
+      }
+    }
+
     const poId = uuidv4();
-    const poNumber = DocumentNumberingService.generate({
+    const poNumber = (await DocumentNumberingService.generate({
       organizationId,
       storeId,
       documentType: 'PURCHASE_ORDER',
-    });
+    }));
 
     const nowIso = new Date().toISOString();
-    const timezone = (localDb.prepare('SELECT timezone FROM organizations WHERE id = ? OR _local_id = ?').get(organizationId, organizationId) as { timezone?: string } | undefined)?.timezone;
+    const timezone = ((await localDb.prepare('SELECT timezone FROM organizations WHERE id = ? OR _local_id = ?').get(organizationId, organizationId)) as { timezone?: string } | undefined)?.timezone;
     const orderDate = businessDate(new Date(nowIso), timezone || 'Asia/Kolkata');
 
     // Calculate line totals and scheme benefits
@@ -107,14 +126,14 @@ export class PurchaseOrderService {
       const gstRate = it.gstRate !== undefined ? it.gstRate : 12.0;
 
       // Evaluate scheme for free quantity & effective cost estimate
-      const schemeResult = SupplierSchemeEngine.evaluateInwardScheme({
+      const schemeResult = (await SupplierSchemeEngine.evaluateInwardScheme({
         organizationId,
         supplierId,
         medicineId: it.medicineId,
         billedQuantity: it.orderedQuantity,
         purchasePrice: rateRs,
         requestedDiscountPct: discountPct,
-      });
+      }));
 
       const lineGrossPaise = it.purchaseRatePaise * it.orderedQuantity;
       const lineDiscAmtPaise = Math.round((lineGrossPaise * schemeResult.tradeDiscountPct) / 100);
@@ -130,7 +149,7 @@ export class PurchaseOrderService {
         schemeSummary = `Expected ${schemeResult.freeQuantity} free (${it.orderedQuantity}+${schemeResult.freeQuantity})`;
       }
 
-      const itemRecord = localMutate({
+      const itemRecord = (await localMutate({
         table: 'purchase_order_items',
         operation: 'INSERT',
         data: {
@@ -155,7 +174,7 @@ export class PurchaseOrderService {
           required_by_date: it.requiredByDate || null,
           notes: it.notes || null,
         },
-      });
+      }));
 
       poItemRecords.push(itemRecord as any);
 
@@ -171,7 +190,7 @@ export class PurchaseOrderService {
 
     const totalPaise = subtotalPaise - discountPaise + gstPaise;
 
-    const poHeader = localMutate({
+    const poHeader = (await localMutate({
       table: 'purchase_orders',
       operation: 'INSERT',
       data: {
@@ -200,10 +219,10 @@ export class PurchaseOrderService {
         terms_and_conditions: termsAndConditions,
         idempotency_key: idempotencyKey,
       },
-    });
+    }));
 
     // Create Initial Version Snapshot
-    localMutate({
+    (await localMutate({
       table: 'purchase_order_versions',
       operation: 'INSERT',
       data: {
@@ -215,11 +234,11 @@ export class PurchaseOrderService {
         changed_by: createdBy,
         created_at: nowIso,
       },
-    });
+    }));
 
     // Link and update source requisition items
     for (const link of reqLinks) {
-      localMutate({
+      (await localMutate({
         table: 'purchase_order_requisition_links',
         operation: 'INSERT',
         data: {
@@ -230,14 +249,14 @@ export class PurchaseOrderService {
           requisition_item_id: link.reqItemId,
           allocated_quantity: link.qty,
         },
-      });
+      }));
 
       // Update requisition item ordered qty and status
-      const reqItem: any = localDb.prepare('SELECT * FROM purchase_requisition_items WHERE id = ? OR _local_id = ?').get(link.reqItemId, link.reqItemId);
+      const reqItem: any = (await localDb.prepare('SELECT * FROM purchase_requisition_items WHERE id = ? OR _local_id = ?').get(link.reqItemId, link.reqItemId));
       if (reqItem) {
         const newOrderedQty = Number(reqItem.ordered_quantity || 0) + link.qty;
         const isComplete = newOrderedQty >= Number(reqItem.requested_quantity || 0);
-        localMutate({
+        (await localMutate({
           table: 'purchase_requisition_items',
           operation: 'UPDATE',
           data: {
@@ -245,46 +264,46 @@ export class PurchaseOrderService {
             ordered_quantity: newOrderedQty,
             status: isComplete ? 'ORDERED' : 'PENDING',
           },
-        });
+        }));
       }
 
       // Check if entire requisition is ordered or partially ordered
-      const allReqItems: any[] = localDb.prepare('SELECT requested_quantity, ordered_quantity FROM purchase_requisition_items WHERE requisition_id = ?').all(link.reqId);
+      const allReqItems: any[] = (await localDb.prepare('SELECT requested_quantity, ordered_quantity FROM purchase_requisition_items WHERE requisition_id = ?').all(link.reqId));
       const totalReq = allReqItems.reduce((acc, r) => acc + Number(r.requested_quantity || 0), 0);
       const totalOrd = allReqItems.reduce((acc, r) => acc + Number(r.ordered_quantity || 0), 0);
       const newStatus = totalOrd >= totalReq ? 'ORDERED' : 'PARTIALLY_ORDERED';
 
-      localMutate({
+      (await localMutate({
         table: 'purchase_requisitions',
         operation: 'UPDATE',
         data: {
           _local_id: link.reqId,
           status: newStatus,
         },
-      });
+      }));
     }
 
-    return this.getPoById(poId, organizationId)!;
+    return (await this.getPoById(poId, organizationId))!;
   }
 
   /**
    * Approve a Purchase Order
    */
-  static approvePurchaseOrder(params: {
+  static async approvePurchaseOrder(params: {
     poId: string;
     organizationId: string;
     approvedBy: string;
     userRole: string;
-  }): PurchaseOrder {
+  }): Promise<PurchaseOrder> {
     const { poId, organizationId, approvedBy, userRole } = params;
-    const po = this.getPoById(poId, organizationId);
+    const po = (await this.getPoById(poId, organizationId));
     if (!po) throw new Error('Purchase Order not found');
 
     if (po.status !== 'DRAFT' && po.status !== 'PENDING_APPROVAL') {
       throw new Error(`Cannot approve PO in status: ${po.status}`);
     }
 
-    const policy = ProcurementPolicyService.getPolicy(organizationId);
+    const policy = (await ProcurementPolicyService.getPolicy(organizationId));
 
     // Maker-checker validation if configured
     if (policy.enforceMakerChecker && po.created_by === approvedBy) {
@@ -292,7 +311,7 @@ export class PurchaseOrderService {
     }
 
     // Role threshold validation
-    const requiredRole = ProcurementPolicyService.getRequiredApprovalRole(organizationId, po.total_paise);
+    const requiredRole = (await ProcurementPolicyService.getRequiredApprovalRole(organizationId, po.total_paise));
     const roleWeight: Record<string, number> = {
       CASHIER: 1,
       PHARMACIST: 2,
@@ -307,7 +326,7 @@ export class PurchaseOrderService {
     }
 
     const nowIso = new Date().toISOString();
-    localMutate({
+    (await localMutate({
       table: 'purchase_orders',
       operation: 'UPDATE',
       data: {
@@ -316,15 +335,15 @@ export class PurchaseOrderService {
         approved_by: approvedBy,
         approved_at: nowIso,
       },
-    });
+    }));
 
-    return this.getPoById(poId, organizationId)!;
+    return (await this.getPoById(poId, organizationId))!;
   }
 
   /**
    * Amend an approved PO creating a new version
    */
-  static amendPurchaseOrder(params: {
+  static async amendPurchaseOrder(params: {
     poId: string;
     organizationId: string;
     amendedBy: string;
@@ -338,9 +357,9 @@ export class PurchaseOrderService {
       gstRate?: number;
       notes?: string;
     }>;
-  }): PurchaseOrder {
+  }): Promise<PurchaseOrder> {
     const { poId, organizationId, amendedBy, changeReason, expectedDeliveryDate, items } = params;
-    const po = this.getPoById(poId, organizationId);
+    const po = (await this.getPoById(poId, organizationId));
     if (!po) throw new Error('Purchase Order not found');
 
     if (po.status === 'RECEIVED' || po.status === 'CLOSED' || po.status === 'CANCELLED') {
@@ -355,7 +374,7 @@ export class PurchaseOrderService {
     const nowIso = new Date().toISOString();
 
     // Delete old items and re-insert new items
-    localDb.prepare('DELETE FROM purchase_order_items WHERE po_id = ?').run(po.id);
+    (await localDb.prepare('DELETE FROM purchase_order_items WHERE po_id = ?').run(po.id));
 
     let subtotalPaise = 0;
     let discountPaise = 0;
@@ -367,14 +386,14 @@ export class PurchaseOrderService {
       const discountPct = it.discountPct || 0;
       const gstRate = it.gstRate !== undefined ? it.gstRate : 12.0;
 
-      const schemeResult = SupplierSchemeEngine.evaluateInwardScheme({
+      const schemeResult = (await SupplierSchemeEngine.evaluateInwardScheme({
         organizationId,
         supplierId: po.supplier_id,
         medicineId: it.medicineId,
         billedQuantity: it.orderedQuantity,
         purchasePrice: Money.toRupees(it.purchaseRatePaise),
         requestedDiscountPct: discountPct,
-      });
+      }));
 
       const lineGross = it.purchaseRatePaise * it.orderedQuantity;
       const lineDiscAmt = Math.round((lineGross * schemeResult.tradeDiscountPct) / 100);
@@ -385,7 +404,7 @@ export class PurchaseOrderService {
       discountPaise += lineDiscAmt;
       gstPaise += lineGst;
 
-      const itemRecord = localMutate({
+      const itemRecord = (await localMutate({
         table: 'purchase_order_items',
         operation: 'INSERT',
         data: {
@@ -407,13 +426,13 @@ export class PurchaseOrderService {
           expected_expiry_threshold_days: 180,
           notes: it.notes || null,
         },
-      });
+      }));
       poItemRecords.push(itemRecord as any);
     }
 
     const totalPaise = subtotalPaise - discountPaise + gstPaise;
 
-    const updatedPo = localMutate({
+    const updatedPo = (await localMutate({
       table: 'purchase_orders',
       operation: 'UPDATE',
       data: {
@@ -426,10 +445,10 @@ export class PurchaseOrderService {
         expected_delivery_date: expectedDeliveryDate !== undefined ? expectedDeliveryDate : po.expected_delivery_date,
         status: 'PENDING_APPROVAL', // Requires re-approval after material amendment
       },
-    });
+    }));
 
     // Record immutable version snapshot
-    localMutate({
+    (await localMutate({
       table: 'purchase_order_versions',
       operation: 'INSERT',
       data: {
@@ -441,26 +460,26 @@ export class PurchaseOrderService {
         changed_by: amendedBy,
         created_at: nowIso,
       },
-    });
+    }));
 
-    return this.getPoById(poId, organizationId)!;
+    return (await this.getPoById(poId, organizationId))!;
   }
 
   /**
    * Record Supplier Confirmation Details
    */
-  static recordSupplierConfirmation(params: {
+  static async recordSupplierConfirmation(params: {
     poId: string;
     organizationId: string;
     expectedDeliveryDate?: string;
     notes?: string;
-  }): PurchaseOrder {
+  }): Promise<PurchaseOrder> {
     const { poId, organizationId, expectedDeliveryDate, notes } = params;
-    const po = this.getPoById(poId, organizationId);
+    const po = (await this.getPoById(poId, organizationId));
     if (!po) throw new Error('Purchase Order not found');
 
     const nowIso = new Date().toISOString();
-    localMutate({
+    (await localMutate({
       table: 'purchase_orders',
       operation: 'UPDATE',
       data: {
@@ -470,22 +489,22 @@ export class PurchaseOrderService {
         expected_delivery_date: expectedDeliveryDate || po.expected_delivery_date,
         notes: notes ? `${po.notes || ''}\nSupplier Confirmation: ${notes}`.trim() : po.notes,
       },
-    });
+    }));
 
-    return this.getPoById(poId, organizationId)!;
+    return (await this.getPoById(poId, organizationId))!;
   }
 
   /**
    * Cancel a Purchase Order
    */
-  static cancelPurchaseOrder(params: {
+  static async cancelPurchaseOrder(params: {
     poId: string;
     organizationId: string;
     cancelledBy: string;
     reason: string;
-  }): PurchaseOrder {
+  }): Promise<PurchaseOrder> {
     const { poId, organizationId, reason } = params;
-    const po = this.getPoById(poId, organizationId);
+    const po = (await this.getPoById(poId, organizationId));
     if (!po) throw new Error('Purchase Order not found');
 
     if (po.status === 'RECEIVED' || po.status === 'CLOSED') {
@@ -493,7 +512,7 @@ export class PurchaseOrderService {
     }
 
     const nowIso = new Date().toISOString();
-    localMutate({
+    (await localMutate({
       table: 'purchase_orders',
       operation: 'UPDATE',
       data: {
@@ -502,38 +521,38 @@ export class PurchaseOrderService {
         cancelled_at: nowIso,
         rejection_reason: reason,
       },
-    });
+    }));
 
-    return this.getPoById(poId, organizationId)!;
+    return (await this.getPoById(poId, organizationId))!;
   }
 
   /**
    * Fetch PO by ID with items, versions, and supplier metadata
    */
-  static getPoById(id: string, organizationId: string): PurchaseOrder | null {
-    const row: any = localDb
+  static async getPoById(id: string, organizationId: string): Promise<PurchaseOrder | null> {
+    const row: any = (await localDb
       .prepare(
         `SELECT po.*, s.name as supplier_name
          FROM purchase_orders po
          LEFT JOIN suppliers s ON s.id = po.supplier_id OR s._local_id = po.supplier_id
          WHERE (po.id = ? OR po._local_id = ?) AND (po.organization_id = ?) AND po._deleted = 0`
       )
-      .get(id, id, organizationId);
+      .get(id, id, organizationId));
 
     if (!row) return null;
 
-    const items: any[] = localDb
+    const items: any[] = (await localDb
       .prepare(
         `SELECT poi.*, m.name as medicine_name
          FROM purchase_order_items poi
          LEFT JOIN medicines m ON m.id = poi.medicine_id OR m._local_id = poi.medicine_id
          WHERE (poi.po_id = ? OR poi.po_id = ?) AND poi._deleted = 0`
       )
-      .all(row.id, row._local_id || row.id);
+      .all(row.id, row._local_id || row.id));
 
-    const versions: any[] = localDb
+    const versions: any[] = (await localDb
       .prepare(`SELECT * FROM purchase_order_versions WHERE po_id = ? ORDER BY version_number ASC`)
-      .all(row.id);
+      .all(row.id));
 
     return {
       ...row,
@@ -545,29 +564,29 @@ export class PurchaseOrderService {
   /**
    * Fetch PO by Idempotency Key
    */
-  static getPoByIdempotencyKey(organizationId: string, idempotencyKey: string): PurchaseOrder | null {
-    const row: any = localDb
+  static async getPoByIdempotencyKey(organizationId: string, idempotencyKey: string): Promise<PurchaseOrder | null> {
+    const row: any = (await localDb
       .prepare(
         `SELECT id FROM purchase_orders
          WHERE (organization_id = ?)
            AND idempotency_key = ? AND _deleted = 0 LIMIT 1`
       )
-      .get(organizationId, idempotencyKey);
+      .get(organizationId, idempotencyKey));
 
-    return row ? this.getPoById(row.id, organizationId) : null;
+    return row ? (await this.getPoById(row.id, organizationId)) : null;
   }
 
   /**
    * List Purchase Orders with filters
    */
-  static listPurchaseOrders(params: {
+  static async listPurchaseOrders(params: {
     organizationId: string;
     storeId?: string | null;
     supplierId?: string | null;
     status?: PurchaseOrderStatus;
     limit?: number;
     offset?: number;
-  }): { data: PurchaseOrder[]; total: number } {
+  }): Promise<{ data: PurchaseOrder[]; total: number }> {
     const { organizationId, storeId, supplierId, status, limit = 50, offset = 0 } = params;
 
     let query = `
@@ -591,14 +610,14 @@ export class PurchaseOrderService {
       values.push(status);
     }
 
-    const countRow: any = localDb.prepare(`SELECT COUNT(*) as total FROM (${query})`).get(...values);
+    const countRow: any = (await localDb.prepare(`SELECT COUNT(*) as total FROM (${query})`).get(...values));
     const total = Number(countRow?.total || 0);
 
     query += ` ORDER BY po.order_date DESC, po.created_at DESC LIMIT ? OFFSET ?`;
     values.push(limit, offset);
 
-    const rows: any[] = localDb.prepare(query).all(...values);
-    const data = rows.map(r => this.getPoById(r.id, organizationId)!);
+    const rows: any[] = (await localDb.prepare(query).all(...values));
+    const data = (await Promise.all(rows.map(async r => (await this.getPoById(r.id, organizationId))!)));
 
     return { data, total };
   }

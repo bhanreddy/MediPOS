@@ -1,6 +1,13 @@
 import { create } from 'zustand';
 import { SecureStorage } from '@/lib/secureStorage';
 import { authEventEmitter } from '@/lib/authEventEmitter';
+import { queryClient } from '@/api/queryClient';
+import { useCartStore } from './cartStore';
+
+function clearTenantData() {
+  queryClient.clear();
+  useCartStore.getState().clearCart();
+}
 
 /* ─── Types ─────────────────────────────────────────── */
 
@@ -34,7 +41,7 @@ type AuthStore = AuthState & AuthActions;
 
 /* ─── Store ─────────────────────────────────────────── */
 
-export const useAuthStore = create<AuthStore>((set) => ({
+export const useAuthStore = create<AuthStore>((set, get) => ({
   token: null,
   user: null,
   isAuthenticated: false,
@@ -50,6 +57,8 @@ export const useAuthStore = create<AuthStore>((set) => ({
       ]);
       if (expected !== SecureStorage.getRevision()) return false;
       if (token) {
+        const next = userObj as User | null;
+        if (get().user?.id !== next?.id || get().user?.clinicId !== next?.clinicId) clearTenantData();
         set({
           token,
           user: userObj as User | null,
@@ -69,6 +78,8 @@ export const useAuthStore = create<AuthStore>((set) => ({
   },
 
   saveTokens: async (accessToken: string, refreshToken: string) => {
+    clearTenantData();
+    set({ user: null });
     const pending = SecureStorage.saveTokens(accessToken, refreshToken);
     const expected = SecureStorage.getRevision();
     await pending;
@@ -83,6 +94,7 @@ export const useAuthStore = create<AuthStore>((set) => ({
   },
 
   setUser: (newUser: User) => {
+    if (get().user?.id !== newUser.id || get().user?.clinicId !== newUser.clinicId) clearTenantData();
     void SecureStorage.saveUser(newUser).catch(() => {
       // Keep the active session in memory if secure storage is temporarily unavailable.
     });
@@ -90,6 +102,7 @@ export const useAuthStore = create<AuthStore>((set) => ({
   },
 
   logout: () => {
+    clearTenantData();
     void SecureStorage.clearAll().catch(() => {
       // Memory is cleared synchronously; do not restore a session after manual logout.
     });

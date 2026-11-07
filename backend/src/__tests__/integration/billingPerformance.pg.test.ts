@@ -25,7 +25,7 @@ import { errorHandler } from '../../middleware/errorHandler';
   const medicines = Array.from({ length: 10 }, () => ({ id: randomUUID(), batch: randomUUID() }));
   const app = express(); app.use(express.json()); app.use('/sales', salesRouter);
   app.use('/inventory', inventoryRouter); app.use('/reports', reportsRouter); app.use(errorHandler);
-  const lines = medicines.map(medicine => ({ medicine_id: medicine.id, batch_id: medicine.batch, quantity: 2, mrp: 20, gst_rate: 12 }));
+  const lines = medicines.map(medicine => ({ medicine_id: medicine.id, batch_id: medicine.batch, allocation_mode: 'auto', quantity: 2, mrp: 20, gst_rate: 12 }));
   afterEach(() => jest.restoreAllMocks());
   beforeAll(async () => {
     await sql`CREATE TABLE IF NOT EXISTS clinic_invoice_sequences (clinic_id uuid REFERENCES clinics(id), sequence_date date, last_value integer, PRIMARY KEY(clinic_id, sequence_date))`;
@@ -38,7 +38,7 @@ import { errorHandler } from '../../middleware/errorHandler';
   });
   afterAll(async () => {
     jest.restoreAllMocks();
-    for (const table of ['stock_ledger','sale_items','sales','medicine_batches','medicines','clinic_invoice_sequences'])
+    for (const table of ['stock_ledger','sale_items','sales','medicine_batches','medicines','clinic_invoice_sequences','clinic_tax_document_sequences'])
       await sql`DELETE FROM ${sql(table)} WHERE clinic_id = ${clinic}`;
     await sql`DELETE FROM clinic_subscriptions WHERE clinic_id = ${clinic}`;
     await sql`DELETE FROM subscription_plans WHERE name = ${clinic}`;
@@ -87,12 +87,12 @@ import { errorHandler } from '../../middleware/errorHandler';
     expect((await request(app).get('/inventory/medicines/search?barcode=123456&limit=1&include_substitutes=false')).body.results).toHaveLength(1);
     expect((await request(app).get('/inventory/medicines/search?q=missing&include_substitutes=false')).body.results).toEqual([]);
   });
-  test('ten-line sale uses two bulk inserts and one stock update and commits all balances before 201', async () => {
+  test('ten-line sale batches tender, item and ledger inserts and commits stock before 201', async () => {
     const inserts = jest.spyOn(persistence, 'localInsertMany');
     const reads = jest.spyOn(persistence, 'queryRaw');
     const response = await request(app).post('/sales').send({ items: lines, price_includes_tax: true, paid_amount: 400 });
     expect(response.status).toBe(201);
-    expect(inserts.mock.calls.map(call => [call[0], call[1].length])).toEqual([['sale_items', 10], ['stock_ledger', 10]]);
+    expect(inserts.mock.calls.map(call => [call[0], call[1].length])).toEqual([['payment_transactions', 1], ['sale_items', 10], ['stock_ledger', 10]]);
     expect(reads.mock.calls.filter(call => call[0].startsWith('UPDATE medicine_batches'))).toHaveLength(1);
     expect(response.body.data.sale_items.map((line: any) => line.medicine_id)).toEqual(medicines.map(medicine => medicine.id));
     const stock = await sql`SELECT quantity_remaining FROM medicine_batches WHERE clinic_id = ${clinic}`;
@@ -102,14 +102,14 @@ import { errorHandler } from '../../middleware/errorHandler';
     inserts.mockRestore(); reads.mockRestore();
   });
   test('duplicate batch lines deduct their combined quantity, preserving per-line ledger balances', async () => {
-    const response = await request(app).post('/sales').send({ items: [{ ...lines[0], quantity: 2 }, { ...lines[0], quantity: 3 }] });
+    const response = await request(app).post('/sales').send({ paid_amount:100,items: [{ ...lines[0], quantity: 2 }, { ...lines[0], quantity: 3 }] });
     expect(response.status).toBe(201);
     expect(Number((await sql`SELECT quantity_remaining FROM medicine_batches WHERE id = ${medicines[0].batch}`)[0].quantity_remaining)).toBe(43);
     const ledger = await sql`SELECT balance_after FROM stock_ledger WHERE reference_id = ${response.body.data.id} ORDER BY balance_after DESC`;
     expect(ledger.map(row => row.balance_after)).toEqual([46, 43]);
   });
   test('concurrent sales still lock stock and cannot oversell', async () => {
-    const body = { items: [{ ...lines[0], quantity: 30 }] };
+    const body = { paid_amount:600,items: [{ ...lines[0], quantity: 30 }] };
     const responses = await Promise.all([request(app).post('/sales').send(body), request(app).post('/sales').send(body)]);
     expect(responses.map(response => response.status).sort()).toEqual([201, 409]);
     expect(Number((await sql`SELECT quantity_remaining FROM medicine_batches WHERE id = ${medicines[0].batch}`)[0].quantity_remaining)).toBe(13);
@@ -117,11 +117,11 @@ import { errorHandler } from '../../middleware/errorHandler';
   test('ledger failure rolls back the invoice, bulk items and stock update', async () => {
     const before = await sql`SELECT count(*)::int AS count FROM sales WHERE clinic_id = ${clinic}`;
     const original = persistence.localInsertMany;
-    const spy = jest.spyOn(persistence, 'localInsertMany').mockImplementation((table, rows) => {
+    const spy = jest.spyOn(persistence, 'localInsertMany').mockImplementation(async (table, rows) => {
       if (table === 'stock_ledger') throw new Error('Isolated ledger failure');
-      return original(table, rows);
+      return (await original(table, rows));
     });
-    const response = await request(app).post('/sales').send({ items: [lines[1]] });
+    const response = await request(app).post('/sales').send({ paid_amount:40,items: [lines[1]] });
     expect(response.status).toBe(500);
     expect((await sql`SELECT count(*)::int AS count FROM sales WHERE clinic_id = ${clinic}`)[0].count).toBe(before[0].count);
     expect(Number((await sql`SELECT quantity_remaining FROM medicine_batches WHERE id = ${medicines[1].batch}`)[0].quantity_remaining)).toBe(48);

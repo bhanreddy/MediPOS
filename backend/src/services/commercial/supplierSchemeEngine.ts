@@ -1,4 +1,4 @@
-import { localDb } from '../../local-db';
+import { businessDb as localDb } from '../../lib/businessDb';
 import { localMutate } from '../../lib/localMutate';
 import { Money } from '../../lib/money';
 import { v4 as uuidv4 } from 'uuid';
@@ -36,7 +36,7 @@ export class SupplierSchemeEngine {
   /**
    * Evaluates active supplier schemes for an inward purchase line and calculates effective acquisition cost
    */
-  static evaluateInwardScheme(params: ApplySupplierSchemeParams): SupplierSchemeResult {
+  static async evaluateInwardScheme(params: ApplySupplierSchemeParams): Promise<SupplierSchemeResult> {
     const {
       organizationId,
       supplierId,
@@ -53,7 +53,7 @@ export class SupplierSchemeEngine {
     let schemeRow: any = null;
 
     if (supplierId) {
-      schemeRow = localDb
+      schemeRow = (await localDb
         .prepare(
           `SELECT * FROM supplier_schemes
            WHERE (organization_id = ?)
@@ -64,9 +64,9 @@ export class SupplierSchemeEngine {
              AND (end_at IS NULL OR end_at >= ?)
            ORDER BY priority DESC, created_at DESC LIMIT 1`
         )
-        .get(organizationId, supplierId, supplierId, medicineId, medicineId, nowIso, nowIso);
+        .get(organizationId, supplierId, supplierId, medicineId, medicineId, nowIso, nowIso));
     } else {
-      schemeRow = localDb
+      schemeRow = (await localDb
         .prepare(
           `SELECT * FROM supplier_schemes
            WHERE (organization_id = ?)
@@ -76,7 +76,7 @@ export class SupplierSchemeEngine {
              AND (end_at IS NULL OR end_at >= ?)
            ORDER BY priority DESC, created_at DESC LIMIT 1`
         )
-        .get(organizationId, medicineId, medicineId, nowIso, nowIso);
+        .get(organizationId, medicineId, medicineId, nowIso, nowIso));
     }
 
     let freeQuantity = 0;
@@ -137,8 +137,8 @@ export class SupplierSchemeEngine {
   /**
    * Supplier Schemes CRUD
    */
-  static listSchemes(organizationId: string): SupplierScheme[] {
-    return localDb
+  static async listSchemes(organizationId: string): Promise<SupplierScheme[]> {
+    return (await localDb
       .prepare(
         `SELECT ss.*, sup.name as supplier_name, med.name as medicine_name
          FROM supplier_schemes ss
@@ -147,12 +147,12 @@ export class SupplierSchemeEngine {
          WHERE (ss.organization_id = ?) AND ss._deleted = 0
          ORDER BY ss.priority DESC, ss.created_at DESC`
       )
-      .all(organizationId) as SupplierScheme[];
+      .all(organizationId)) as SupplierScheme[];
   }
 
-  static createScheme(data: Partial<SupplierScheme>): SupplierScheme {
+  static async createScheme(data: Partial<SupplierScheme>): Promise<SupplierScheme> {
     const id = data.id || uuidv4();
-    const created = localMutate({
+    const created = (await localMutate({
       table: 'supplier_schemes',
       operation: 'INSERT',
       data: {
@@ -176,7 +176,7 @@ export class SupplierSchemeEngine {
         priority: data.priority ?? 10,
         config_json: typeof data.config_json === 'object' ? JSON.stringify(data.config_json) : (data.config_json || '{}'),
       },
-    });
+    }));
     return created as SupplierScheme;
   }
 }

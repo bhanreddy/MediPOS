@@ -1,4 +1,4 @@
-import { localDb } from '../../local-db';
+import { businessDb as localDb } from '../../lib/businessDb';
 import { Money } from '../../lib/money';
 import { MarginGuardResult } from '../../domain/commercialTypes';
 
@@ -23,7 +23,7 @@ export class MarginGuard {
   /**
    * Evaluates gross margin and MRP protection rules for a line item
    */
-  static evaluate(params: EvaluateMarginParams): MarginGuardResult {
+  static async evaluate(params: EvaluateMarginParams): Promise<MarginGuardResult> {
     const {
       medicineId,
       batchId,
@@ -55,17 +55,17 @@ export class MarginGuard {
 
     let batchRow: any = null;
     if (batchId) {
-      batchRow = localDb
+      batchRow = (await localDb
         .prepare('SELECT * FROM medicine_batches WHERE id = ? OR _local_id = ?')
-        .get(batchId, batchId);
+        .get(batchId, batchId));
     } else {
-      batchRow = localDb
+      batchRow = (await localDb
         .prepare(
           `SELECT * FROM medicine_batches 
            WHERE (medicine_id = ? OR medicine_id = ?) AND quantity_remaining > 0 
            ORDER BY expiry_date ASC LIMIT 1`
         )
-        .get(medicineId, medicineId);
+        .get(medicineId, medicineId));
     }
 
     if (batchRow) {

@@ -1,4 +1,4 @@
-import { localDb } from '../../local-db';
+import { businessDb as localDb } from '../../lib/businessDb';
 import { localMutate } from '../../lib/localMutate';
 import { Money } from '../../lib/money';
 import { v4 as uuidv4 } from 'uuid';
@@ -23,7 +23,7 @@ export class CouponEngine {
   /**
    * Validates a coupon against current cart context and computes discount
    */
-  static validateCoupon(context: ValidateCouponContext): CouponValidationResult {
+  static async validateCoupon(context: ValidateCouponContext): Promise<CouponValidationResult> {
     const {
       organizationId,
       storeId,
@@ -47,14 +47,14 @@ export class CouponEngine {
     const cleanCode = code.trim().toUpperCase();
 
     // 1. Fetch Coupon Row
-    const couponRow: any = localDb
+    const couponRow: any = (await localDb
       .prepare(
         `SELECT * FROM coupons 
          WHERE UPPER(code) = ? 
            AND (organization_id = ?)
            AND _deleted = 0`
       )
-      .get(cleanCode, organizationId);
+      .get(cleanCode, organizationId));
 
     if (!couponRow || !couponRow.is_active) {
       return {
@@ -137,13 +137,13 @@ export class CouponEngine {
       const cId = couponRow.id || couponRow._local_id || '';
       const cLocalId = couponRow._local_id || couponRow.id || '';
       const cCode = couponRow.code || cleanCode;
-      const redemptionsCountRow: any = localDb
+      const redemptionsCountRow: any = (await localDb
         .prepare(
           `SELECT COUNT(*) as count FROM coupon_redemptions 
            WHERE (coupon_id = ? OR coupon_id = ? OR coupon_id = ? OR coupon_id IN (SELECT id FROM coupons WHERE UPPER(code) = ?) OR coupon_id IN (SELECT _local_id FROM coupons WHERE UPPER(code) = ?)) 
              AND (customer_id = ? OR customer_id = ?) AND _deleted = 0`
         )
-        .get(cId, cLocalId, cCode, cleanCode, cleanCode, customerId, customerId);
+        .get(cId, cLocalId, cCode, cleanCode, cleanCode, customerId, customerId));
 
       const pastUses = Number(redemptionsCountRow?.count || 0);
       if (pastUses >= maxCustomerUses) {
@@ -224,7 +224,7 @@ export class CouponEngine {
   /**
    * Atomically records coupon redemption during checkout
    */
-  static redeemCoupon(params: {
+  static async redeemCoupon(params: {
     organizationId: string;
     couponId: string;
     customerId?: string | null;
@@ -234,16 +234,16 @@ export class CouponEngine {
     const { organizationId, couponId, customerId = null, saleId, discountAmountPaise } = params;
 
     // Check if already redeemed for this sale (idempotency)
-    const existing: any = localDb
+    const existing: any = (await localDb
       .prepare('SELECT * FROM coupon_redemptions WHERE sale_id = ? AND _deleted = 0')
-      .get(saleId);
+      .get(saleId));
 
     if (existing) {
       return existing;
     }
 
     const redemptionId = uuidv4();
-    const record = localMutate({
+    const record = (await localMutate({
       table: 'coupon_redemptions',
       operation: 'INSERT',
       data: {
@@ -256,12 +256,12 @@ export class CouponEngine {
         discount_amount_paise: discountAmountPaise,
         redeemed_at: new Date().toISOString(),
       },
-    });
+    }));
 
     // Increment current_uses on coupon
-    localDb
+    (await localDb
       .prepare('UPDATE coupons SET current_uses = current_uses + 1 WHERE id = ? OR _local_id = ?')
-      .run(couponId, couponId);
+      .run(couponId, couponId));
 
     return record;
   }
@@ -269,8 +269,8 @@ export class CouponEngine {
   /**
    * Coupon Management CRUD
    */
-  static listCoupons(organizationId: string): Coupon[] {
-    return localDb
+  static async listCoupons(organizationId: string): Promise<Coupon[]> {
+    return (await localDb
       .prepare(
         `SELECT c.*, 
           (SELECT COUNT(*) FROM coupon_redemptions WHERE coupon_id = c.id OR coupon_id = c._local_id) as total_redemptions
@@ -278,12 +278,12 @@ export class CouponEngine {
          WHERE (c.organization_id = ?) AND c._deleted = 0
          ORDER BY c.created_at DESC`
       )
-      .all(organizationId) as Coupon[];
+      .all(organizationId)) as Coupon[];
   }
 
-  static createCoupon(data: Partial<Coupon>): Coupon {
+  static async createCoupon(data: Partial<Coupon>): Promise<Coupon> {
     const id = data.id || uuidv4();
-    const created = localMutate({
+    const created = (await localMutate({
       table: 'coupons',
       operation: 'INSERT',
       data: {
@@ -310,7 +310,7 @@ export class CouponEngine {
         eligible_stores: JSON.stringify(data.eligible_stores || []),
         eligible_products: JSON.stringify(data.eligible_products || []),
       },
-    });
+    }));
     return created as Coupon;
   }
 }

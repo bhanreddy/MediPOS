@@ -1,4 +1,4 @@
-import { localDb } from '../local-db';
+import { businessDb as localDb } from '../lib/businessDb';
 import { Money } from '../lib/money';
 import { FEFOEngine, BatchAllocation } from './fefoEngine';
 import { ResolvedPriceSnapshot } from './pricingService';
@@ -106,7 +106,7 @@ export class POSCartService {
   /**
    * Generates a fully validated server-side quote for a POS cart powered by the CommercialEngine.
    */
-  static generateQuote(params: {
+  static async generateQuote(params: {
     items: CartInputItem[];
     organizationId: string;
     storeId: string;
@@ -119,7 +119,7 @@ export class POSCartService {
     paidAmount?: number;
     isInterstate?: boolean;
     isOffline?: boolean;
-  }): CartQuoteResultExtended {
+  }): Promise<CartQuoteResultExtended> {
     const {
       items,
       organizationId,
@@ -189,7 +189,7 @@ export class POSCartService {
     }
 
     // 1. Invoke CommercialEngine for Authoritative Commercial Breakdown
-    const commercialQuote = CommercialEngine.quoteCommercialCart({
+    const commercialQuote = (await CommercialEngine.quoteCommercialCart({
       organizationId,
       storeId,
       counterId,
@@ -210,7 +210,7 @@ export class POSCartService {
       paidAmount,
       isInterstate,
       isOffline,
-    });
+    }));
 
     const quoteLines: CartQuoteLine[] = [];
     let hasPrescription = false;
@@ -223,9 +223,9 @@ export class POSCartService {
       const item = items[i];
       const commLine = commercialQuote.lines[i];
 
-      const medRow: any = localDb
+      const medRow: any = (await localDb
         .prepare('SELECT * FROM medicines WHERE (id = ? OR _local_id = ?) AND _deleted = 0')
-        .get(item.medicine_id, item.medicine_id);
+        .get(item.medicine_id, item.medicine_id));
 
       if (!medRow) {
         throw new AppError(404, `Medicine not found or inactive: ${item.medicine_id}`, 'MEDICINE_NOT_FOUND');
@@ -235,13 +235,13 @@ export class POSCartService {
       const totalUnitsToAllocate = commLine.baseQuantity + (commLine.freeQuantity * commLine.conversionFactor);
 
       // Plan FEFO Multi-Batch Allocations
-      const fefo = FEFOEngine.planAllocations({
+      const fefo = (await FEFOEngine.planAllocations({
         medicineId: medRow.id || medRow._local_id,
         storeId,
         organizationId,
         requestedQuantity: totalUnitsToAllocate,
         manualBatchId: item.batch_id || null,
-      });
+      }));
 
       const lineWarnings: Array<{ code: string; message: string; severity: 'INFO' | 'WARNING' | 'BLOCKING' }> = [
         ...commLine.warnings,

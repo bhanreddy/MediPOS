@@ -1,4 +1,4 @@
-import { localDb } from '../local-db';
+import { businessDb as localDb } from '../lib/businessDb';
 import { localMutate } from '../lib/localMutate';
 import { Money } from '../lib/money';
 import { v4 as uuidv4 } from 'uuid';
@@ -46,29 +46,29 @@ export class ReturnsEngine {
   /**
    * Generates a return quote and validates eligibility referencing original commercial snapshot
    */
-  static quoteReturn(params: { originalSaleId: string; items: ReturnItemInput[] }) {
+  static async quoteReturn(params: { originalSaleId: string; items: ReturnItemInput[] }) {
     const { originalSaleId, items } = params;
 
-    const origSale: any = localDb
+    const origSale: any = (await localDb
       .prepare('SELECT * FROM sales WHERE id = ? OR _local_id = ?')
-      .get(originalSaleId, originalSaleId);
+      .get(originalSaleId, originalSaleId));
 
     if (!origSale) {
       throw new AppError(404, 'Original invoice not found', 'ORIGINAL_SALE_NOT_FOUND');
     }
 
     // Fetch original commercial snapshot if present
-    const commercialSnapshot: any = localDb
+    const commercialSnapshot: any = (await localDb
       .prepare('SELECT * FROM sale_commercial_snapshots WHERE sale_id = ?')
-      .get(origSale.id || origSale._local_id);
+      .get(origSale.id || origSale._local_id));
 
     const quoteLines: any[] = [];
     let totalRefundPaise = 0;
 
     for (const retItem of items) {
-      const origItem: any = localDb
+      const origItem: any = (await localDb
         .prepare('SELECT * FROM sale_items WHERE (id = ? OR _local_id = ?) AND sale_id = ?')
-        .get(retItem.sale_item_id, retItem.sale_item_id, origSale.id || origSale._local_id);
+        .get(retItem.sale_item_id, retItem.sale_item_id, origSale.id || origSale._local_id));
 
       if (!origItem) {
         throw new AppError(404, `Sale item ${retItem.sale_item_id} not found in invoice`, 'SALE_ITEM_NOT_FOUND');
@@ -123,7 +123,7 @@ export class ReturnsEngine {
   /**
    * Processes a return transaction atomically
    */
-  static processReturn(params: ProcessReturnParams) {
+  static async processReturn(params: ProcessReturnParams) {
     const {
       originalSaleId,
       items,
@@ -136,29 +136,29 @@ export class ReturnsEngine {
       performedBy,
     } = params;
 
-    const quote = this.quoteReturn({ originalSaleId, items });
-    const origSale: any = localDb
+    const quote = (await this.quoteReturn({ originalSaleId, items }));
+    const origSale: any = (await localDb
       .prepare('SELECT * FROM sales WHERE id = ? OR _local_id = ?')
-      .get(originalSaleId, originalSaleId);
+      .get(originalSaleId, originalSaleId));
 
     const now = new Date().toISOString();
     const returnSaleId = uuidv4();
 
     // 1. Generate Return Invoice Number & Credit Note Number
-    const returnDocNumber = DocumentNumberingService.generate({
+    const returnDocNumber = (await DocumentNumberingService.generate({
       organizationId,
       storeId,
       documentType: 'SALE_RETURN',
-    });
+    }));
 
-    const creditNoteNumber = DocumentNumberingService.generate({
+    const creditNoteNumber = (await DocumentNumberingService.generate({
       organizationId,
       storeId,
       documentType: 'CREDIT_NOTE',
-    });
+    }));
 
     // 2. Insert Return Sale
-    const returnSale = localMutate({
+    const returnSale = (await localMutate({
       table: 'sales',
       operation: 'INSERT',
       data: {
@@ -183,13 +183,13 @@ export class ReturnsEngine {
         return_of: origSale.id || origSale._local_id,
         served_by: performedBy,
       },
-    });
+    }));
 
     // 3. Process Return Items, Inventory Restorations & Stock Ledger
     const returnedItems = [];
     for (const qLine of quote.lines) {
       const returnItemId = uuidv4();
-      const itemRecord = localMutate({
+      const itemRecord = (await localMutate({
         table: 'sale_items',
         operation: 'INSERT',
         data: {
@@ -208,41 +208,41 @@ export class ReturnsEngine {
           reason: qLine.reasonCode,
           sale_item_id: qLine.saleItemId,
         },
-      });
+      }));
       returnedItems.push(itemRecord);
 
       // Restore batch stock
-      localDb
+      (await localDb
         .prepare('UPDATE medicine_batches SET quantity_remaining = quantity_remaining + ? WHERE id = ? OR _local_id = ?')
-        .run(qLine.returnQuantity, qLine.batchId, qLine.batchId);
+        .run(qLine.returnQuantity, qLine.batchId, qLine.batchId));
 
       // Restore inventory position
       try {
-        InventoryPositionService.adjustStock({
+        (await InventoryPositionService.adjustStock({
           organizationId,
           medicineId: qLine.medicineId,
           batchId: qLine.batchId,
           locationType: 'STORE',
           storeId,
           quantityDelta: qLine.returnQuantity,
-        });
+        }));
       } catch {
-        InventoryPositionService.getOrCreatePosition({
+        (await InventoryPositionService.getOrCreatePosition({
           organizationId,
           medicineId: qLine.medicineId,
           batchId: qLine.batchId,
           locationType: 'STORE',
           storeId,
           initialStock: qLine.returnQuantity,
-        });
+        }));
       }
 
       // Write Immutable Stock Ledger Movement
-      const batchRow: any = localDb
+      const batchRow: any = (await localDb
         .prepare('SELECT quantity_remaining FROM medicine_batches WHERE id = ? OR _local_id = ?')
-        .get(qLine.batchId, qLine.batchId);
+        .get(qLine.batchId, qLine.batchId));
 
-      localMutate({
+      (await localMutate({
         table: 'stock_ledger',
         operation: 'INSERT',
         data: {
@@ -261,12 +261,12 @@ export class ReturnsEngine {
           notes: `Return: ${qLine.reasonCode} from invoice ${origSale.invoice_number}`,
           performed_by: performedBy,
         },
-      });
+      }));
     }
 
     // 4. Record Refund Payment Transaction
     const paymentTxId = uuidv4();
-    localMutate({
+    (await localMutate({
       table: 'payment_transactions',
       operation: 'INSERT',
       data: {
@@ -284,19 +284,19 @@ export class ReturnsEngine {
         status: 'REFUNDED',
         provider: 'MANUAL_CONFIRMED',
       },
-    });
+    }));
 
     // 5. Reverse Loyalty Points Earning & Restore Redeemed Value
     if (origSale.customer_id) {
       const origGrandTotal = Number(origSale.grand_total || origSale.net_amount || 1);
       const returnRatio = origGrandTotal > 0 ? quote.totalRefund / origGrandTotal : 1.0;
-      LoyaltyEngine.processReturnReversal({
+      (await LoyaltyEngine.processReturnReversal({
         organizationId,
         customerId: origSale.customer_id,
         originalSaleId: origSale.id || origSale._local_id,
         returnId: returnSaleId,
         returnRatio,
-      });
+      }));
     }
 
     return {

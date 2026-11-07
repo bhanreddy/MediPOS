@@ -1,4 +1,4 @@
-import { localDb } from '../local-db';
+import { businessDb as localDb } from '../lib/businessDb';
 import { Money } from '../lib/money';
 import { PriceBookService } from './commercial/priceBookService';
 import { MarginGuard } from './commercial/marginGuard';
@@ -52,7 +52,7 @@ export class PricingService {
   /**
    * Resolves price snapshot for a given product and line quantity using the Commercial Engine hierarchy
    */
-  static resolvePrice(context: PriceResolveContext): ResolvedPriceSnapshot {
+  static async resolvePrice(context: PriceResolveContext): Promise<ResolvedPriceSnapshot> {
     const {
       organizationId,
       storeId,
@@ -69,7 +69,7 @@ export class PricingService {
     } = context;
 
     // 1. Resolve Price Hierarchy (Store > Region > Org > Customer Group > Master)
-    const hierarchy = PriceBookService.resolveHierarchy({
+    const hierarchy = (await PriceBookService.resolveHierarchy({
       organizationId,
       storeId,
       regionId,
@@ -78,12 +78,12 @@ export class PricingService {
       batchId,
       unitType,
       conversionFactor,
-    });
+    }));
 
     // Fetch GST Rate
-    const medRow: any = localDb
+    const medRow: any = (await localDb
       .prepare('SELECT gst_rate FROM medicines WHERE (id = ? OR _local_id = ?) AND _deleted = 0')
-      .get(medicineId, medicineId);
+      .get(medicineId, medicineId));
     const gstRate = Number(medRow?.gst_rate ?? 12);
 
     const effectiveBasePricePaise = manualUnitPrice != null
@@ -100,7 +100,7 @@ export class PricingService {
     const effectiveUnitPricePaise = Money.toPaise(effectiveUnitPrice);
 
     // 2. Margin Guard and Approval Evaluation
-    const marginEval = MarginGuard.evaluate({
+    const marginEval = (await MarginGuard.evaluate({
       organizationId,
       storeId,
       medicineId,
@@ -109,7 +109,7 @@ export class PricingService {
       mrpPaise,
       discountPct,
       conversionFactor,
-    });
+    }));
 
     const requiresSupervisorApproval = marginEval.requiresSupervisorApproval || (discountPct > this.MAX_UNSUPERVISED_DISCOUNT_PCT);
     const approvalReason = marginEval.approvalReason || (discountPct > this.MAX_UNSUPERVISED_DISCOUNT_PCT

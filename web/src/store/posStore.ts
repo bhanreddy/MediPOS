@@ -50,6 +50,7 @@ export interface PosPaymentTender {
 }
 
 interface PosState {
+  tenant_scope: string | null;
   cart: PosCartLine[];
   checkout_request_id: string;
   wallet_amount_paise: number;
@@ -111,6 +112,7 @@ interface PosState {
 export const usePosStore = create<PosState>()(
   persist(
     (set, get) => ({
+      tenant_scope: null,
       cart: [],
       checkout_request_id: crypto.randomUUID(),
       wallet_amount_paise: 0,
@@ -320,6 +322,7 @@ export const usePosStore = create<PosState>()(
           bill_discount: '0',
           is_percentage_discount: false,
           coupon_code: '',
+          customer_membership: null,
           park_id: null,
           park_token: null,
           supervisor_auth_id: null,
@@ -343,3 +346,11 @@ export const usePosStore = create<PosState>()(
     }
   )
 );
+
+/** A persisted cart can only be restored by the same account and clinic. */
+export function bindPosTenant(scope: string | null) {
+  if (scope === usePosStore.getState().tenant_scope && scope !== null) return;
+  usePosStore.getState().reset();
+  usePosStore.setState({ tenant_scope: scope });
+  if (!scope) usePosStore.persist.clearStorage();
+}

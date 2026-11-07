@@ -1,5 +1,5 @@
 // productRecallEngine.ts — Enterprise Drug Recall, Multi-Location Quarantine & Full Sales/Rx Traceability
-import { localDb } from '../../local-db';
+import { businessDb as localDb } from '../../lib/businessDb';
 import { v4 as uuidv4 } from 'uuid';
 import {
   RecallType,
@@ -28,7 +28,7 @@ export class ProductRecallEngine {
   /**
    * Create a new product recall draft
    */
-  static createRecall(params: CreateRecallParams): any {
+  static async createRecall(params: CreateRecallParams): Promise<any> {
     const {
       organizationId,
       recallReference,
@@ -46,7 +46,7 @@ export class ProductRecallEngine {
     const id = uuidv4();
     const now = new Date().toISOString();
 
-    localDb
+    (await localDb
       .prepare(
         `INSERT INTO product_recalls (
           id, _local_id, organization_id, recall_reference, recall_type,
@@ -73,29 +73,29 @@ export class ProductRecallEngine {
         now,
         now,
         now
-      );
+      ));
 
-    return this.getRecall(id);
+    return (await this.getRecall(id));
   }
 
   /**
    * Retrieve recall by ID
    */
-  static getRecall(id: string): any {
-    const row: any = localDb
+  static async getRecall(id: string): Promise<any> {
+    const row: any = (await localDb
       .prepare(
         `SELECT pr.*, m.name as product_name, m.generic_name
          FROM product_recalls pr
          JOIN medicines m ON m.id = pr.product_id
          WHERE pr.id = ? OR pr._local_id = ?`
       )
-      .get(id, id);
+      .get(id, id));
 
     if (!row) return null;
 
-    const tasks: any[] = localDb
+    const tasks: any[] = (await localDb
       .prepare('SELECT * FROM recall_tasks WHERE recall_id = ? ORDER BY created_at ASC')
-      .all(row.id);
+      .all(row.id));
 
     return {
       ...row,
@@ -107,8 +107,8 @@ export class ProductRecallEngine {
   /**
    * Activate recall: Immediately locks inventory across all stores/warehouses and creates location quarantine tasks
    */
-  static activateRecall(recallId: string, activatedBy: string): any {
-    const recall = this.getRecall(recallId);
+  static async activateRecall(recallId: string, activatedBy: string): Promise<any> {
+    const recall = (await this.getRecall(recallId));
     if (!recall) throw new AppError(404, 'Recall not found', 'NOT_FOUND');
 
     const now = new Date().toISOString();
@@ -128,14 +128,14 @@ export class ProductRecallEngine {
       posParams.push(recall.batch_id);
     }
 
-    const affectedPositions: any[] = localDb.prepare(posQuery).all(...posParams);
+    const affectedPositions: any[] = (await localDb.prepare(posQuery).all(...posParams));
 
     // 2. Lock stock in inventory_positions & create location tasks
     for (const pos of affectedPositions) {
       const onHand = Number(pos.quantity_on_hand || 0);
 
       // Lock as recalled in position
-      InventoryPositionService.updateStateQuantities({
+      (await InventoryPositionService.updateStateQuantities({
         organizationId: recall.organization_id,
         medicineId: pos.medicine_id,
         batchId: pos.batch_id,
@@ -143,11 +143,11 @@ export class ProductRecallEngine {
         storeId: pos.store_id,
         warehouseId: pos.warehouse_id,
         recalledDelta: onHand - Number(pos.quantity_recalled || 0),
-      });
+      }));
 
       // Create location recall task
       const taskId = uuidv4();
-      localDb
+      (await localDb
         .prepare(
           `INSERT INTO recall_tasks (
             id, _local_id, recall_id, organization_id, store_id, warehouse_id,
@@ -168,58 +168,59 @@ export class ProductRecallEngine {
           now,
           now,
           now
-        );
+        ));
     }
 
     // 3. Update recall status to ACTIVE
-    localDb
+    (await localDb
       .prepare(
         `UPDATE product_recalls 
          SET status = 'ACTIVE', updated_at = ?, _updated_at = ?
          WHERE id = ?`
       )
-      .run(now, now, recall.id);
+      .run(now, now, recall.id));
 
-    return this.getRecall(recallId);
+    return (await this.getRecall(recallId));
   }
 
   /**
    * Complete a recall task for a location (quarantine count confirmed)
    */
-  static completeTask(params: {
+  static async completeTask(params: {
     taskId: string;
     quarantinedUnits: number;
     completedBy: string;
     notes?: string;
-  }): any {
+  }): Promise<any> {
     const { taskId, quarantinedUnits, completedBy, notes = '' } = params;
-    const task: any = localDb.prepare('SELECT * FROM recall_tasks WHERE id = ?').get(taskId);
+    const task: any = (await localDb.prepare('SELECT * FROM recall_tasks WHERE id = ?').get(taskId));
     if (!task) throw new AppError(404, 'Recall task not found', 'NOT_FOUND');
 
     const expected = Number(task.expected_units || 0);
     const discrepancy = expected - quarantinedUnits;
     const now = new Date().toISOString();
 
-    localDb
+    (await localDb
       .prepare(
         `UPDATE recall_tasks 
          SET quarantined_units = ?, discrepancy_units = ?, status = 'COMPLETED',
              completed_by = ?, completed_at = ?, notes = ?, updated_at = ?, _updated_at = ?
          WHERE id = ?`
       )
-      .run(quarantinedUnits, discrepancy, completedBy, now, notes, now, now, taskId);
+      .run(quarantinedUnits, discrepancy, completedBy, now, notes, now, now, taskId));
 
-    return localDb.prepare('SELECT * FROM recall_tasks WHERE id = ?').get(taskId);
+    return (await localDb.prepare('SELECT * FROM recall_tasks WHERE id = ?').get(taskId));
   }
 
   /**
    * Trace historical sales and customer records associated with the recalled product/batch
    */
-  static traceHistoricalSales(params: {
+  static async traceHistoricalSales(params: {
     organizationId: string;
     productId: string;
     batchId?: string | null;
-  }): {
+    storeId?: string | null;
+  }): Promise<{
     totalUnitsSold: number;
     totalInvoicesCount: number;
     identifiedCustomersCount: number;
@@ -234,8 +235,8 @@ export class ProductRecallEngine {
       customerPhone: string;
       isPrescription: boolean;
     }[];
-  } {
-    const { organizationId, productId, batchId = null } = params;
+  }> {
+    const { organizationId, productId, batchId = null, storeId } = params;
 
     let query = `
       SELECT si.sale_id, si.quantity as sold_qty, si.unit_type,
@@ -249,6 +250,10 @@ export class ProductRecallEngine {
     `;
     const queryParams: any[] = [organizationId, productId, productId];
 
+    if (storeId) {
+      query += ' AND s.store_id = ?';
+      queryParams.push(storeId);
+    }
     if (batchId) {
       query += ` AND si.batch_id = ?`;
       queryParams.push(batchId);
@@ -256,7 +261,7 @@ export class ProductRecallEngine {
 
     query += ` ORDER BY s.sale_date DESC`;
 
-    const rows: any[] = localDb.prepare(query).all(...queryParams);
+    const rows: any[] = (await localDb.prepare(query).all(...queryParams));
 
     let totalUnitsSold = 0;
     let identifiedCustomersCount = 0;
@@ -300,12 +305,13 @@ export class ProductRecallEngine {
   /**
    * Trace prescription dispensing events associated with the recalled product/batch
    */
-  static tracePrescriptionDispensing(params: {
+  static async tracePrescriptionDispensing(params: {
     organizationId: string;
     productId: string;
     batchId?: string | null;
-  }): any[] {
-    const { organizationId, productId, batchId = null } = params;
+    storeId?: string | null;
+  }): Promise<any[]> {
+    const { organizationId, productId, batchId = null, storeId } = params;
 
     let query = `
       SELECT de.*, p.prescription_number, p.doctor_name_snapshot, p.doctor_registration_number_snapshot,
@@ -317,6 +323,10 @@ export class ProductRecallEngine {
     `;
     const queryParams: any[] = [organizationId, productId];
 
+    if (storeId) {
+      query += ' AND de.store_id = ?';
+      queryParams.push(storeId);
+    }
     if (batchId) {
       query += ` AND de.batch_id = ?`;
       queryParams.push(batchId);
@@ -324,6 +334,6 @@ export class ProductRecallEngine {
 
     query += ` ORDER BY de.dispensed_at DESC`;
 
-    return localDb.prepare(query).all(...queryParams);
+    return (await localDb.prepare(query).all(...queryParams));
   }
 }

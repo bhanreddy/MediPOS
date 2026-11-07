@@ -1,0 +1,8 @@
+Phase 1 implementation plan
+1. Preserve the initial working tree snapshot (/tmp/medical-phase1-baseline). Retain tenant checks and the frontend/backend structure.
+2. Replace embedded cloud business data access with asynchronous PostgreSQL queries and per-request transactions. Keep the SQLite engine and outbox for offline use; migrate existing checkpoints explicitly, without silently merging authoritative cloud balances. Update affected routes/services to await their data access.
+3. Add migration 031 for data-access compatibility, idempotent supplier receipts/refunds and stock integrity. Provide explicit checkpoint import and rollback guidance; test only on a new localhost *_qa database.
+4. Reuse sales transaction/numbering/Money utilities. Add server-owned FEFO allocation, store/recall/availability validation and fail-closed restricted dispensing across checkout paths and sync.
+5. Reconcile supplier payments against invoices and payment allocations with request hashes. Add return decisions/refunds/credit notes to the existing returns API and sales history UI, plus automatic multi-batch cart behavior.
+6. Run focused tests after each unit, backend/web typechecks and builds, regression suites, and real PostgreSQL concurrency/rollback/permission tests. Document actual acceptance results and unresolved issues in docs/phase-1.
+Risks: many embedded services have synchronous interfaces; their async conversion requires dependency checks. Legacy checkpoint data must be reviewed for ID/financial conflicts. Statutory workflows not fully validated in Phase 1 remain blocked. No deployment, push or production database writes.

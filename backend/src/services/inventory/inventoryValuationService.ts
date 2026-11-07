@@ -1,5 +1,5 @@
 // inventoryValuationService.ts — Valuation, Shrinkage & Inventory Health Score
-import { localDb } from '../../local-db';
+import { businessDb as localDb } from '../../lib/businessDb';
 import { InventoryClassificationEngine } from './inventoryClassificationEngine';
 import { ExpiryIntelligenceEngine } from './expiryIntelligenceEngine';
 import { InventoryReconciliationServiceV2 } from './inventoryReconciliationV2';
@@ -30,11 +30,11 @@ export class InventoryValuationService {
   /**
    * Compute comprehensive inventory valuation and health score
    */
-  static getValuation(params: {
+  static async getValuation(params: {
     organizationId: string;
     storeId?: string | null;
     warehouseId?: string | null;
-  }): ValuationSummary {
+  }): Promise<ValuationSummary> {
     const { organizationId, storeId = null, warehouseId = null } = params;
 
     const locationCol = storeId ? 'store_id' : 'warehouse_id';
@@ -56,7 +56,7 @@ export class InventoryValuationService {
       queryParams.push(targetId, targetId);
     }
 
-    const batches: any[] = localDb.prepare(query).all(...queryParams);
+    const batches: any[] = (await localDb.prepare(query).all(...queryParams));
 
     let totalUnitsOnHand = 0;
     let totalUnitsAvailable = 0;
@@ -84,10 +84,10 @@ export class InventoryValuationService {
         : 0;
 
     // Compute Health Score factors
-    const classifications = InventoryClassificationEngine.computeClassifications({
+    const classifications = (await InventoryClassificationEngine.computeClassifications({
       organizationId,
       storeId,
-    });
+    }));
 
     const totalMedicines = classifications.length || 1;
     const outOfStockCount = classifications.filter((c) => c.availableStock === 0).length;
@@ -103,22 +103,22 @@ export class InventoryValuationService {
         ? Math.min(25, Number(((deadStockValuePaise / totalCostValuePaise) * 50).toFixed(1)))
         : 0;
 
-    const expiryRisk = ExpiryIntelligenceEngine.getExpiryRiskItems({
+    const expiryRisk = (await ExpiryIntelligenceEngine.getExpiryRiskItems({
       organizationId,
       storeId,
       daysThreshold: 90,
-    });
+    }));
     const expiryRiskValue = expiryRisk.summary.totalRiskValuePaise;
     const expiryDeduction =
       totalCostValuePaise > 0
         ? Math.min(25, Number(((expiryRiskValue / totalCostValuePaise) * 100).toFixed(1)))
         : 0;
 
-    const recon = InventoryReconciliationServiceV2.reconcile({
+    const recon = (await InventoryReconciliationServiceV2.reconcile({
       organizationId,
       storeId,
       warehouseId,
-    });
+    }));
     const reconciliationDeduction = Math.min(25, recon.summary.mismatchCount * 5);
 
     const totalDeductions =

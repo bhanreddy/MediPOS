@@ -6,9 +6,12 @@ import {
   RefreshCw,
 } from 'lucide-react';
 import api from '../../lib/api';
+import { useAuth } from '../../lib/auth';
+import { loadInventoryCatalogue } from '../../services/inventoryCatalogue';
 import toast from 'react-hot-toast';
 
 export const ExpiryRecallPage: React.FC = () => {
+  const canViewTraces = useAuth(state => ['OWNER','PHARMACIST','SUPER_ADMIN'].includes(state.role || ''));
   const [activeTab, setActiveTab] = useState<'EXPIRY' | 'RECALL'>('EXPIRY');
   const [loading, setLoading] = useState(false);
 
@@ -46,12 +49,12 @@ export const ExpiryRecallPage: React.FC = () => {
   const loadRecalls = async () => {
     try {
       setLoading(true);
-      const [recRes, medRes] = await Promise.all([
+      const [recRes, catalogue] = await Promise.all([
         api.get('/inventory/recalls'),
-        api.get('/inventory/medicines'),
+        loadInventoryCatalogue(),
       ]);
       setRecalls(recRes.data?.data || []);
-      setMedicines(medRes.data?.data || []);
+      setMedicines(catalogue);
     } catch (err) {
       toast.error('Failed to load recalls');
     } finally {
@@ -296,12 +299,14 @@ export const ExpiryRecallPage: React.FC = () => {
                       </span>
                     )}
 
-                    <button
-                      onClick={() => handleViewTraces(r)}
-                      className="text-xs font-bold text-accent-primary hover:underline"
-                    >
-                      Trace Sales & Patients &rarr;
-                    </button>
+                    {canViewTraces && (
+                      <button
+                        onClick={() => handleViewTraces(r)}
+                        className="text-xs font-bold text-accent-primary hover:underline"
+                      >
+                        Trace Sales & Patients &rarr;
+                      </button>
+                    )}
                   </div>
                 </div>
               ))

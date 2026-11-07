@@ -1,3 +1,5 @@
+import { once } from 'node:events';
+import type { Server } from 'node:http';
 import express from 'express';
 import request from 'supertest';
 import crypto from 'crypto';
@@ -18,15 +20,23 @@ import { PrescriptionExtractionService } from '../services/prescription/prescrip
 const app = express(); app.use(express.json()); app.use('/rx', prescriptionsRouter); app.use('/doctors', doctorsRouter); app.use('/patients', patientsRouter); app.use(errorHandler);
 const fixture = { doctor_name: 'QA Doctor', doctor_registration_number: 'QA-REG', items_json: [{ raw_text: 'QA medication as entered', prescribed_name: 'QA medication as entered', prescribed_quantity: 2 }] };
 let documentKey: string, rxId: string, storageRoot: string;
+let server: Server;
 const savedPath = process.env.PRESCRIPTION_STORAGE_PATH;
-beforeAll(async () => { initLocalDb(); storageRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'medical-rx-tests-')); process.env.PRESCRIPTION_STORAGE_PATH = storageRoot; });
+beforeAll(async () => {
+  initLocalDb();
+  storageRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'medical-rx-tests-'));
+  process.env.PRESCRIPTION_STORAGE_PATH = storageRoot;
+  server = app.listen(0, '127.0.0.1');
+  await once(server, 'listening');
+});
 afterAll(async () => {
+  await new Promise<void>((resolve, reject) => server.close(error => error ? reject(error) : resolve()));
   localDb.exec("DELETE FROM prescription_items WHERE prescription_id IN (SELECT id FROM prescriptions WHERE organization_id IN ('rx-test-clinic','rx-other-clinic')); DELETE FROM prescriptions WHERE organization_id IN ('rx-test-clinic','rx-other-clinic'); DELETE FROM doctors WHERE organization_id IN ('rx-test-clinic','rx-other-clinic');");
   await fs.rm(storageRoot, { recursive: true, force: true });
   if (savedPath === undefined) delete process.env.PRESCRIPTION_STORAGE_PATH; else process.env.PRESCRIPTION_STORAGE_PATH = savedPath;
 });
 test('manual entry preserves the supplied medicine and quantity without a fabricated document', async () => {
-  const result = await request(app).post('/rx').send(fixture);
+  const result = await request(server).post('/rx').send(fixture);
   expect(result.status).toBe(201); rxId = result.body.data.id;
   expect(result.body.data.document_url).toBe('');
   expect(result.body.data.source).toBe('MANUAL_ENTRY');
@@ -35,29 +45,29 @@ test('manual entry preserves the supplied medicine and quantity without a fabric
 });
 test('file upload persists an original that only the owning clinic can download', async () => {
   const pdf = Buffer.from('%PDF-1.4\nSynthetic QA document\n%%EOF');
-  const result = await request(app).post('/rx').field('doctor_name','QA Doctor').field('doctor_registration_number','QA-REG').field('items_json', JSON.stringify(fixture.items_json)).attach('file',pdf,{ filename:'qa.pdf', contentType:'application/pdf' });
+  const result = await request(server).post('/rx').field('doctor_name','QA Doctor').field('doctor_registration_number','QA-REG').field('items_json', JSON.stringify(fixture.items_json)).attach('file',pdf,{ filename:'qa.pdf', contentType:'application/pdf' });
   expect(result.status).toBe(201); documentKey = result.body.data.document_url;
   expect(await fs.readFile(path.join(storageRoot, documentKey))).toEqual(pdf);
-  const download = await request(app).get('/rx/document/signed-proxy').query({ key: documentKey });
+  const download = await request(server).get('/rx/document/signed-proxy').query({ key: documentKey });
   expect(download.status).toBe(200); expect(download.headers['content-type']).toContain('application/pdf'); expect(download.headers['cache-control']).toBe('private, no-store');
-  expect((await request(app).get('/rx/document/signed-proxy').set('x-test-clinic','rx-other-clinic').query({key:documentKey})).status).toBe(404);
+  expect((await request(server).get('/rx/document/signed-proxy').set('x-test-clinic','rx-other-clinic').query({key:documentKey})).status).toBe(404);
 });
 test('every prescription detail and action rejects a different clinic', async () => {
-  for (const endpoint of ['', '/dispensing']) expect((await request(app).get(`/rx/${rxId}${endpoint}`).set('x-test-clinic','rx-other-clinic')).status).toBe(404);
-  for (const endpoint of ['/claim','/verify','/reject','/extract']) expect((await request(app).post(`/rx/${rxId}${endpoint}`).set('x-test-clinic','rx-other-clinic').send({rejection_reason:'OTHER'})).status).toBe(404);
+  for (const endpoint of ['', '/dispensing']) expect((await request(server).get(`/rx/${rxId}${endpoint}`).set('x-test-clinic','rx-other-clinic')).status).toBe(404);
+  for (const endpoint of ['/claim','/verify','/reject','/extract']) expect((await request(server).post(`/rx/${rxId}${endpoint}`).set('x-test-clinic','rx-other-clinic').send({rejection_reason:'OTHER'})).status).toBe(404);
 });
 test('viewer cannot upload or verify and malformed items are not silently discarded', async () => {
-  expect((await request(app).post('/rx').set('x-test-role','VIEWER').send(fixture)).status).toBe(403);
-  expect((await request(app).post(`/rx/${rxId}/verify`).set('x-test-role','CASHIER').send({})).status).toBe(403);
-  expect((await request(app).post('/rx').send({...fixture,items_json:'invalid-json'})).status).toBe(400);
-  expect((await request(app).post('/rx').send({...fixture,doctor_name:''})).status).toBe(400);
+  expect((await request(server).post('/rx').set('x-test-role','VIEWER').send(fixture)).status).toBe(403);
+  expect((await request(server).post(`/rx/${rxId}/verify`).set('x-test-role','CASHIER').send({})).status).toBe(403);
+  expect((await request(server).post('/rx').send({...fixture,items_json:'invalid-json'})).status).toBe(400);
+  expect((await request(server).post('/rx').send({...fixture,doctor_name:''})).status).toBe(400);
 });
 test('verification cannot modify another prescription item or accept negative quantities', async () => {
-  const other = PrescriptionService.createPrescription({ organizationId:'rx-other-clinic', doctorName:'QA Other', doctorRegistrationNumber:'QA-OTHER', documentUrl:'', items:[{raw_text:'Other',prescribed_name:'Other', prescribed_quantity:3}] });
-  const response = await request(app).post(`/rx/${rxId}/verify`).send({ item_updates:[{itemId:other.prescription.items![0].id,prescribedQuantity:999}] });
+  const other = (await PrescriptionService.createPrescription({ organizationId:'rx-other-clinic', doctorName:'QA Other', doctorRegistrationNumber:'QA-OTHER', documentUrl:'', items:[{raw_text:'Other',prescribed_name:'Other', prescribed_quantity:3}] }));
+  const response = await request(server).post(`/rx/${rxId}/verify`).send({ item_updates:[{itemId:other.prescription.items![0].id,prescribedQuantity:999}] });
   expect(response.status).toBe(400);
-  expect(PrescriptionService.getPrescriptionById(other.prescription.id!)!.items![0].prescribed_quantity).toBe(3);
-  expect((await request(app).post(`/rx/${rxId}/verify`).send({item_updates:[{itemId:crypto.randomUUID(),prescribedQuantity:-1}]})).status).toBe(400);
+  expect((await PrescriptionService.getPrescriptionById(other.prescription.id!))!.items![0].prescribed_quantity).toBe(3);
+  expect((await request(server).post(`/rx/${rxId}/verify`).send({item_updates:[{itemId:crypto.randomUUID(),prescribedQuantity:-1}]})).status).toBe(400);
 });
 test('extraction never invents a medicine, dose, quantity or doctor from a document URL', () => {
   const empty = PrescriptionExtractionService.extractCandidates({documentUrl:'prescriptions/unreadable.pdf'});
@@ -67,20 +77,20 @@ test('extraction never invents a medicine, dose, quantity or doctor from a docum
 });
 
 test('doctor registration matching stays within the organization and ignores spoofed query access', async () => {
-  const first = DoctorService.findOrCreateByRegistration({organizationId:'rx-test-clinic',name:'QA First',registrationNumber:'QA-SHARED'});
-  const second = DoctorService.findOrCreateByRegistration({organizationId:'rx-other-clinic',name:'QA Second',registrationNumber:'QA-SHARED'});
+  const first = (await DoctorService.findOrCreateByRegistration({organizationId:'rx-test-clinic',name:'QA First',registrationNumber:'QA-SHARED'}));
+  const second = (await DoctorService.findOrCreateByRegistration({organizationId:'rx-other-clinic',name:'QA Second',registrationNumber:'QA-SHARED'}));
   expect(second.id).not.toBe(first.id);
-  expect((await request(app).get('/doctors').query({organization_id:'rx-other-clinic'})).status).toBe(403);
-  expect((await request(app).get(`/doctors/${second.id}`)).status).toBe(404);
+  expect((await request(server).get('/doctors').query({organization_id:'rx-other-clinic'})).status).toBe(403);
+  expect((await request(server).get(`/doctors/${second.id}`)).status).toBe(404);
 });
 test('patient history and allergies do not reveal or modify records from another clinic', async () => {
   const allergyId = crypto.randomUUID(); const now = new Date().toISOString();
   localDb.prepare('INSERT INTO patient_allergies(id,_local_id,organization_id,patient_id,allergen,active,_updated_at) VALUES(?,?,?,?,?,1,?)').run(allergyId,allergyId,'rx-other-clinic','qa-patient','QA Restricted Allergen',now);
   try {
-    const history = await request(app).get('/patients/qa-patient/medication-history');
+    const history = await request(server).get('/patients/qa-patient/medication-history');
     expect(history.status).toBe(404);
-    expect((await request(app).get('/patients/qa-patient/allergies')).status).toBe(404);
-    expect((await request(app).post('/patients/qa-patient/allergies').send({allergen:'QA Allergy'})).status).toBe(404);
+    expect((await request(server).get('/patients/qa-patient/allergies')).status).toBe(404);
+    expect((await request(server).post('/patients/qa-patient/allergies').send({allergen:'QA Allergy'})).status).toBe(404);
   } finally { localDb.prepare('DELETE FROM patient_allergies WHERE id = ?').run(allergyId); }
 });
 
@@ -88,7 +98,7 @@ test('patient history resolves a real patient and accepts every severity exposed
  const id=crypto.randomUUID(),now=new Date().toISOString();
  localDb.prepare('INSERT INTO customers(id,_local_id,organization_id,clinic_id,name,_updated_at) VALUES(?,?,?,?,?,?)').run(id,id,'rx-test-clinic','rx-test-clinic','QA named patient',now);
  try {
-  const history=await request(app).get(`/patients/${id}/medication-history`);expect(history.status).toBe(200);expect(history.body.data.patientName).toBe('QA named patient');
-  expect((await request(app).post(`/patients/${id}/allergies`).send({allergen:'QA synthetic allergen',severity:'ANAPHYLAXIS'})).status).toBe(201);
+  const history=await request(server).get(`/patients/${id}/medication-history`);expect(history.status).toBe(200);expect(history.body.data.patientName).toBe('QA named patient');
+  expect((await request(server).post(`/patients/${id}/allergies`).send({allergen:'QA synthetic allergen',severity:'ANAPHYLAXIS'})).status).toBe(201);
  } finally {localDb.prepare('DELETE FROM patient_allergies WHERE patient_id=?').run(id);localDb.prepare('DELETE FROM customers WHERE id=?').run(id);}
 });

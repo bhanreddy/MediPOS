@@ -1,4 +1,4 @@
-import { localDb } from '../local-db';
+import { businessDb as localDb, lockBusinessRows, cloudBusinessMode } from '../lib/businessDb';
 import { v4 as uuidv4 } from 'uuid';
 import { LocationType } from '../domain/units';
 
@@ -51,7 +51,7 @@ export class InventoryPositionService {
   /**
    * Get or initialize an inventory position record for a location
    */
-  static getOrCreatePosition(params: {
+  static async getOrCreatePosition(params: {
     organizationId: string;
     medicineId: string;
     batchId: string;
@@ -59,7 +59,7 @@ export class InventoryPositionService {
     storeId?: string | null;
     warehouseId?: string | null;
     initialStock?: number;
-  }): InventoryPositionRecord {
+  }): Promise<InventoryPositionRecord> {
     const {
       organizationId,
       medicineId,
@@ -70,35 +70,45 @@ export class InventoryPositionService {
       initialStock = 0,
     } = params;
 
+    await lockBusinessRows('medicine_batches', [batchId]);
+    if(cloudBusinessMode()){
+      const {tenantRecord}=await import('../lib/tenantRecords');
+      const medicine=await tenantRecord('medicines',medicineId,organizationId);
+      const batch=await tenantRecord('medicine_batches',batchId,organizationId);
+      if(batch.medicine_id!==medicine.id)throw new Error('Batch does not belong to the selected medicine');
+      if(storeId)await tenantRecord('stores',storeId,organizationId);
+      if(warehouseId)await tenantRecord('warehouses',warehouseId,organizationId);
+    }
     const targetId = locationType === 'STORE' ? storeId : warehouseId;
     const locationCol = locationType === 'STORE' ? 'store_id' : 'warehouse_id';
 
     let row: any;
     if (targetId) {
-      row = localDb
+      row = (await localDb
         .prepare(
           `SELECT * FROM inventory_positions 
            WHERE organization_id = ? AND medicine_id = ? AND batch_id = ? AND location_type = ? AND ${locationCol} = ?`
         )
-        .get(organizationId, medicineId, batchId, locationType, targetId);
+        .get(organizationId, medicineId, batchId, locationType, targetId));
     } else {
-      row = localDb
+      row = (await localDb
         .prepare(
           `SELECT * FROM inventory_positions 
            WHERE organization_id = ? AND medicine_id = ? AND batch_id = ? AND location_type = ? AND ${locationCol} IS NULL`
         )
-        .get(organizationId, medicineId, batchId, locationType);
+        .get(organizationId, medicineId, batchId, locationType));
     }
 
     if (!row) {
       const id = uuidv4();
       const now = new Date().toISOString();
-      const onHand = Math.max(0, initialStock);
+      const batch = cloudBusinessMode() ? await localDb.prepare('SELECT quantity_remaining,store_id FROM medicine_batches WHERE id=? AND medicine_id=?').get(batchId,medicineId) : null;
+      const onHand = Math.max(0, batch && (!batch.store_id || batch.store_id===storeId) ? Number(batch.quantity_remaining) : initialStock);
       const available = onHand;
 
-      localDb
+      (await localDb
         .prepare(
-          `INSERT OR REPLACE INTO inventory_positions (
+          `INSERT OR IGNORE INTO inventory_positions (
              id, _local_id, organization_id, medicine_id, batch_id, location_type,
              store_id, warehouse_id, quantity_on_hand, quantity_reserved,
              quantity_available, quantity_quarantined, quantity_damaged,
@@ -120,11 +130,11 @@ export class InventoryPositionService {
           now,
           now,
           now
-        );
+        ));
 
-      row = localDb
+      row = (await localDb
         .prepare('SELECT * FROM inventory_positions WHERE id = ?')
-        .get(id);
+        .get(id));
     }
 
     return {
@@ -144,7 +154,7 @@ export class InventoryPositionService {
   /**
    * Atomically adjust stock on hand at a location
    */
-  static adjustStock(params: {
+  static async adjustStock(params: {
     organizationId: string;
     medicineId: string;
     batchId: string;
@@ -152,7 +162,7 @@ export class InventoryPositionService {
     storeId?: string | null;
     warehouseId?: string | null;
     quantityDelta: number;
-  }): InventoryPositionRecord {
+  }): Promise<InventoryPositionRecord> {
     const {
       organizationId,
       medicineId,
@@ -163,14 +173,14 @@ export class InventoryPositionService {
       quantityDelta,
     } = params;
 
-    const pos = this.getOrCreatePosition({
+    const pos = (await this.getOrCreatePosition({
       organizationId,
       medicineId,
       batchId,
       locationType,
       storeId,
       warehouseId,
-    });
+    }));
 
     const newOnHand = Number(pos.quantity_on_hand || 0) + quantityDelta;
     if (newOnHand < 0) {
@@ -190,13 +200,13 @@ export class InventoryPositionService {
     );
     const now = new Date().toISOString();
 
-    localDb
+    (await localDb
       .prepare(
         `UPDATE inventory_positions
          SET quantity_on_hand = ?, quantity_available = ?, updated_at = ?, _updated_at = ?
          WHERE id = ? OR _local_id = ?`
       )
-      .run(newOnHand, newAvailable, now, now, pos.id, pos._local_id);
+      .run(newOnHand, newAvailable, now, now, pos.id, pos._local_id));
 
     return {
       ...pos,
@@ -206,10 +216,19 @@ export class InventoryPositionService {
     };
   }
 
+  /** Synchronize the owning store's position with a locked canonical batch balance. */
+  static async setCanonicalStock(params: Parameters<typeof InventoryPositionService.getOrCreatePosition>[0] & {quantity:number}) {
+    if(!Number.isSafeInteger(params.quantity)||params.quantity<0) throw new Error('Invalid inventory balance');
+    const position=await this.getOrCreatePosition(params);
+    const available=this.calcAvailable(params.quantity,position.quantity_reserved,position.quantity_quarantined,position.quantity_damaged,position.quantity_recalled,position.quantity_on_hold,position.quantity_stocktake_locked);
+    await localDb.prepare('UPDATE inventory_positions SET quantity_on_hand=?,quantity_available=?,updated_at=?,_updated_at=? WHERE id=?').run(params.quantity,available,new Date().toISOString(),new Date().toISOString(),position.id);
+    return {...position,quantity_on_hand:params.quantity,quantity_available:available};
+  }
+
   /**
    * Update specific sub-state quantities (quarantined, damaged, recalled, reserved, etc.)
    */
-  static updateStateQuantities(params: {
+  static async updateStateQuantities(params: {
     organizationId: string;
     medicineId: string;
     batchId: string;
@@ -223,7 +242,7 @@ export class InventoryPositionService {
     onHoldDelta?: number;
     stocktakeLockedDelta?: number;
     inTransitDelta?: number;
-  }): InventoryPositionRecord {
+  }): Promise<InventoryPositionRecord> {
     const {
       organizationId,
       medicineId,
@@ -240,14 +259,14 @@ export class InventoryPositionService {
       inTransitDelta = 0,
     } = params;
 
-    const pos = this.getOrCreatePosition({
+    const pos = (await this.getOrCreatePosition({
       organizationId,
       medicineId,
       batchId,
       locationType,
       storeId,
       warehouseId,
-    });
+    }));
 
     const newReserved = Math.max(0, Number(pos.quantity_reserved || 0) + reservedDelta);
     const newQuarantined = Math.max(0, Number(pos.quantity_quarantined || 0) + quarantinedDelta);
@@ -268,7 +287,7 @@ export class InventoryPositionService {
     );
     const now = new Date().toISOString();
 
-    localDb
+    (await localDb
       .prepare(
         `UPDATE inventory_positions
          SET quantity_reserved = ?, quantity_quarantined = ?, quantity_damaged = ?,
@@ -289,7 +308,7 @@ export class InventoryPositionService {
         now,
         pos.id,
         pos._local_id
-      );
+      ));
 
     return {
       ...pos,

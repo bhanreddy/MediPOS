@@ -1,5 +1,5 @@
 // orderQuoteService.ts — Server-Side Commercial Quote Adapter for OMS
-import { localDb } from '../../local-db';
+import { businessDb as localDb } from '../../lib/businessDb';
 import { localMutate } from '../../lib/localMutate';
 import { v4 as uuidv4 } from 'uuid';
 import { Money } from '../../lib/money';
@@ -67,13 +67,13 @@ export class OrderQuoteService {
   /**
    * Calculate delivery fee based on fulfilment type, cart total, and membership
    */
-  static calculateDeliveryCharge(params: {
+  static async calculateDeliveryCharge(params: {
     organizationId: string;
     customerId?: string | null;
     fulfilmentType: FulfilmentType;
     cartSubtotalPaise: number;
     overrideFeePaise?: number | null;
-  }): number {
+  }): Promise<number> {
     const { organizationId, customerId, fulfilmentType, cartSubtotalPaise, overrideFeePaise } = params;
 
     if (fulfilmentType !== 'HOME_DELIVERY') {
@@ -86,7 +86,7 @@ export class OrderQuoteService {
 
     // Check if customer has Premium or VIP membership with free delivery benefit
     if (customerId) {
-      const membership = CustomerGroupService.getActiveMembership(customerId, organizationId);
+      const membership = (await CustomerGroupService.getActiveMembership(customerId, organizationId));
       if (membership && (membership.membership_type === 'PREMIUM' || membership.tier === 'PLATINUM')) {
         return 0;
       }
@@ -103,7 +103,7 @@ export class OrderQuoteService {
   /**
    * Generate authoritative server-side order quote using Task 3 Commercial Engine
    */
-  static generateQuote(request: OrderQuoteRequest): OrderQuoteResponse {
+  static async generateQuote(request: OrderQuoteRequest): Promise<OrderQuoteResponse> {
     const {
       organizationId,
       storeId = null,
@@ -122,7 +122,7 @@ export class OrderQuoteService {
     }
 
     // Delegate product & pricing math to Commercial Engine
-    const commercialQuote = CommercialEngine.quoteCommercialCart({
+    const commercialQuote = (await CommercialEngine.quoteCommercialCart({
       organizationId,
       storeId,
       customerId,
@@ -130,16 +130,16 @@ export class OrderQuoteService {
       couponCode,
       redeemLoyaltyCredits,
       billDiscountPaise,
-    });
+    }));
 
     // Compute Delivery Charge
-    const deliveryChargePaise = this.calculateDeliveryCharge({
+    const deliveryChargePaise = (await this.calculateDeliveryCharge({
       organizationId,
       customerId,
       fulfilmentType,
       cartSubtotalPaise: commercialQuote.subtotalPaise,
       overrideFeePaise: deliveryChargePaiseOverride,
-    });
+    }));
     const deliveryCharge = Money.toRupees(deliveryChargePaise);
 
     // Recompute final totals including delivery charge
@@ -160,7 +160,7 @@ export class OrderQuoteService {
     // Determine if any item requires prescription
     let hasPrescriptionMedication = false;
     for (const it of items) {
-      const med: any = localDb.prepare('SELECT prescription_required FROM medicines WHERE id = ? OR _local_id = ?').get(it.medicine_id, it.medicine_id);
+      const med: any = (await localDb.prepare('SELECT prescription_required FROM medicines WHERE id = ? OR _local_id = ?').get(it.medicine_id, it.medicine_id));
       if (med?.prescription_required) {
         hasPrescriptionMedication = true;
         break;
@@ -199,11 +199,11 @@ export class OrderQuoteService {
   /**
    * Store immutable commercial snapshot on order confirmation
    */
-  static saveCommercialSnapshot(orderId: string, organizationId: string, quote: OrderQuoteResponse): string {
+  static async saveCommercialSnapshot(orderId: string, organizationId: string, quote: OrderQuoteResponse): Promise<string> {
     const snapshotId = uuidv4();
     const nowIso = new Date().toISOString();
 
-    localMutate({
+    (await localMutate({
       table: 'order_commercial_snapshots',
       operation: 'INSERT',
       data: {
@@ -215,7 +215,7 @@ export class OrderQuoteService {
         quote_json: JSON.stringify(quote),
         created_at: nowIso,
       },
-    });
+    }));
 
     return snapshotId;
   }
@@ -223,10 +223,10 @@ export class OrderQuoteService {
   /**
    * Retrieve snapshot for order
    */
-  static getCommercialSnapshot(orderId: string, organizationId: string): OrderQuoteResponse | null {
-    const row: any = localDb
+  static async getCommercialSnapshot(orderId: string, organizationId: string): Promise<OrderQuoteResponse | null> {
+    const row: any = (await localDb
       .prepare('SELECT quote_json FROM order_commercial_snapshots WHERE order_id = ? AND organization_id = ?')
-      .get(orderId, organizationId);
+      .get(orderId, organizationId));
 
     if (!row || !row.quote_json) return null;
     return JSON.parse(row.quote_json);

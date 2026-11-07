@@ -11,7 +11,9 @@
     "deploy:catalyst": "catalyst deploy --only appsail --dc in --org 60091775419 -ni",
     "test:durability": "npm run build && node scripts/test-durable-runtime.cjs",
     "typecheck": "tsc --noEmit",
-    "test": "jest --forceExit --detectOpenHandles"
+    "test": "jest --forceExit --detectOpenHandles",
+    "test:desktop-outbox": "node scripts/test-desktop-outbox.cjs",
+    "test:phase1": "jest --runInBand src/__tests__/integration/phase1Integrity.pg.test.ts"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.86.1",

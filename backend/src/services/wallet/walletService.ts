@@ -68,9 +68,9 @@ function snapshot(state: State | null, page=1) {
     entries:[...state.entries].reverse().slice((page-1)*25,page*25),total_entries:state.entries.length,page,integrity_verified:true,default_validity_days:90};
 }
 export const WalletService = {
-  async get(context: Context,page=1) { return withPostgresTransaction(async()=>{const policy=await getCoinPolicy(context.clinicId);return {...snapshot(await load(context,false),page),default_validity_days:policy.expiry_days,policy};}); },
+  async get(context: Context,page=1) { return (await withPostgresTransaction(async()=>{const policy=await getCoinPolicy(context.clinicId);return {...snapshot(await load(context,false),page),default_validity_days:policy.expiry_days,policy};})); },
   async earn(context:Context,saleTotalPaise:number,externalPaise:number,saleId:string,suppliedPolicy?:CoinPolicy){
-    return withPostgresTransaction(async()=>{
+    return (await withPostgresTransaction(async()=>{
       const policy=suppliedPolicy||await getCoinPolicy(context.clinicId);
       const state=(await load(context,true))!;
       const previous=state.entries.find(e=>e.kind==='EARN'&&e.sale_id===saleId);
@@ -86,10 +86,10 @@ export const WalletService = {
         await append(state,{kind:'EARN',lot_id:randomUUID(),amount_paise:amount,expires_at:new Date(Date.parse(state.now)+policy.expiry_days*86400000).toISOString(),sale_id:saleId,operation_id:op.id,actor_id:context.actorId,reason:`Earned ${policy.rate_bps/100}% Nex Coins on paid sale`,source_sale_total_paise:eligibleSale,source_external_paise:externalPaise,source_returned_paise:returnedPaise,policy_version:policy.version});
       }
       return amount;
-    });
+    }));
   },
   async reverseEarnings(context:Context,originalSaleId:string,returnSaleId:string,cumulativeReturnedPaise:number){
-    return withPostgresTransaction(async()=>{
+    return (await withPostgresTransaction(async()=>{
       const [hasEarned]=await postgresQuery("SELECT l.id FROM promo_wallet_ledger l JOIN promo_wallet_accounts a ON a.id=l.account_id WHERE a.clinic_id=$1 AND l.sale_id=$2 AND l.kind='EARN' LIMIT 1",[context.clinicId,originalSaleId]);
       if(!hasEarned)return 0;
       const state=(await load(context,true))!;
@@ -107,10 +107,10 @@ export const WalletService = {
       const amount=Math.max(0,target-cancelled);
       if(amount>0)await append(state,{kind:'CLAWBACK',lot_id:earned.lot_id,amount_paise:-amount,expires_at:earned.expires_at,sale_id:returnSaleId,operation_id:op.id,actor_id:context.actorId,reason:'Nex Coins earning reversed for returned purchase'});
       return amount;
-    });
+    }));
   },
   async issue(context: Context,input:{amountPaise:number;validityDays:number;reason:string;requestId:string}) {
-    return withPostgresTransaction(async()=>{
+    return (await withPostgresTransaction(async()=>{
       if (!Number.isSafeInteger(input.amountPaise)||input.amountPaise<1||input.amountPaise>10000000||!Number.isInteger(input.validityDays)||input.validityDays<1||input.validityDays>365) throw new AppError(400,'Invalid promotional credit amount or validity');
       const state=(await load(context,true))!;
       const op=await operation(state,input.requestId,'credit',[input.amountPaise,input.validityDays,input.reason,context.actorId]);
@@ -119,10 +119,10 @@ export const WalletService = {
         await append(state,{kind:'CREDIT',lot_id:randomUUID(),amount_paise:input.amountPaise,expires_at:new Date(Date.parse(state.now)+input.validityDays*86400000).toISOString(),sale_id:null,operation_id:op.id,actor_id:context.actorId,reason:input.reason});
       }
       return snapshot(state);
-    });
+    }));
   },
   async revoke(context: Context,input:{lotId:string;reason:string;requestId:string}) {
-    return withPostgresTransaction(async()=>{
+    return (await withPostgresTransaction(async()=>{
       const state=(await load(context,true))!;
       const op=await operation(state,input.requestId,'revoke',[input.lotId,input.reason,context.actorId]);
       if (!op.replayed) {
@@ -132,11 +132,11 @@ export const WalletService = {
         await append(state,{kind:'REVOKE',lot_id:lot.id,amount_paise:-lot.remaining_paise,expires_at:lot.expires_at,sale_id:null,operation_id:op.id,actor_id:context.actorId,reason:input.reason});
       }
       return snapshot(state);
-    });
+    }));
   },
   /** Called inside the sale transaction; stock, invoice and wallet commit together. */
   async redeem(context: Context,amountPaise:number,saleId:string) {
-    return withPostgresTransaction(async()=>{
+    return (await withPostgresTransaction(async()=>{
       const state=(await load(context,true))!;
       const op=await operation(state,`sale:${saleId}`,'redeem',[amountPaise,saleId]);
       if (op.replayed) return;
@@ -144,11 +144,11 @@ export const WalletService = {
       for (const {lot,amount} of planRedemption(state.lots,amountPaise,state.now)) {
         await append(state,{kind:'REDEEM',lot_id:lot.id,amount_paise:-amount,expires_at:lot.expires_at,sale_id:saleId,operation_id:op.id,actor_id:context.actorId,reason:'Nex Coins applied to invoice'});
       }
-    });
+    }));
   },
   /** Coin refunds restore original lots and original deadlines, never cash. */
   async refund(context: Context,originalSaleId:string,returnSaleId:string,amountPaise:number) {
-    return withPostgresTransaction(async()=>{
+    return (await withPostgresTransaction(async()=>{
       const state=(await load(context,true))!;
       const op=await operation(state,`return:${returnSaleId}`,'refund',[originalSaleId,amountPaise]);
       if (op.replayed) return;
@@ -167,6 +167,6 @@ export const WalletService = {
       }
       if (remaining) throw new AppError(409,'Wallet refund exceeds the promotional credits used on this invoice');
       await expire(state,context.actorId);
-    });
+    }));
   },
 };

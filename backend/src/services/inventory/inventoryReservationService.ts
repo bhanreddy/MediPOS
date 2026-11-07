@@ -1,5 +1,5 @@
 // inventoryReservationService.ts — Enterprise Concurrency-Safe Stock Reservation Service
-import { localDb } from '../../local-db';
+import { businessDb as localDb } from '../../lib/businessDb';
 import { v4 as uuidv4 } from 'uuid';
 import { ReservationSourceType, ReservationStatus } from '../../domain/inventoryTypes';
 import { LocationType } from '../../domain/units';
@@ -11,7 +11,7 @@ export class InventoryReservationService {
   /**
    * Create an inventory reservation with concurrency protection
    */
-  static createReservation(params: {
+  static async createReservation(params: {
     organizationId: string;
     locationType: LocationType;
     storeId?: string | null;
@@ -23,7 +23,7 @@ export class InventoryReservationService {
     sourceId: string;
     durationMinutes?: number;
     createdBy?: string;
-  }): { id: string; status: ReservationStatus; expiresAt: string } {
+  }): Promise<{ id: string; status: ReservationStatus; expiresAt: string }> {
     const {
       organizationId,
       locationType,
@@ -41,17 +41,17 @@ export class InventoryReservationService {
     if (!Number.isFinite(quantity) || quantity <= 0 || !Number.isFinite(durationMinutes) || durationMinutes <= 0) throw new AppError(400, 'Reservation quantity and duration must be positive numbers');
 
     // First, clean any expired reservations
-    this.cleanExpiredReservations(organizationId);
+    (await this.cleanExpiredReservations(organizationId));
 
     // Validate available stock
-    const avail = InventoryAvailabilityService.getAvailability({
+    const avail = (await InventoryAvailabilityService.getAvailability({
       organizationId,
       medicineId,
       locationType,
       storeId,
       warehouseId,
       batchId,
-    });
+    }));
 
     if (avail.totalAvailable < quantity) {
       throw new AppError(
@@ -72,7 +72,7 @@ export class InventoryReservationService {
       targetBatchId = avail.sellableBatches[0].batchId;
     }
 
-    localDb
+    (await localDb
       .prepare(
         `INSERT INTO inventory_reservations (
           id, _local_id, organization_id, location_type, store_id, warehouse_id,
@@ -97,11 +97,11 @@ export class InventoryReservationService {
         nowIso,
         nowIso,
         nowIso
-      );
+      ));
 
     // Update position reserved quantity
     if (targetBatchId) {
-      InventoryPositionService.updateStateQuantities({
+      (await InventoryPositionService.updateStateQuantities({
         organizationId,
         medicineId,
         batchId: targetBatchId,
@@ -109,7 +109,7 @@ export class InventoryReservationService {
         storeId,
         warehouseId,
         reservedDelta: quantity,
-      });
+      }));
     }
 
     return {
@@ -122,25 +122,25 @@ export class InventoryReservationService {
   /**
    * Consume reservation when sale / transfer completes
    */
-  static consumeReservation(reservationId: string): void {
-    const row: any = localDb
+  static async consumeReservation(reservationId: string): Promise<void> {
+    const row: any = (await localDb
       .prepare('SELECT * FROM inventory_reservations WHERE id = ? OR _local_id = ?')
-      .get(reservationId, reservationId);
+      .get(reservationId, reservationId));
 
     if (!row || row.status !== 'ACTIVE') return;
 
     const now = new Date().toISOString();
-    localDb
+    (await localDb
       .prepare(
         `UPDATE inventory_reservations 
          SET status = 'CONSUMED', updated_at = ?, _updated_at = ?
          WHERE id = ?`
       )
-      .run(now, now, row.id);
+      .run(now, now, row.id));
 
     // Release reserved quantity from position
     if (row.batch_id) {
-      InventoryPositionService.updateStateQuantities({
+      (await InventoryPositionService.updateStateQuantities({
         organizationId: row.organization_id,
         medicineId: row.medicine_id,
         batchId: row.batch_id,
@@ -148,32 +148,32 @@ export class InventoryReservationService {
         storeId: row.store_id,
         warehouseId: row.warehouse_id,
         reservedDelta: -Number(row.quantity || 0),
-      });
+      }));
     }
   }
 
   /**
    * Release reservation explicitly
    */
-  static releaseReservation(reservationId: string): void {
-    const row: any = localDb
+  static async releaseReservation(reservationId: string): Promise<void> {
+    const row: any = (await localDb
       .prepare('SELECT * FROM inventory_reservations WHERE id = ? OR _local_id = ?')
-      .get(reservationId, reservationId);
+      .get(reservationId, reservationId));
 
     if (!row || row.status !== 'ACTIVE') return;
 
     const now = new Date().toISOString();
-    localDb
+    (await localDb
       .prepare(
         `UPDATE inventory_reservations 
          SET status = 'RELEASED', updated_at = ?, _updated_at = ?
          WHERE id = ?`
       )
-      .run(now, now, row.id);
+      .run(now, now, row.id));
 
     // Release reserved quantity from position
     if (row.batch_id) {
-      InventoryPositionService.updateStateQuantities({
+      (await InventoryPositionService.updateStateQuantities({
         organizationId: row.organization_id,
         medicineId: row.medicine_id,
         batchId: row.batch_id,
@@ -181,33 +181,33 @@ export class InventoryReservationService {
         storeId: row.store_id,
         warehouseId: row.warehouse_id,
         reservedDelta: -Number(row.quantity || 0),
-      });
+      }));
     }
   }
 
   /**
    * Clean expired reservations
    */
-  static cleanExpiredReservations(organizationId: string): number {
+  static async cleanExpiredReservations(organizationId: string): Promise<number> {
     const nowIso = new Date().toISOString();
-    const expiredRows: any[] = localDb
+    const expiredRows: any[] = (await localDb
       .prepare(
         `SELECT * FROM inventory_reservations 
          WHERE organization_id = ? AND status = 'ACTIVE' AND expires_at < ?`
       )
-      .all(organizationId, nowIso);
+      .all(organizationId, nowIso));
 
     for (const r of expiredRows) {
-      localDb
+      (await localDb
         .prepare(
           `UPDATE inventory_reservations 
            SET status = 'EXPIRED', updated_at = ?, _updated_at = ?
            WHERE id = ?`
         )
-        .run(nowIso, nowIso, r.id);
+        .run(nowIso, nowIso, r.id));
 
       if (r.batch_id) {
-        InventoryPositionService.updateStateQuantities({
+        (await InventoryPositionService.updateStateQuantities({
           organizationId: r.organization_id,
           medicineId: r.medicine_id,
           batchId: r.batch_id,
@@ -215,7 +215,7 @@ export class InventoryReservationService {
           storeId: r.store_id,
           warehouseId: r.warehouse_id,
           reservedDelta: -Number(r.quantity || 0),
-        });
+        }));
       }
     }
 

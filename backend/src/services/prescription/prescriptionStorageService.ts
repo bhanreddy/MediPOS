@@ -25,7 +25,7 @@ export class PrescriptionStorageService {
   }
   static async save(storageKey: string, buffer: Buffer): Promise<void> {
     const target = this.resolveFile(storageKey);
-    if (process.env.DURABLE_RUNTIME === 'postgres') {
+    if (Boolean(process.env.DATABASE_URL)) {
       await postgresQuery('INSERT INTO app_prescription_documents(storage_key, content) VALUES ($1, $2)', [storageKey, buffer]);
       return;
     }
@@ -33,7 +33,7 @@ export class PrescriptionStorageService {
     await fs.writeFile(target, buffer, { flag: 'wx', mode: 0o600 });
   }
   static async remove(storageKey: string): Promise<void> {
-    if (process.env.DURABLE_RUNTIME === 'postgres') {
+    if (Boolean(process.env.DATABASE_URL)) {
       this.resolveFile(storageKey);
       await postgresQuery('DELETE FROM app_prescription_documents WHERE storage_key = $1', [storageKey]);
       return;
@@ -42,7 +42,7 @@ export class PrescriptionStorageService {
   }
   static async read(storageKey: string): Promise<Buffer> {
     const target = this.resolveFile(storageKey);
-    if (process.env.DURABLE_RUNTIME === 'postgres') {
+    if (Boolean(process.env.DATABASE_URL)) {
       const [document] = await postgresQuery<{ content: Buffer }>('SELECT content FROM app_prescription_documents WHERE storage_key = $1', [storageKey]);
       if (!document) throw new AppError(404, 'Prescription document is unavailable');
       return document.content;

@@ -28,7 +28,7 @@ eventsRouter.get('/stream', (req: Request, _res: Response, next: NextFunction) =
 
   // ─── SSE Headers ──────────────────────────────────────
   res.setHeader('Content-Type', 'text/event-stream');
-  res.setHeader('Cache-Control', 'no-cache');
+  res.setHeader('Cache-Control', 'private, no-store');
   res.setHeader('Connection', 'keep-alive');
   res.setHeader('X-Accel-Buffering', 'no'); // Nginx compatibility
   res.flushHeaders();

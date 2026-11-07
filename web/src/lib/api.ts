@@ -1,3 +1,4 @@
+import { getBranchSelection } from './branchSelection';
 import axios, { type AxiosError, type InternalAxiosRequestConfig } from 'axios';
 import axiosRetry, { exponentialDelay, isNetworkError } from 'axios-retry';
 import { sessionClient } from './sessionClient';
@@ -11,8 +12,19 @@ const api = axios.create({
 
 type SessionRequest = InternalAxiosRequestConfig & {
   _authVersion?: number;
+  _tenantScope?: string;
   _retryAfterRefresh?: boolean;
+  _branchScope?: string | null;
 };
+let lastBranchIdentity: { userId: string; clinicId: string | null } | null = null;
+export function setApiBranchIdentity(userId: string, clinicId: string | null) {
+  lastBranchIdentity = { userId, clinicId };
+}
+function branchScope() {
+  const identity = lastBranchIdentity;
+  if (!identity || sessionClient.peekSession?.()?.user.id !== identity.userId) return null;
+  return getBranchSelection(identity.userId, sessionStorage.getItem('impersonate_clinic_id') || identity.clinicId);
+}
 api.interceptors.request.use(async (config: SessionRequest) => {
   const expected = sessionClient.getVersion();
   if (config._authVersion !== undefined && config._authVersion !== expected)
@@ -22,6 +34,17 @@ api.interceptors.request.use(async (config: SessionRequest) => {
     throw new axios.CanceledError('Session changed.');
   config._authVersion = expected;
   const clinicId = sessionStorage.getItem('impersonate_clinic_id');
+  const tenantScope = `${expected}:${clinicId || ''}`;
+  if (config._tenantScope !== undefined && config._tenantScope !== tenantScope)
+    throw new axios.CanceledError('Session changed.');
+  config._tenantScope = tenantScope;
+  const accountBranch = session?.user.id === lastBranchIdentity?.userId ? branchScope() : null;
+  if (config._branchScope !== undefined && config._branchScope !== accountBranch)
+    throw new axios.CanceledError('Store changed.');
+  config._branchScope = accountBranch;
+  if (accountBranch && !/^\/(branches\/accessible|auth\/|offline\/commands|bills\/(sync|migrate))/.test(config.url || ''))
+    config.headers['x-store-id'] = accountBranch;
+  else delete config.headers['x-store-id'];
   if (clinicId) config.headers['x-impersonate-clinic'] = clinicId;
   else delete config.headers['x-impersonate-clinic'];
   if (session?.access_token)
@@ -48,6 +71,12 @@ axiosRetry(api, {
 // Renew once, share the refresh across concurrent 401s, and keep the UI signed in on failure.
 api.interceptors.response.use(
   (res) => {
+    const config = res.config as SessionRequest;
+    if (config._authVersion !== sessionClient.getVersion() ||
+        config._tenantScope !== `${sessionClient.getVersion()}:${sessionStorage.getItem('impersonate_clinic_id') || ''}`)
+      throw new axios.CanceledError('Session changed.');
+    if (config._branchScope !== undefined && config._branchScope !== branchScope())
+      throw new axios.CanceledError('Store changed.');
     const method = res.config.method?.toLowerCase() || 'get';
     if (!['get', 'head', 'options'].includes(method) &&
         /^\/(sales|purchases|inventory|shortbook|bulk)(\/|$)/.test(res.config.url || '')) {

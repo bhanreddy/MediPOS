@@ -6,7 +6,7 @@ import { WarehouseOperationsService } from "../services/warehouse/warehouseOpera
 const router = Router();
 
 function getOrgId(req: any): string {
-  return req.user?.organizationId || req.user?.clinic_id || "default-org";
+  return req.user?.organizationId || req.user?.clinic_id;
 }
 
 router.get("/bins", requireAuth, async (req: any, res) => {
@@ -15,10 +15,10 @@ router.get("/bins", requireAuth, async (req: any, res) => {
     const { warehouseId } = req.query;
     if (!warehouseId)
       return res.status(400).json({ error: "warehouseId is required" });
-    const bins = WarehouseOperationsService.listBins(
+    const bins = (await WarehouseOperationsService.listBins(
       orgId,
       warehouseId as string,
-    );
+    ));
     res.json(bins);
   } catch (err: any) {
     res
@@ -32,10 +32,10 @@ router.get("/bins", requireAuth, async (req: any, res) => {
 router.post("/bins", requireAuth, async (req: any, res) => {
   try {
     const orgId = getOrgId(req);
-    const bin = WarehouseOperationsService.createBin({
+    const bin = (await WarehouseOperationsService.createBin({
       ...req.body,
       organizationId: orgId,
-    });
+    }));
     res.status(201).json(bin);
   } catch (err: any) {
     res.status(400).json({ error: err.message });
@@ -48,10 +48,10 @@ router.get("/operations/dashboard", requireAuth, async (req: any, res) => {
     const { warehouseId } = req.query;
     if (!warehouseId)
       return res.status(400).json({ error: "warehouseId is required" });
-    const dashboard = WarehouseOperationsService.getWarehouseDashboard(
+    const dashboard = (await WarehouseOperationsService.getWarehouseDashboard(
       orgId,
       warehouseId as string,
-    );
+    ));
     res.json(dashboard);
   } catch (err: any) {
     res

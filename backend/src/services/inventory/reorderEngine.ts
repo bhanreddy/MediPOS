@@ -1,5 +1,5 @@
 // reorderEngine.ts — Demand-Driven Reorder, Pack Rounding & Replenishment Engine
-import { localDb } from '../../local-db';
+import { businessDb as localDb } from '../../lib/businessDb';
 import {
   ReorderRecommendationResult,
   ReplenishmentType,
@@ -11,12 +11,12 @@ export class ReorderEngine {
   /**
    * Calculate reorder recommendations for an organization and store
    */
-  static getReorderRecommendations(params: {
+  static async getReorderRecommendations(params: {
     organizationId: string;
     storeId?: string | null;
     defaultLeadTimeDays?: number;
     defaultSafetyStockDays?: number;
-  }): ReorderRecommendationResult[] {
+  }): Promise<ReorderRecommendationResult[]> {
     const {
       organizationId,
       storeId = null,
@@ -25,10 +25,10 @@ export class ReorderEngine {
     } = params;
 
     // 1. Get current classifications (sales velocity, days cover)
-    const classifications = InventoryClassificationEngine.computeClassifications({
+    const classifications = (await InventoryClassificationEngine.computeClassifications({
       organizationId,
       storeId,
-    });
+    }));
 
     // 2. Fetch pending purchase orders for items
     let pendingPoQuery = `
@@ -44,27 +44,27 @@ export class ReorderEngine {
     }
     pendingPoQuery += ` GROUP BY pi.medicine_id`;
 
-    const poRows: any[] = localDb.prepare(pendingPoQuery).all(...poParams);
+    const poRows: any[] = (await localDb.prepare(pendingPoQuery).all(...poParams));
     const poMap = new Map<string, number>();
     for (const r of poRows) {
       poMap.set(r.medicine_id, Number(r.incoming_qty || 0));
     }
 
     // 3. Fetch warehouse stock availability for organization
-    const warehouses: any[] = localDb
+    const warehouses: any[] = (await localDb
       .prepare('SELECT id FROM warehouses WHERE organization_id = ?')
-      .all(organizationId);
+      .all(organizationId));
 
     const warehouseStockMap = new Map<string, number>();
     for (const w of warehouses) {
-      const whAvail: any[] = localDb
+      const whAvail: any[] = (await localDb
         .prepare(
           `SELECT medicine_id, SUM(quantity_available) as wh_avail 
            FROM inventory_positions 
            WHERE organization_id = ? AND warehouse_id = ?
            GROUP BY medicine_id`
         )
-        .all(organizationId, w.id);
+        .all(organizationId, w.id));
 
       for (const wa of whAvail) {
         const cur = warehouseStockMap.get(wa.medicine_id) || 0;
@@ -73,14 +73,14 @@ export class ReorderEngine {
     }
 
     // 4. Fetch medicine master configurations (pack_size, MOQ, reorder_level)
-    const medConfigs: any[] = localDb
+    const medConfigs: any[] = (await localDb
       .prepare(
         `SELECT id, name, minimum_order_quantity, reorder_level, reorder_quantity,
                 units_per_pack, conversion_factor
           FROM medicines 
           WHERE (_deleted = 0 OR _deleted IS NULL) AND (is_active = 1 OR is_active IS NULL)`
       )
-      .all();
+      .all());
     const configMap = new Map<string, any>();
     for (const m of medConfigs) {
       configMap.set(m.id, m);

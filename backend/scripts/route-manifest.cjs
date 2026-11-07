@@ -22,8 +22,10 @@ function routeManifest() {
     const file = imports[node.arguments[1]?.getText(index)];
     if (prefix === null || !file) return;
     const source = parse(file);
+    const routerNames = new Set(source.statements.filter(ts.isVariableStatement).flatMap(node => [...node.declarationList.declarations]).filter(node => node.initializer && ts.isCallExpression(node.initializer) && ['Router','express.Router'].includes(node.initializer.expression.getText(source))).map(node => node.name.getText(source)));
     walk(source, route => {
       if (!ts.isCallExpression(route) || !ts.isPropertyAccessExpression(route.expression) || !methods.has(route.expression.name.text)) return;
+      if (!routerNames.has(route.expression.expression.getText(source))) return;
       const suffix = literal(route.arguments[0]);
       if (suffix === null) return;
       routes.push({ method: route.expression.name.text.toUpperCase(), path: `/api/${prefix}/${suffix}`.replace(/\/{2,}/g, '/').replace(/\/$/, ''), file: path.relative(root, file), line: source.getLineAndCharacterOfPosition(route.getStart()).line + 1 });

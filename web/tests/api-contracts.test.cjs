@@ -54,11 +54,18 @@ walk(index, (n) => {
     const file = imports[n.arguments[1]?.getText(index)];
     if (!file || !fs.existsSync(file)) return;
     const source = parse(file);
+    const routers = new Set(source.statements
+      .filter(ts.isVariableStatement)
+      .flatMap(statement => [...statement.declarationList.declarations])
+      .filter(node => node.initializer && ts.isCallExpression(node.initializer) &&
+        ["Router", "express.Router"].includes(node.initializer.expression.getText(source)))
+      .map(node => node.name.getText(source)));
     walk(source, (r) => {
       if (
         ts.isCallExpression(r) &&
         ts.isPropertyAccessExpression(r.expression) &&
         methods.has(r.expression.name.text) &&
+        routers.has(r.expression.expression.getText(source)) &&
         text(r.arguments[0]) !== null
       ) {
         const suffix = text(r.arguments[0]);

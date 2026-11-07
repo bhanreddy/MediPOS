@@ -1,4 +1,3 @@
-import { localDb } from '../local-db';
 import { queryRaw } from '../lib/postgresDb';
 import { AppError } from '../lib/appError';
 
@@ -13,6 +12,8 @@ export function invalidateCloudReferenceCatalog(clinicId: string): void {
 
 /** Read-only cloud reference projection. Stock and financial balances remain in their owning engines. */
 export async function ensureCloudReferenceCatalog(clinicId: string, organizationId: string): Promise<void> {
+  if (process.env.DATABASE_URL) return; // Cloud consumers read PostgreSQL directly.
+  const { localDb } = await import('../local-db');
   const key = `${clinicId}:${organizationId}`;
   const previous = process.env.DURABLE_RUNTIME === 'postgres' ? undefined : cache.get(key);
   if (previous && Date.now() - previous.at < 30_000) return;

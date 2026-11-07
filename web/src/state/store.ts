@@ -1,4 +1,4 @@
-import { configureStore } from '@reduxjs/toolkit';
+import { combineReducers, configureStore } from '@reduxjs/toolkit';
 import {
     authSlice,
     productSlice,
@@ -11,8 +11,7 @@ import {
     uiSlice
 } from './slices';
 
-export const store = configureStore({
-    reducer: {
+const appReducer = combineReducers({
         auth: authSlice.reducer,
         products: productSlice.reducer,
         inventory: inventorySlice.reducer,
@@ -22,7 +21,11 @@ export const store = configureStore({
         expenses: expenseSlice.reducer,
         reports: reportSlice.reducer,
         ui: uiSlice.reducer,
-    },
+});
+
+export const store = configureStore({
+    reducer: (state: ReturnType<typeof appReducer> | undefined, action) =>
+        appReducer(action.type === authSlice.actions.logout.type ? undefined : state, action),
     // Disable devTools in production if needed, enabled for now
     devTools: import.meta.env.DEV,
 });

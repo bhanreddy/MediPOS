@@ -9,7 +9,7 @@ const mockQuery:any = {};
 for (const name of ['select','eq']) mockQuery[name] = jest.fn(() => mockQuery);
 mockQuery.single = jest.fn(async () => mockProfile);
 jest.mock('../config/supabase', () => ({ supabaseAdmin:{ auth:{ getUser:(...args:unknown[]) => mockGetUser(...args) },from:jest.fn(() => mockQuery) } }));
-jest.mock('../local-db', () => ({ localDb:{ prepare:() => ({ get:() => mockLocal.current }) } }));
+jest.mock('../local-db', () => ({ localDb:{ prepare:() => ({ get:() => mockLocal.current, all: () => [] }) } }));
 jest.mock('../services/cloudPosDirectory', () => ({ ensureCloudPosDirectory:jest.fn(async () => 'organization') }));
 import { requireAuth } from '../middleware/auth';
 import { resetSupabaseIdentityCache } from '../lib/supabaseIdentity';
@@ -48,13 +48,13 @@ test('current cloud roles authenticate and SUPER_ADMIN impersonation remains req
 });
 const session = (claims:object = {}, key:any = process.env.SUPABASE_JWT_SECRET, options:jwt.SignOptions = {}) =>
  jwt.sign({sub:'operator',role:'authenticated',aud:'authenticated',email:'qa@example.invalid',exp:Math.floor(Date.now()/1000)+3600,...claims},key,options);
-test('signed Supabase sessions are verified in-process and share one profile lookup', async () => {
+test('signed Supabase sessions are verified in-process and revalidate their current profiles', async () => {
  mockProfile.data={clinic_id:'clinic-current',role:'OWNER',full_name:'QA Owner'};
  const token=session();
  const responses=await Promise.all([1,2,3].map(() => request(app).get('/protected').set('Authorization',`Bearer ${token}`)));
  expect(responses.map(r => r.status)).toEqual([200,200,200]);
  expect(responses[0].body).toMatchObject({id:'operator',email:'qa@example.invalid',role:'OWNER',clinic_id:'clinic-current'});
- expect(mockGetUser).not.toHaveBeenCalled(); expect(mockQuery.single).toHaveBeenCalledTimes(1);
+ expect(mockGetUser).not.toHaveBeenCalled(); expect(mockQuery.single).toHaveBeenCalledTimes(3);
 });
 test('asymmetric Supabase sessions are verified with the published signing keys', async () => {
  const { privateKey, publicKey } = generateKeyPairSync('ec',{namedCurve:'P-256'});

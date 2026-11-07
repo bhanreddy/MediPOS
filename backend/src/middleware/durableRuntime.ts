@@ -1,12 +1,12 @@
 import type { RequestHandler } from 'express';
-import { withDurableRuntime } from '../lib/durableRuntime';
+import { withPostgresTransaction } from '../lib/postgresDb';
 import { logger } from '../lib/logger';
 
 class RejectedResponse extends Error {}
 
-/** Buffer the response until both cloud SQL and embedded state are durably committed. */
+/** Buffer the response until the PostgreSQL transaction is committed. */
 export const durableRuntime: RequestHandler = async (req, res, next) => {
-  if (process.env.DURABLE_RUNTIME !== 'postgres' ||
+  if (!process.env.DATABASE_URL ||
       /^\/(health|events\/stream)\/?$/.test(req.path)) return next();
 
   const originalWrite = res.write;
@@ -41,9 +41,12 @@ export const durableRuntime: RequestHandler = async (req, res, next) => {
   res.flushHeaders = () => {};
 
   try {
-    await withDurableRuntime(async () => {
+    await withPostgresTransaction(async () => {
       next();
+      const onClose = () => complete();
+      res.once('close', onClose);
       await ended;
+      res.off('close', onClose);
       if (res.statusCode >= 400 || res.destroyed) throw new RejectedResponse();
     });
   } catch (error) {

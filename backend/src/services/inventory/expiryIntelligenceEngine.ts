@@ -1,5 +1,5 @@
 // expiryIntelligenceEngine.ts — Expiry Intelligence, Exposure Valuation & Action Recommendations
-import { localDb } from '../../local-db';
+import { businessDb as localDb } from '../../lib/businessDb';
 import { ExpiryActionRecommendation } from '../../domain/inventoryTypes';
 import { InventoryClassificationEngine } from './inventoryClassificationEngine';
 
@@ -40,11 +40,11 @@ export class ExpiryIntelligenceEngine {
   /**
    * Get detailed expiry risk items and action recommendations
    */
-  static getExpiryRiskItems(params: {
+  static async getExpiryRiskItems(params: {
     organizationId: string;
     storeId?: string | null;
     daysThreshold?: number;
-  }): {
+  }): Promise<{
     summary: {
       totalExpiringBatches: number;
       totalCostExposurePaise: number;
@@ -54,7 +54,7 @@ export class ExpiryIntelligenceEngine {
     };
     buckets: ExpiryBucketSummary[];
     items: ExpiryRiskItem[];
-  } {
+  }> {
     const { organizationId, storeId = null, daysThreshold = 180 } = params;
     const now = new Date();
     const todayStr = now.toISOString().split('T')[0];
@@ -80,13 +80,13 @@ export class ExpiryIntelligenceEngine {
 
     query += ` ORDER BY mb.expiry_date ASC`;
 
-    const batches: any[] = localDb.prepare(query).all(...queryParams);
+    const batches: any[] = (await localDb.prepare(query).all(...queryParams));
 
     // Fetch classifications for demand rates
-    const classifications = InventoryClassificationEngine.computeClassifications({
+    const classifications = (await InventoryClassificationEngine.computeClassifications({
       organizationId,
       storeId,
-    });
+    }));
     const demandMap = new Map<string, number>();
     for (const c of classifications) {
       demandMap.set(c.medicineId, c.avgDailySales30d || c.avgDailySales90d || 0);

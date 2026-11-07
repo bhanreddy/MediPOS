@@ -1,3 +1,4 @@
+jest.mock('../middleware/security',()=>({...jest.requireActual('../middleware/security'),apiRateLimit:(_req:unknown,_res:unknown,next:()=>void)=>next()}));
 import request from 'supertest';
 import { createApp } from '../app';
 const { routeManifest } = require('../../scripts/route-manifest.cjs');

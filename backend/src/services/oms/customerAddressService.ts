@@ -1,5 +1,5 @@
 // customerAddressService.ts — Customer Address Management Service
-import { localDb } from '../../local-db';
+import { businessDb as localDb } from '../../lib/businessDb';
 import { localMutate } from '../../lib/localMutate';
 import { v4 as uuidv4 } from 'uuid';
 import { CustomerAddress } from '../../domain/orderTypes';
@@ -9,14 +9,14 @@ export class CustomerAddressService {
   /**
    * Get all addresses for a customer within an organization
    */
-  static getCustomerAddresses(organizationId: string, customerId: string): CustomerAddress[] {
-    const rows: any[] = localDb
+  static async getCustomerAddresses(organizationId: string, customerId: string): Promise<CustomerAddress[]> {
+    const rows: any[] = (await localDb
       .prepare(
         `SELECT * FROM customer_addresses 
          WHERE organization_id = ? AND customer_id = ? AND _deleted = 0 AND (deleted_at IS NULL)
          ORDER BY is_default DESC, created_at DESC`
       )
-      .all(organizationId, customerId);
+      .all(organizationId, customerId));
 
     return rows.map(r => ({
       ...r,
@@ -29,13 +29,13 @@ export class CustomerAddressService {
   /**
    * Get a single address by ID
    */
-  static getAddressById(addressId: string, organizationId: string): CustomerAddress | null {
-    const row: any = localDb
+  static async getAddressById(addressId: string, organizationId: string): Promise<CustomerAddress | null> {
+    const row: any = (await localDb
       .prepare(
         `SELECT * FROM customer_addresses 
          WHERE (id = ? OR _local_id = ?) AND organization_id = ? AND _deleted = 0 AND (deleted_at IS NULL)`
       )
-      .get(addressId, addressId, organizationId);
+      .get(addressId, addressId, organizationId));
 
     if (!row) return null;
 
@@ -50,7 +50,7 @@ export class CustomerAddressService {
   /**
    * Create or update a customer address
    */
-  static saveAddress(params: {
+  static async saveAddress(params: {
     id?: string;
     organizationId: string;
     customerId: string;
@@ -69,7 +69,7 @@ export class CustomerAddressService {
     longitude?: number;
     isDefault?: boolean;
     deliveryInstructions?: string;
-  }): CustomerAddress {
+  }): Promise<CustomerAddress> {
     const {
       id = uuidv4(),
       organizationId,
@@ -105,21 +105,21 @@ export class CustomerAddressService {
 
     // If setting as default, unset existing default
     if (isDefault) {
-      localDb
+      (await localDb
         .prepare(
           `UPDATE customer_addresses 
            SET is_default = 0, updated_at = ?, _updated_at = ?
            WHERE organization_id = ? AND customer_id = ?`
         )
-        .run(nowIso, nowIso, organizationId, customerId);
+        .run(nowIso, nowIso, organizationId, customerId));
     }
 
-    const existing: any = localDb
+    const existing: any = (await localDb
       .prepare('SELECT id FROM customer_addresses WHERE (id = ? OR _local_id = ?) AND organization_id = ?')
-      .get(id, id, organizationId);
+      .get(id, id, organizationId));
 
     if (existing) {
-      localMutate({
+      (await localMutate({
         table: 'customer_addresses',
         operation: 'UPDATE',
         data: {
@@ -141,9 +141,9 @@ export class CustomerAddressService {
           delivery_instructions: deliveryInstructions,
           updated_at: nowIso,
         },
-      });
+      }));
     } else {
-      localMutate({
+      (await localMutate({
         table: 'customer_addresses',
         operation: 'INSERT',
         data: {
@@ -169,9 +169,9 @@ export class CustomerAddressService {
           created_at: nowIso,
           updated_at: nowIso,
         },
-      });
+      }));
     }
 
-    return this.getAddressById(id, organizationId)!;
+    return (await this.getAddressById(id, organizationId))!;
   }
 }

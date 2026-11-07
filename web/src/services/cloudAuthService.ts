@@ -10,6 +10,7 @@ import type { User, AuthSession } from '../core/types';
 import { fetchSubscriptionStatus } from './subscriptionApi';
 import { store } from '../state/store';
 import { authSlice } from '../state/slices';
+import { useAuth } from '../lib/auth';
 
 const CLOUD_SESSION_MS = 10 * 365 * 24 * 60 * 60 * 1000;
 
@@ -125,12 +126,16 @@ export const CloudAuthService = {
 
   async applySubscriptionCacheFromServer(): Promise<SubscriptionEntitlementCache> {
     const expected = sessionClient.getVersion();
+    const ownerId = sessionClient.peekSession()?.user.id;
+    const clinicId = sessionStorage.getItem('impersonate_clinic_id') || useAuth.getState().clinic_id;
     const remote = await fetchSubscriptionStatus();
-    const prev = (await getSubscriptionCache()) ?? null;
+    const prev = (await getSubscriptionCache(ownerId, clinicId)) ?? null;
+    if (expected !== sessionClient.getVersion()) throw new Error('Session changed.');
 
     const entitled = prev?.entitled === true || remote.status === 'active';
 
     const cache: SubscriptionEntitlementCache = {
+      ownerId, clinicId,
       entitled,
       plan: remote.plan ?? undefined,
       expiresAt: remote.expires_at,
@@ -157,6 +162,8 @@ export const CloudAuthService = {
   }) {
     const expected = sessionClient.getVersion();
     const cache: SubscriptionEntitlementCache = {
+      ownerId: sessionClient.peekSession()?.user.id,
+      clinicId: sessionStorage.getItem('impersonate_clinic_id') || useAuth.getState().clinic_id,
       entitled: true,
       plan: params.plan,
       expiresAt: params.expiresAt,

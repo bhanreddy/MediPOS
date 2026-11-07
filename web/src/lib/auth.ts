@@ -1,12 +1,13 @@
 import { create } from 'zustand';
 import type { Session } from '@supabase/supabase-js';
-import api from './api';
+import api, { setApiBranchIdentity } from './api';
 import { sessionClient } from './sessionClient';
 import { readJson, STORE_KEYS } from './store';
 import { store } from '../state/store';
 import { authSlice } from '../state/slices';
 import { queryClient } from './queryClient';
 import { clearStockAlertPopupSession } from '../utils/stockAlertSession';
+import { bindPosTenant } from '../store/posStore';
 
 type Role = 'SUPER_ADMIN' | 'OWNER' | 'PHARMACIST' | 'CASHIER' | 'VIEWER';
 export interface AuthProfile {
@@ -75,11 +76,26 @@ function identity(session: Session, profile?: AuthProfile | null) {
   };
 }
 let checking: Promise<void> | null = null;
+let checkingVersion = -1;
+function clearTenantData() {
+  queryClient.clear();
+  bindPosTenant(null);
+  store.dispatch(authSlice.actions.logout());
+  clearStockAlertPopupSession();
+}
+function bindIdentity(session: Session, profile?: AuthProfile | null) {
+  const previous = useAuth.getState();
+  if (previous.user?.id !== session.user.id || previous.clinic_id !== profile?.clinic_id) clearTenantData();
+  const clinic = sessionStorage.getItem('impersonate_clinic_id') || profile?.clinic_id || '';
+  setApiBranchIdentity(session.user.id, clinic);
+  bindPosTenant(`${session.user.id}:${clinic}`);
+  return identity(session, profile);
+}
 export const useAuth = create<AuthState>((set, get) => ({
   ...signedOut,
   isLoading: true,
   signIn: (session, user) => {
-    set({ ...identity(session, user), isLoading: false });
+    set({ ...bindIdentity(session, user), isLoading: false });
     void sessionClient.persistProfile(user).catch(() => {});
   },
   signOut: async () => {
@@ -87,9 +103,7 @@ export const useAuth = create<AuthState>((set, get) => ({
     sessionStorage.removeItem('impersonate_clinic_name');
     const pending = sessionClient.signOut();
     set(signedOut);
-    store.dispatch(authSlice.actions.logout());
-    queryClient.clear();
-    clearStockAlertPopupSession();
+    clearTenantData();
     try {
       await pending;
     } finally {
@@ -97,8 +111,9 @@ export const useAuth = create<AuthState>((set, get) => ({
     }
   },
   checkSession: () => {
-    if (checking) return checking;
     const expected = sessionClient.getVersion();
+    if (checking && checkingVersion === expected) return checking;
+    checkingVersion = expected;
     const attempt = (async () => {
       try {
         const session = await sessionClient.getSession();
@@ -116,7 +131,7 @@ export const useAuth = create<AuthState>((set, get) => ({
             : await readJson<AuthProfile>(STORE_KEYS.AUTH_PROFILE);
         if (profile?.id !== session.user.id) profile = null;
         // Existing screens stay mounted while the profile is checked in the background.
-        if (profile) set({ ...identity(session, profile), isLoading: false });
+        if (profile) set({ ...bindIdentity(session, profile), isLoading: false });
         try {
           const { data } = await api.get<{ user?: AuthProfile }>('/auth/me');
           if (data.user?.id === session.user.id)
@@ -134,7 +149,7 @@ export const useAuth = create<AuthState>((set, get) => ({
         }
         if (expected !== sessionClient.getVersion()) return;
         set({
-          ...identity(sessionClient.peekSession() || session, profile),
+          ...bindIdentity(sessionClient.peekSession() || session, profile),
           isLoading: false,
           isRecovering: !profile,
         });
@@ -160,11 +175,17 @@ export function observeAuthSession() {
   return sessionClient.subscribe((session) => {
     if (!session) {
       useAuth.setState(signedOut);
-      store.dispatch(authSlice.actions.logout());
-      queryClient.clear();
+      clearTenantData();
       return;
     }
     const state = useAuth.getState();
+    if (state.session?.user.id !== session.user.id) {
+      clearTenantData();
+      useAuth.setState({ ...identity(session), isLoading: false, isRecovering: true });
+      // Leave the synchronous SDK auth callback before looking up the new profile.
+      void Promise.resolve().then(() => useAuth.getState().checkSession());
+      return;
+    }
     if (state.session?.user.id === session.user.id) {
       useAuth.setState({
         ...identity(session, state.user),

@@ -1,5 +1,5 @@
 // goodsReceiptService.ts — Enterprise Goods Receipt Note (GRN), Batch Inward & Multi-State Stock Engine
-import { localDb } from '../../local-db';
+import { businessDb as localDb } from '../../lib/businessDb';
 import { localMutate } from '../../lib/localMutate';
 import { Money } from '../../lib/money';
 import { v4 as uuidv4 } from 'uuid';
@@ -48,7 +48,7 @@ export class GoodsReceiptService {
   /**
    * Create a new Goods Receipt Note (GRN) draft
    */
-  static createGoodsReceipt(params: CreateGoodsReceiptParams): GoodsReceipt {
+  static async createGoodsReceipt(params: CreateGoodsReceiptParams): Promise<GoodsReceipt> {
     const {
       organizationId,
       storeId = null,
@@ -65,13 +65,13 @@ export class GoodsReceiptService {
       throw new Error('GRN must contain at least one item');
     }
 
-    const policy = ProcurementPolicyService.getPolicy(organizationId);
+    const policy = (await ProcurementPolicyService.getPolicy(organizationId));
     const grnId = uuidv4();
-    const grnNumber = DocumentNumberingService.generate({
+    const grnNumber = (await DocumentNumberingService.generate({
       organizationId,
       storeId,
       documentType: 'GRN',
-    });
+    }));
 
     const nowIso = new Date().toISOString();
     let initialStatus: GoodsReceiptStatus = 'RECEIVING';
@@ -86,7 +86,7 @@ export class GoodsReceiptService {
       }
     }
 
-    const grnHeader = localMutate({
+    const grnHeader = (await localMutate({
       table: 'goods_receipts',
       operation: 'INSERT',
       data: {
@@ -104,7 +104,7 @@ export class GoodsReceiptService {
         status: initialStatus,
         notes,
       },
-    });
+    }));
 
     const grnItemRecords: GoodsReceiptItem[] = [];
 
@@ -146,7 +146,7 @@ export class GoodsReceiptService {
         schemeSummary = `Received ${freeQty} free units with ${paidQty} paid`;
       }
 
-      const itemRecord = localMutate({
+      const itemRecord = (await localMutate({
         table: 'goods_receipt_items',
         operation: 'INSERT',
         data: {
@@ -176,24 +176,24 @@ export class GoodsReceiptService {
           rejection_reason: it.rejectionReason || null,
           damage_notes: it.damageNotes || null,
         },
-      });
+      }));
 
       grnItemRecords.push(itemRecord as any);
     }
 
     // Update status if flagged for review
     if (initialStatus === 'REVIEW') {
-      localMutate({
+      (await localMutate({
         table: 'goods_receipts',
         operation: 'UPDATE',
         data: {
           _local_id: grnId,
           status: 'REVIEW',
         },
-      });
+      }));
     }
 
-    return this.getGrnById(grnId, organizationId)!;
+    return (await this.getGrnById(grnId, organizationId))!;
   }
 
   /**
@@ -205,13 +205,13 @@ export class GoodsReceiptService {
    * - Never inventories rejected units
    * - Idempotent protection against double posting
    */
-  static postGoodsReceipt(params: {
+  static async postGoodsReceipt(params: {
     grnId: string;
     organizationId: string;
     postedBy: string;
-  }): GoodsReceipt {
+  }): Promise<GoodsReceipt> {
     const { grnId, organizationId, postedBy } = params;
-    const grn = this.getGrnById(grnId, organizationId);
+    const grn = (await this.getGrnById(grnId, organizationId));
     if (!grn) throw new Error('Goods Receipt Note not found');
 
     if (grn.status === 'POSTED') {
@@ -222,15 +222,15 @@ export class GoodsReceiptService {
       throw new Error('Cannot post a cancelled GRN');
     }
 
-    const policy = ProcurementPolicyService.getPolicy(organizationId);
+    const policy = (await ProcurementPolicyService.getPolicy(organizationId));
 
     // Concurrency & PO Tolerance Lock
     if (grn.po_id) {
-      const po: any = localDb.prepare('SELECT * FROM purchase_orders WHERE id = ?').get(grn.po_id);
+      const po: any = (await localDb.prepare('SELECT * FROM purchase_orders WHERE id = ?').get(grn.po_id));
       if (po) {
         for (const item of grn.items || []) {
           if (item.po_item_id) {
-            const poItem: any = localDb.prepare('SELECT * FROM purchase_order_items WHERE id = ?').get(item.po_item_id);
+            const poItem: any = (await localDb.prepare('SELECT * FROM purchase_order_items WHERE id = ?').get(item.po_item_id));
             if (poItem) {
               const currentReceived = Number(poItem.received_quantity || 0);
               const ordered = Number(poItem.ordered_quantity || 0);
@@ -262,7 +262,7 @@ export class GoodsReceiptService {
       }
 
       // 1. Batch Creation / Update with Weighted Blended Purchase Price
-      const existingBatch: any = localDb
+      const existingBatch: any = (await localDb
         .prepare(
           `SELECT * FROM medicine_batches
            WHERE (medicine_id = ? OR medicine_id = ?)
@@ -271,7 +271,7 @@ export class GoodsReceiptService {
              ${storeId ? 'AND (store_id = ? OR store_id IS NULL)' : ''}
            LIMIT 1`
         )
-        .get(storeId ? [item.medicine_id, item.medicine_id, item.batch_number, organizationId, storeId] : [item.medicine_id, item.medicine_id, item.batch_number, organizationId]);
+        .get(storeId ? [item.medicine_id, item.medicine_id, item.batch_number, organizationId, storeId] : [item.medicine_id, item.medicine_id, item.batch_number, organizationId]));
 
       let batchId: string;
       let newBatchQty: number;
@@ -289,7 +289,7 @@ export class GoodsReceiptService {
           newPurchasePrice: unitCostRs,
         });
 
-        localMutate({
+        (await localMutate({
           table: 'medicine_batches',
           operation: 'UPDATE',
           data: {
@@ -302,12 +302,12 @@ export class GoodsReceiptService {
             organization_id: organizationId,
             store_id: storeId,
           },
-        });
+        }));
       } else {
         batchId = uuidv4();
         newBatchQty = acceptedUnits;
 
-        localMutate({
+        (await localMutate({
           table: 'medicine_batches',
           operation: 'INSERT',
           data: {
@@ -325,12 +325,12 @@ export class GoodsReceiptService {
             cost_price_paise: item.effective_cost_paise,
             mrp: mrpRs,
           },
-        });
+        }));
       }
 
       // 2. Adjust Multi-State Inventory Position (Available vs Damaged/Quarantined)
       try {
-        InventoryPositionService.adjustStock({
+        (await InventoryPositionService.adjustStock({
           organizationId,
           medicineId: item.medicine_id,
           batchId,
@@ -338,11 +338,11 @@ export class GoodsReceiptService {
           storeId,
           warehouseId,
           quantityDelta: acceptedUnits + damagedUnits,
-        });
+        }));
 
         if (damagedUnits > 0) {
           // Move damaged portion into damaged state
-          InventoryPositionService.updateStateQuantities({
+          (await InventoryPositionService.updateStateQuantities({
             organizationId,
             medicineId: item.medicine_id,
             batchId,
@@ -350,10 +350,10 @@ export class GoodsReceiptService {
             storeId,
             warehouseId,
             damagedDelta: damagedUnits,
-          });
+          }));
         }
       } catch {
-        InventoryPositionService.getOrCreatePosition({
+        (await InventoryPositionService.getOrCreatePosition({
           organizationId,
           medicineId: item.medicine_id,
           batchId,
@@ -361,11 +361,11 @@ export class GoodsReceiptService {
           storeId,
           warehouseId,
           initialStock: sellableUnits,
-        });
+        }));
       }
 
       // 3. Append Immutable Stock Ledger Entry
-      localMutate({
+      (await localMutate({
         table: 'stock_ledger',
         operation: 'INSERT',
         data: {
@@ -383,60 +383,60 @@ export class GoodsReceiptService {
           notes: `GRN ${grn.grn_number} receipt (${item.received_paid_quantity} paid + ${item.free_quantity || 0} free${damagedUnits > 0 ? `, ${damagedUnits} damaged` : ''})`,
           performed_by: postedBy,
         },
-      });
+      }));
 
       // 4. Update PO Item Received Quantity
       if (item.po_item_id) {
-        const poItem: any = localDb.prepare('SELECT * FROM purchase_order_items WHERE id = ?').get(item.po_item_id);
+        const poItem: any = (await localDb.prepare('SELECT * FROM purchase_order_items WHERE id = ?').get(item.po_item_id));
         if (poItem) {
           const updatedReceived = Number(poItem.received_quantity || 0) + item.received_paid_quantity;
-          localMutate({
+          (await localMutate({
             table: 'purchase_order_items',
             operation: 'UPDATE',
             data: {
               _local_id: poItem._local_id || poItem.id,
               received_quantity: updatedReceived,
             },
-          });
+          }));
         }
       }
     }
 
     // 5. Update PO Status Lifecycle (PARTIALLY_RECEIVED vs RECEIVED)
     if (grn.po_id) {
-      const allPoItems: any[] = localDb.prepare('SELECT ordered_quantity, received_quantity FROM purchase_order_items WHERE po_id = ?').all(grn.po_id);
+      const allPoItems: any[] = (await localDb.prepare('SELECT ordered_quantity, received_quantity FROM purchase_order_items WHERE po_id = ?').all(grn.po_id));
       const totalOrdered = allPoItems.reduce((acc, it) => acc + Number(it.ordered_quantity || 0), 0);
       const totalReceived = allPoItems.reduce((acc, it) => acc + Number(it.received_quantity || 0), 0);
 
       const newPoStatus = totalReceived >= totalOrdered ? 'RECEIVED' : 'PARTIALLY_RECEIVED';
-      localMutate({
+      (await localMutate({
         table: 'purchase_orders',
         operation: 'UPDATE',
         data: {
           _local_id: grn.po_id,
           status: newPoStatus,
         },
-      });
+      }));
     }
 
     // 6. Mark GRN as POSTED
-    localMutate({
+    (await localMutate({
       table: 'goods_receipts',
       operation: 'UPDATE',
       data: {
         _local_id: grn._local_id || grn.id,
         status: 'POSTED',
       },
-    });
+    }));
 
-    return this.getGrnById(grnId, organizationId)!;
+    return (await this.getGrnById(grnId, organizationId))!;
   }
 
   /**
    * Fetch GRN with items and medicine metadata
    */
-  static getGrnById(id: string, organizationId: string): GoodsReceipt | null {
-    const row: any = localDb
+  static async getGrnById(id: string, organizationId: string): Promise<GoodsReceipt | null> {
+    const row: any = (await localDb
       .prepare(
         `SELECT grn.*, s.name as supplier_name, po.po_number
          FROM goods_receipts grn
@@ -444,18 +444,18 @@ export class GoodsReceiptService {
          LEFT JOIN purchase_orders po ON po.id = grn.po_id OR po._local_id = grn.po_id
          WHERE (grn.id = ? OR grn._local_id = ?) AND (grn.organization_id = ?) AND grn._deleted = 0`
       )
-      .get(id, id, organizationId);
+      .get(id, id, organizationId));
 
     if (!row) return null;
 
-    const items: any[] = localDb
+    const items: any[] = (await localDb
       .prepare(
         `SELECT gri.*, m.name as medicine_name
          FROM goods_receipt_items gri
          LEFT JOIN medicines m ON m.id = gri.medicine_id OR m._local_id = gri.medicine_id
          WHERE (gri.grn_id = ? OR gri.grn_id = ?) AND gri._deleted = 0`
       )
-      .all(row.id, row._local_id || row.id);
+      .all(row.id, row._local_id || row.id));
 
     return {
       ...row,
@@ -466,7 +466,7 @@ export class GoodsReceiptService {
   /**
    * List Goods Receipts with filters
    */
-  static listGoodsReceipts(params: {
+  static async listGoodsReceipts(params: {
     organizationId: string;
     storeId?: string | null;
     supplierId?: string | null;
@@ -474,7 +474,7 @@ export class GoodsReceiptService {
     status?: GoodsReceiptStatus;
     limit?: number;
     offset?: number;
-  }): { data: GoodsReceipt[]; total: number } {
+  }): Promise<{ data: GoodsReceipt[]; total: number }> {
     const { organizationId, storeId, supplierId, poId, status, limit = 50, offset = 0 } = params;
 
     let query = `
@@ -503,14 +503,14 @@ export class GoodsReceiptService {
       values.push(status);
     }
 
-    const countRow: any = localDb.prepare(`SELECT COUNT(*) as total FROM (${query})`).get(...values);
+    const countRow: any = (await localDb.prepare(`SELECT COUNT(*) as total FROM (${query})`).get(...values));
     const total = Number(countRow?.total || 0);
 
     query += ` ORDER BY grn.received_at DESC, grn.created_at DESC LIMIT ? OFFSET ?`;
     values.push(limit, offset);
 
-    const rows: any[] = localDb.prepare(query).all(...values);
-    const data = rows.map(r => this.getGrnById(r.id, organizationId)!);
+    const rows: any[] = (await localDb.prepare(query).all(...values));
+    const data = (await Promise.all(rows.map(async r => (await this.getGrnById(r.id, organizationId))!)));
 
     return { data, total };
   }

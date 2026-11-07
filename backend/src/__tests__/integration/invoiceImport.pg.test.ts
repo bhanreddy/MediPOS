@@ -35,7 +35,7 @@ import { errorHandler } from '../../middleware/errorHandler';
     await sql`INSERT INTO medicines(id,_local_id,clinic_id,name,gst_rate) VALUES (${medicine},${medicine},${clinic},'QA Drug 500mg',12),(${foreignMedicine},${foreignMedicine},${other},'QA Drug 500mg',12)`;
   });
   afterAll(async () => {
-    for (const table of ['invoice_import_receipts','stock_ledger','purchase_items','medicine_batches','purchases','suppliers','medicines']) await sql`DELETE FROM ${sql(table)} WHERE clinic_id IN (${clinic},${other})`;
+    for (const table of ['supplier_payable_ledger','invoice_import_receipts','stock_ledger','purchase_items','medicine_batches','purchases','suppliers','medicines']) await sql`DELETE FROM ${sql(table)} WHERE clinic_id IN (${clinic},${other})`;
     await sql`DELETE FROM users WHERE id=${owner}`;
     await sql`DELETE FROM clinics WHERE id IN (${clinic},${other})`;
     await sql.end();

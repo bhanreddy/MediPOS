@@ -1,5 +1,5 @@
 // supplierCatalogService.ts — Supplier Catalog, Rate History, Quotations & Comparison Engine
-import { localDb } from '../../local-db';
+import { businessDb as localDb } from '../../lib/businessDb';
 import { localMutate } from '../../lib/localMutate';
 import { Money } from '../../lib/money';
 import { v4 as uuidv4 } from 'uuid';
@@ -14,7 +14,7 @@ export class SupplierCatalogService {
   /**
    * Upsert supplier-product catalog entry
    */
-  static upsertSupplierProduct(data: {
+  static async upsertSupplierProduct(data: {
     organizationId: string;
     supplierId: string;
     medicineId: string;
@@ -28,7 +28,7 @@ export class SupplierCatalogService {
     leadTimeDays?: number;
     isPreferred?: boolean;
     isActive?: boolean;
-  }): SupplierProduct {
+  }): Promise<SupplierProduct> {
     const {
       organizationId,
       supplierId,
@@ -45,7 +45,7 @@ export class SupplierCatalogService {
       isActive = true,
     } = data;
 
-    const existing: any = localDb
+    const existing: any = (await localDb
       .prepare(
         `SELECT * FROM supplier_products
          WHERE (organization_id = ?)
@@ -53,23 +53,23 @@ export class SupplierCatalogService {
            AND (medicine_id = ? OR medicine_id = ?)
            AND _deleted = 0 LIMIT 1`
       )
-      .get(organizationId, supplierId, supplierId, medicineId, medicineId);
+      .get(organizationId, supplierId, supplierId, medicineId, medicineId));
 
     const id = existing?.id || uuidv4();
     const localId = existing?._local_id || id;
 
     // If setting preferred, unset other preferred suppliers for this medicine in org
     if (isPreferred) {
-      localDb
+      (await localDb
         .prepare(
           `UPDATE supplier_products SET is_preferred = 0
            WHERE (organization_id = ?)
              AND (medicine_id = ? OR medicine_id = ?)`
         )
-        .run(organizationId, medicineId, medicineId);
+        .run(organizationId, medicineId, medicineId));
     }
 
-    const record = localMutate({
+    const record = (await localMutate({
       table: 'supplier_products',
       operation: existing ? 'UPDATE' : 'INSERT',
       data: {
@@ -89,10 +89,10 @@ export class SupplierCatalogService {
         is_preferred: isPreferred ? 1 : 0,
         is_active: isActive ? 1 : 0,
       },
-    });
+    }));
 
     // Record observation in price history
-    this.recordPriceHistory({
+    (await this.recordPriceHistory({
       organizationId,
       supplierId,
       medicineId,
@@ -101,7 +101,7 @@ export class SupplierCatalogService {
       effectiveCostPaise: standardRatePaise,
       sourceType: 'CONTRACT',
       referenceId: id,
-    });
+    }));
 
     return record as any;
   }
@@ -109,7 +109,7 @@ export class SupplierCatalogService {
   /**
    * Record price observation in history
    */
-  static recordPriceHistory(entry: {
+  static async recordPriceHistory(entry: {
     organizationId: string;
     supplierId: string;
     medicineId: string;
@@ -120,11 +120,11 @@ export class SupplierCatalogService {
     sourceType: 'PURCHASE_INVOICE' | 'QUOTATION' | 'CONTRACT' | 'GRN';
     referenceId?: string | null;
     observedAt?: Date;
-  }): SupplierPriceHistoryEntry {
+  }): Promise<SupplierPriceHistoryEntry> {
     const id = uuidv4();
     const nowIso = (entry.observedAt || new Date()).toISOString();
 
-    const record = localMutate({
+    const record = (await localMutate({
       table: 'supplier_price_history',
       operation: 'INSERT',
       data: {
@@ -141,10 +141,10 @@ export class SupplierCatalogService {
         source_type: entry.sourceType,
         reference_id: entry.referenceId || null,
       },
-    });
+    }));
 
     // Also update last purchase rate on supplier_products catalog if applicable
-    localDb
+    (await localDb
       .prepare(
         `UPDATE supplier_products
          SET last_purchase_rate_paise = ?, last_supplied_at = ?
@@ -152,7 +152,7 @@ export class SupplierCatalogService {
            AND (supplier_id = ? OR supplier_id = ?)
            AND (medicine_id = ? OR medicine_id = ?)`
       )
-      .run(entry.ratePaise, nowIso, entry.organizationId, entry.supplierId, entry.supplierId, entry.medicineId, entry.medicineId);
+      .run(entry.ratePaise, nowIso, entry.organizationId, entry.supplierId, entry.supplierId, entry.medicineId, entry.medicineId));
 
     return record as any;
   }
@@ -160,12 +160,12 @@ export class SupplierCatalogService {
   /**
    * Fetch price history for a medicine/supplier
    */
-  static getPriceHistory(params: {
+  static async getPriceHistory(params: {
     organizationId: string;
     medicineId?: string;
     supplierId?: string;
     limit?: number;
-  }): SupplierPriceHistoryEntry[] {
+  }): Promise<SupplierPriceHistoryEntry[]> {
     const { organizationId, medicineId, supplierId, limit = 50 } = params;
     let query = `
       SELECT sph.*, sup.name as supplier_name, med.name as medicine_name
@@ -188,22 +188,22 @@ export class SupplierCatalogService {
     query += ` ORDER BY sph.observed_at DESC LIMIT ?`;
     values.push(limit);
 
-    return localDb.prepare(query).all(...values) as SupplierPriceHistoryEntry[];
+    return (await localDb.prepare(query).all(...values)) as SupplierPriceHistoryEntry[];
   }
 
   /**
    * Supplier Comparison Engine:
    * Compares all candidate suppliers for a product based on Rate, Scheme, Effective Cost, Lead Time, and MOQ.
    */
-  static compareSuppliersForProduct(params: {
+  static async compareSuppliersForProduct(params: {
     organizationId: string;
     medicineId: string;
     requestedQuantity?: number;
-  }): SupplierComparisonItem[] {
+  }): Promise<SupplierComparisonItem[]> {
     const { organizationId, medicineId, requestedQuantity = 10 } = params;
 
     // 1. Fetch all suppliers providing this product
-    const candidateRows: any[] = localDb
+    const candidateRows: any[] = (await localDb
       .prepare(
         `SELECT sp.*, sup.name as supplier_name, sup.lead_time_days as supp_default_lead_time
          FROM supplier_products sp
@@ -212,7 +212,7 @@ export class SupplierCatalogService {
            AND (sp.medicine_id = ? OR sp.medicine_id = ?)
            AND sp.is_active = 1 AND sp._deleted = 0`
       )
-      .all(organizationId, medicineId, medicineId);
+      .all(organizationId, medicineId, medicineId));
 
     const results: SupplierComparisonItem[] = [];
 
@@ -221,13 +221,13 @@ export class SupplierCatalogService {
       const standardRateRs = Money.toRupees(standardRatePaise);
 
       // 2. Evaluate active schemes for supplier + medicine
-      const schemeResult = SupplierSchemeEngine.evaluateInwardScheme({
+      const schemeResult = (await SupplierSchemeEngine.evaluateInwardScheme({
         organizationId,
         supplierId: row.supplier_id,
         medicineId,
         billedQuantity: requestedQuantity,
         purchasePrice: standardRateRs,
-      });
+      }));
 
       let schemeSummary = 'No Scheme';
       if (schemeResult.freeQuantity > 0) {

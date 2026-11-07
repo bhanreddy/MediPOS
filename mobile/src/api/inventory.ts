@@ -204,9 +204,21 @@ export function normalizeMasterSuggestion(raw: Record<string, unknown>): Medicin
 export const inventoryApi = {
   getMedicines: async (params?: MedicineSearchParams): Promise<Medicine[]> => {
     try {
-      const res = await apiClient.get('/inventory/medicines', { params });
-      const raw = res.data.data ?? res.data;
-      return (Array.isArray(raw) ? raw : []).map((r: Record<string, unknown>) => normalizeMedicineRow(r));
+      const medicines: Medicine[] = [];
+      let cursor: string | undefined;
+      do {
+        const response = await apiClient.get('/inventory/medicines', {
+          params: { ...params, page_size: 250, after: cursor },
+        });
+        const raw = response.data.data ?? response.data;
+        if (Array.isArray(raw)) {
+          medicines.push(...raw.map((row: Record<string, unknown>) => normalizeMedicineRow(row)));
+        }
+        const next = response.data.next_cursor;
+        if (next && cursor && next <= cursor) throw new Error('Inventory catalogue cursor did not advance.');
+        cursor = next || undefined;
+      } while (cursor);
+      return medicines;
     } catch (error) {
       console.error('[inventoryApi.getMedicines] Error fetching medicines:', error);
       throw error;

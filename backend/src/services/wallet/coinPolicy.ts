@@ -26,7 +26,7 @@ export async function getCoinPolicy(clinicId:string,version?:number):Promise<Coi
  return {version:row.version,enabled:row.enabled,rate_bps:row.rate_bps,minimum_sale_paise:Number(row.minimum_sale_paise),earning_cap_paise:Number(row.earning_cap_paise),redemption_limit_percent:row.redemption_limit_percent,expiry_days:row.expiry_days};
 }
 export async function setCoinPolicy(clinicId:string,actorId:string,input:CoinPolicy & {reason:string}){
- return withPostgresTransaction(async()=>{
+ return (await withPostgresTransaction(async()=>{
   await postgresQuery('SELECT pg_advisory_xact_lock(hashtextextended($1,0))',[`nex-coin-policy:${clinicId}`]);
   const current=await getCoinPolicy(clinicId);
   if(input.version!==current.version)throw new AppError(409,'Nex Coins settings changed. Refresh before saving again.');
@@ -34,8 +34,8 @@ export async function setCoinPolicy(clinicId:string,actorId:string,input:CoinPol
   const row:PolicyRow={...input,id:randomUUID(),clinic_id:clinicId,version:current.version+1,actor_id:actorId,created_at:new Date().toISOString(),previous_hash:head?.hash||GENESIS,hash:''};
   row.hash=signature(row);
   await postgresQuery(`INSERT INTO nex_coin_policies(id,clinic_id,version,enabled,rate_bps,minimum_sale_paise,earning_cap_paise,redemption_limit_percent,expiry_days,actor_id,reason,created_at,previous_hash,hash) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)`,[row.id,clinicId,row.version,row.enabled,row.rate_bps,row.minimum_sale_paise,row.earning_cap_paise,row.redemption_limit_percent,row.expiry_days,actorId,row.reason,row.created_at,row.previous_hash,row.hash]);
-  return getCoinPolicy(clinicId);
- });
+  return (await getCoinPolicy(clinicId));
+ }));
 }
 export function calculateEarnedCoins(policy:CoinPolicy,salePaise:number,externalPaise:number){
  if(!policy.enabled||salePaise<policy.minimum_sale_paise)return 0;

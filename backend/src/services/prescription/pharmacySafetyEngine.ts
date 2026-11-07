@@ -1,10 +1,10 @@
-import { localDb } from '../../local-db';
+import { businessDb as localDb } from '../../lib/businessDb';
 import { localMutate } from '../../lib/localMutate';
 import { PatientAllergy, SafetyWarningEvent, SubstitutionEvent, SubstitutionPolicy } from '../../domain/prescriptionTypes';
 import { v4 as uuidv4 } from 'uuid';
 
 export class PatientAllergyService {
-  static recordAllergy(params: {
+  static async recordAllergy(params: {
     organizationId: string;
     patientId: string;
     allergen: string;
@@ -13,9 +13,9 @@ export class PatientAllergyService {
     severity?: 'MILD' | 'MODERATE' | 'SEVERE' | 'ANAPHYLAXIS';
     recordedBy?: string;
     source?: string;
-  }): PatientAllergy {
+  }): Promise<PatientAllergy> {
     const id = uuidv4();
-    const record = localMutate({
+    const record = (await localMutate({
       table: 'patient_allergies',
       operation: 'INSERT',
       data: {
@@ -32,24 +32,24 @@ export class PatientAllergyService {
         active: 1,
         created_at: new Date().toISOString(),
       },
-    });
+    }));
 
     return record as PatientAllergy;
   }
 
-  static getPatientAllergies(patientId: string, organizationId?: string): PatientAllergy[] {
-    const rows: any[] = localDb
+  static async getPatientAllergies(patientId: string, organizationId?: string): Promise<PatientAllergy[]> {
+    const rows: any[] = (await localDb
       .prepare('SELECT * FROM patient_allergies WHERE patient_id = ? AND active = 1 AND _deleted = 0' + (organizationId ? ' AND organization_id = ?' : ''))
-      .all(patientId, ...(organizationId ? [organizationId] : []));
+      .all(patientId, ...(organizationId ? [organizationId] : [])));
     return rows as PatientAllergy[];
   }
 
-  static checkAllergyMatch(params: {
+  static async checkAllergyMatch(params: {
     patientId: string;
     medicineName: string;
     composition?: string | null;
-  }): { hasMatch: boolean; matchedAllergen?: string; warningMessage?: string } {
-    const allergies = this.getPatientAllergies(params.patientId);
+  }): Promise<{ hasMatch: boolean; matchedAllergen?: string; warningMessage?: string }> {
+    const allergies = (await this.getPatientAllergies(params.patientId));
     if (allergies.length === 0) {
       return { hasMatch: false };
     }
@@ -140,7 +140,7 @@ export class SubstitutionEngine {
     return { isSubstitution: true, policyStatus: 'PHARMACIST_APPROVAL_REQUIRED' };
   }
 
-  static recordSubstitution(params: {
+  static async recordSubstitution(params: {
     organizationId: string;
     prescriptionId: string;
     prescriptionItemId: string;
@@ -153,9 +153,9 @@ export class SubstitutionEngine {
     reason: string;
     customerConfirmed?: boolean;
     doctorConfirmed?: boolean;
-  }): SubstitutionEvent {
+  }): Promise<SubstitutionEvent> {
     const id = uuidv4();
-    const record = localMutate({
+    const record = (await localMutate({
       table: 'substitution_events',
       operation: 'INSERT',
       data: {
@@ -175,7 +175,7 @@ export class SubstitutionEngine {
         doctor_confirmed: params.doctorConfirmed ? 1 : 0,
         created_at: new Date().toISOString(),
       },
-    });
+    }));
 
     return record as SubstitutionEvent;
   }

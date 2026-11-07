@@ -1,4 +1,4 @@
-import { localDb } from '../local-db';
+import { businessDb as localDb } from '../lib/businessDb';
 import { localMutate } from '../lib/localMutate';
 import { v4 as uuidv4 } from 'uuid';
 import { AppError } from '../lib/appError';
@@ -32,7 +32,7 @@ export class SupervisorAuthService {
   /**
    * Validates supervisor credentials and creates an audited authorization record.
    */
-  static authorize(params: AuthorizeActionParams) {
+  static async authorize(params: AuthorizeActionParams) {
     const {
       organizationId,
       storeId,
@@ -49,25 +49,18 @@ export class SupervisorAuthService {
       newValue = '',
     } = params;
 
-    let authorizingUser: any = null;
-
-    if (supervisorUserId) {
-      authorizingUser = localDb
-        .prepare('SELECT * FROM users WHERE (id = ? OR _local_id = ?) AND is_active = 1')
-        .get(supervisorUserId, supervisorUserId);
-    } else if (supervisorPin) {
-      // Look for manager/owner with matching PIN or fallback manager in store
-      // In production/local DB, default supervisor PIN '9999' or role check
-      if (supervisorPin === '9999' || supervisorPin === '1234') {
-        authorizingUser = localDb
-          .prepare(
-            `SELECT u.* FROM users u
-             WHERE u.role IN ('OWNER', 'SUPER_ADMIN', 'ORG_ADMIN', 'STORE_MANAGER') 
-               AND u.is_active = 1 LIMIT 1`
-          )
-          .get();
-      }
+    // An ID or a shared default PIN is not proof of another supervisor's identity.
+    // Approval uses the signed-in supervisor session and that account's tenant grants.
+    if (supervisorPin || (supervisorUserId && supervisorUserId !== requestingUserId)) {
+      throw new AppError(403, 'Sign in with a supervisor account to authorize this action', 'SUPERVISOR_AUTH_FAILED');
     }
+    const authorizingUser: any = (await localDb.prepare(`SELECT u.* FROM users u
+      LEFT JOIN clinics c ON c.id = u.clinic_id OR c._local_id = u.clinic_id
+      WHERE (u.id = ? OR u._local_id = ?) AND u.is_active = 1 AND u._deleted = 0
+        AND (c.organization_id = ? OR EXISTS (
+          SELECT 1 FROM user_organization_access a WHERE a.user_id = u.id
+          AND a.organization_id = ? AND a.is_active = 1 AND a._deleted = 0))`)
+      .get(requestingUserId, requestingUserId, organizationId, organizationId));
 
     if (!authorizingUser) {
       throw new AppError(403, 'Invalid supervisor PIN or unauthorized manager credentials', 'SUPERVISOR_AUTH_FAILED');
@@ -81,7 +74,7 @@ export class SupervisorAuthService {
     }
 
     const authId = uuidv4();
-    const record = localMutate({
+    const record = (await localMutate({
       table: 'supervisor_authorizations',
       operation: 'INSERT',
       data: {
@@ -101,7 +94,7 @@ export class SupervisorAuthService {
         new_value: newValue,
         status: 'APPROVED',
       },
-    });
+    }));
 
     return {
       authorizationId: authId,

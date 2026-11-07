@@ -1,5 +1,9 @@
+import { createHash } from 'node:crypto';
+import { AppError } from '../../lib/appError';
+import { tenantRecord } from '../../lib/tenantRecords';
 // stockTransferService.ts — Enterprise Stock Transfer Document Lifecycle Engine
-import { localDb } from '../../local-db';
+import { businessDb as localDb, cloudBusinessMode, lockBusinessRows } from '../../lib/businessDb';
+import { queryRaw, withPostgresSavepoint } from '../../lib/postgresDb';
 import { localMutate } from '../../lib/localMutate';
 import { v4 as uuidv4 } from 'uuid';
 import {
@@ -19,7 +23,7 @@ export class StockTransferService {
   /**
    * Create a new Stock Transfer in DRAFT or REQUESTED status
    */
-  static createTransfer(params: {
+  static async createTransfer(params: {
     organizationId: string;
     transferType: TransferType;
     sourceLocationType: LocationType;
@@ -33,6 +37,7 @@ export class StockTransferService {
     stockStateTransferred?: 'AVAILABLE' | 'QUARANTINED' | 'RECALLED' | 'DAMAGED';
     notes?: string;
     idempotencyKey?: string;
+    requireAvailableStock?: boolean;
     items: Array<{
       medicineId: string;
       requestedUnit?: string;
@@ -40,7 +45,7 @@ export class StockTransferService {
       requestedQuantity: number;
       notes?: string;
     }>;
-  }): StockTransfer {
+  }): Promise<StockTransfer> {
     const {
       organizationId,
       transferType,
@@ -58,11 +63,12 @@ export class StockTransferService {
       items,
     } = params;
 
+    if(cloudBusinessMode()&&idempotencyKey){const {postgresQuery}=await import('../../lib/postgresDb');await postgresQuery('SELECT pg_advisory_xact_lock(hashtextextended($1,0))',[`transfer:${organizationId}:${idempotencyKey}`]);}
     // Organization validation & Isolation
-    const sourceLoc = LocationService.resolveLocation(sourceLocationType, sourceLocationId, organizationId);
-    const destLoc = LocationService.resolveLocation(destinationLocationType, destinationLocationId, organizationId);
+    const sourceLoc = (await LocationService.resolveLocation(sourceLocationType, sourceLocationId, organizationId));
+    const destLoc = (await LocationService.resolveLocation(destinationLocationType, destinationLocationId, organizationId));
 
-    if (sourceLoc.organizationId !== destLoc.organizationId && organizationId !== 'default-org') {
+    if (sourceLoc.organizationId !== destLoc.organizationId) {
       throw new Error(`Cross-organization transfer blocked between ${sourceLoc.organizationId} and ${destLoc.organizationId}`);
     }
 
@@ -70,34 +76,72 @@ export class StockTransferService {
       throw new Error('Source location and destination location cannot be identical');
     }
 
-    if (items.length === 0) {
+    if (!Array.isArray(items) || items.length === 0 || items.length > 500) {
       throw new Error('Transfer must include at least one medicine item');
     }
 
-    // Idempotency protection
+    if (cloudBusinessMode()) {
+      const validItems = items.every(item => typeof item.medicineId === 'string'
+        && Number.isSafeInteger(item.requestedQuantity) && item.requestedQuantity > 0
+        && (item.conversionFactor === undefined || Number.isFinite(item.conversionFactor) && item.conversionFactor > 0));
+      if (!validItems) throw new AppError(400, 'Transfer quantities must be positive whole numbers.');
+      const checks = await Promise.all([
+        LocationService.validateUserAccess(requestedBy, sourceLocationType, sourceLoc.id, organizationId),
+        LocationService.validateUserAccess(requestedBy, destinationLocationType, destLoc.id, organizationId),
+      ]);
+      if (checks.some(allowed => !allowed)) throw new AppError(403, 'Access to both transfer locations is required.');
+    }
+
+    const requestHash = cloudBusinessMode() && idempotencyKey
+      ? createHash('sha256').update(JSON.stringify([
+          requestedBy, transferType, sourceLocationType, sourceLoc.id, destinationLocationType,
+          destLoc.id, priority, reason, requiredByDate ?? null, stockStateTransferred, notes ?? null,
+          items.map(item => [item.medicineId, item.requestedQuantity, item.requestedUnit ?? null,
+            item.conversionFactor ?? null, item.notes ?? null]),
+        ])).digest('hex')
+      : null;
     if (idempotencyKey) {
-      const existing: any = localDb
-        .prepare('SELECT * FROM stock_transfers WHERE idempotency_key = ? AND _deleted = 0')
-        .get(idempotencyKey);
+      const existing: any = (await localDb
+        .prepare('SELECT * FROM stock_transfers WHERE idempotency_key = ? AND organization_id = ? AND _deleted = 0')
+        .get(idempotencyKey, organizationId));
       if (existing) {
-        return this.getTransferById(existing.id, organizationId)!;
+        if (cloudBusinessMode() && (existing.requested_by !== requestedBy ||
+            existing.source_location_id !== sourceLoc.id || existing.destination_location_id !== destLoc.id ||
+            (existing.creation_request_hash && existing.creation_request_hash !== requestHash))) {
+          throw new AppError(409, 'This transfer request identifier was used for different details.');
+        }
+        return (await this.getTransferById(existing.id, organizationId))!;
       }
     }
+
+    if (cloudBusinessMode() && params.requireAvailableStock) {
+      for (const item of items) {
+        const [stock] = await queryRaw(
+          'SELECT COALESCE(SUM(available),0) AS units FROM branch_stock_snapshot WHERE store_id=? AND medicine_id=?',
+          [sourceLoc.id,item.medicineId],
+        );
+        if (Number(stock.units) < item.requestedQuantity) {
+          throw new AppError(409, 'Available stock has changed at the source branch.');
+        }
+      }
+    }
+
+    for (const item of items) (await tenantRecord('medicines', item.medicineId, organizationId));
 
     const transferId = uuidv4();
     const nowIso = new Date().toISOString();
     const customPrefix = `${sourceLoc.code || 'SRC'}/${destLoc.code || 'DST'}/TRF`;
-    const transferNumber = DocumentNumberingService.generate({
+    const transferNumber = (await DocumentNumberingService.generate({
       organizationId,
       storeId: sourceLocationType === 'STORE' ? sourceLocationId : null,
       documentType: 'TRANSFER',
       customPrefix,
-    });
+    }));
 
     let totalQuantity = 0;
     let totalEstimatedValuePaise = 0;
 
-    const transfer = localMutate({
+    const transfer = (await localMutate({
       table: 'stock_transfers',
       operation: 'INSERT',
       data: {
@@ -124,13 +168,12 @@ export class StockTransferService {
         required_by_date: requiredByDate || null,
         notes: notes || null,
         idempotency_key: idempotencyKey || null,
+        ...(requestHash ? { creation_request_hash: requestHash } : {}),
       },
-    });
+    }));
 
     for (const item of items) {
-      const med: any = localDb
-        .prepare('SELECT * FROM medicines WHERE id = ? OR _local_id = ?')
-        .get(item.medicineId, item.medicineId);
+      const med = (await tenantRecord('medicines', item.medicineId, organizationId));
 
       const convFactor = item.conversionFactor || 1.0;
       const baseQty = item.requestedQuantity * convFactor;
@@ -141,7 +184,7 @@ export class StockTransferService {
       totalEstimatedValuePaise += lineValue;
 
       const itemId = uuidv4();
-      localMutate({
+      (await localMutate({
         table: 'stock_transfer_items',
         operation: 'INSERT',
         data: {
@@ -159,10 +202,10 @@ export class StockTransferService {
           total_value_paise: lineValue,
           notes: item.notes || null,
         },
-      });
+      }));
     }
 
-    localMutate({
+    (await localMutate({
       table: 'stock_transfers',
       operation: 'UPDATE',
       data: {
@@ -170,10 +213,10 @@ export class StockTransferService {
         total_quantity_requested: totalQuantity,
         total_value_paise: totalEstimatedValuePaise,
       },
-    });
+    }));
 
     // Write audit event
-    localMutate({
+    (await localMutate({
       table: 'transfer_events',
       operation: 'INSERT',
       data: {
@@ -186,43 +229,44 @@ export class StockTransferService {
         performed_by: requestedBy,
         notes: `Created transfer request for ${items.length} SKUs`,
       },
-    });
+    }));
 
     // Check policy auto-approval
-    const policyRole = TransferPolicyService.getRequiredApprovalRole(
+    const policyRole = (await TransferPolicyService.getRequiredApprovalRole(
       organizationId,
       totalEstimatedValuePaise,
       transferType
-    );
+    ));
     if (policyRole === 'AUTO') {
-      return this.approveTransfer({
+      return (await this.approveTransfer({
         transferId,
         organizationId,
         approvedBy: 'SYSTEM_AUTO',
         userRole: 'SYSTEM',
-      });
+      }));
     }
 
-    return this.getTransferById(transferId, organizationId)!;
+    return (await this.getTransferById(transferId, organizationId))!;
   }
 
   /**
    * Approve a transfer request
    */
-  static approveTransfer(params: {
+  static async approveTransfer(params: {
     transferId: string;
     organizationId: string;
     approvedBy: string;
     userRole?: string;
-  }): StockTransfer {
+  }): Promise<StockTransfer> {
     const { transferId, organizationId, approvedBy, userRole } = params;
 
-    const transfer: any = localDb
+    await lockBusinessRows('stock_transfers',[transferId]);
+    const transfer: any = (await localDb
       .prepare(
         `SELECT * FROM stock_transfers 
          WHERE (id = ? OR _local_id = ?) AND (organization_id = ?) AND _deleted = 0`
       )
-      .get(transferId, transferId, organizationId);
+      .get(transferId, transferId, organizationId));
 
     if (!transfer) throw new Error(`Transfer not found: ${transferId}`);
 
@@ -230,7 +274,7 @@ export class StockTransferService {
       throw new Error(`Cannot approve transfer in status: ${transfer.status}`);
     }
 
-    const policy = TransferPolicyService.getPolicy(organizationId);
+    const policy = (await TransferPolicyService.getPolicy(organizationId));
 
     // Maker-checker validation
     if (policy.enforceMakerChecker && transfer.requested_by === approvedBy && approvedBy !== 'SYSTEM_AUTO') {
@@ -238,7 +282,7 @@ export class StockTransferService {
     }
 
     const nowIso = new Date().toISOString();
-    localMutate({
+    (await localMutate({
       table: 'stock_transfers',
       operation: 'UPDATE',
       data: {
@@ -247,9 +291,9 @@ export class StockTransferService {
         approved_by: approvedBy,
         approved_at: nowIso,
       },
-    });
+    }));
 
-    localMutate({
+    (await localMutate({
       table: 'transfer_events',
       operation: 'INSERT',
       data: {
@@ -262,46 +306,56 @@ export class StockTransferService {
         performed_by: approvedBy,
         notes: `Transfer approved by ${approvedBy}`,
       },
-    });
+    }));
 
     // Auto-allocate batches upon approval if FEFO is configured
     if (policy.requireFefoAllocation) {
       try {
-        TransferAllocationService.allocateTransfer({
+        const allocate = () => TransferAllocationService.allocateTransfer({
           transferId: transfer.id,
           organizationId,
           allocatedBy: approvedBy,
         });
+        if(cloudBusinessMode()) await withPostgresSavepoint(allocate);
+        else await allocate();
       } catch (err: any) {
         // If insufficient stock, keep in APPROVED status for manual allocation
       }
     }
 
-    return this.getTransferById(transfer.id, organizationId)!;
+    return (await this.getTransferById(transfer.id, organizationId))!;
   }
 
   /**
    * Reject a transfer request
    */
-  static rejectTransfer(params: {
+  static async rejectTransfer(params: {
     transferId: string;
     organizationId: string;
     rejectedBy: string;
     rejectionReason: string;
-  }): StockTransfer {
+  }): Promise<StockTransfer> {
     const { transferId, organizationId, rejectedBy, rejectionReason } = params;
+    await lockBusinessRows('stock_transfers', [transferId]);
 
-    const transfer: any = localDb
+    const transfer: any = (await localDb
       .prepare(
         `SELECT * FROM stock_transfers 
          WHERE (id = ? OR _local_id = ?) AND (organization_id = ?) AND _deleted = 0`
       )
-      .get(transferId, transferId, organizationId);
+      .get(transferId, transferId, organizationId));
 
     if (!transfer) throw new Error(`Transfer not found: ${transferId}`);
 
+    if (cloudBusinessMode()) {
+      if (transfer.status === 'REJECTED') return (await this.getTransferById(transfer.id, organizationId))!;
+      if (!['REQUESTED', 'PENDING_APPROVAL', 'APPROVED', 'ALLOCATING', 'READY_TO_PICK', 'PICKING', 'PICKED', 'PACKED'].includes(transfer.status)) {
+        throw new AppError(409, 'A dispatched or completed transfer cannot be rejected here.');
+      }
+      await TransferAllocationService.releaseTransferAllocations(transfer.id, organizationId);
+    }
     const nowIso = new Date().toISOString();
-    localMutate({
+    (await localMutate({
       table: 'stock_transfers',
       operation: 'UPDATE',
       data: {
@@ -311,9 +365,9 @@ export class StockTransferService {
         rejected_at: nowIso,
         rejection_reason: rejectionReason,
       },
-    });
+    }));
 
-    localMutate({
+    (await localMutate({
       table: 'transfer_events',
       operation: 'INSERT',
       data: {
@@ -326,28 +380,29 @@ export class StockTransferService {
         performed_by: rejectedBy,
         notes: `Rejected: ${rejectionReason}`,
       },
-    });
+    }));
 
-    return this.getTransferById(transfer.id, organizationId)!;
+    return (await this.getTransferById(transfer.id, organizationId))!;
   }
 
   /**
    * Cancel a transfer with stage-aware reservation release
    */
-  static cancelTransfer(params: {
+  static async cancelTransfer(params: {
     transferId: string;
     organizationId: string;
     cancelledBy: string;
     cancellationReason?: string;
-  }): StockTransfer {
+  }): Promise<StockTransfer> {
     const { transferId, organizationId, cancelledBy, cancellationReason } = params;
+    await lockBusinessRows('stock_transfers', [transferId]);
 
-    const transfer: any = localDb
+    const transfer: any = (await localDb
       .prepare(
         `SELECT * FROM stock_transfers 
          WHERE (id = ? OR _local_id = ?) AND (organization_id = ?) AND _deleted = 0`
       )
-      .get(transferId, transferId, organizationId);
+      .get(transferId, transferId, organizationId));
 
     if (!transfer) throw new Error(`Transfer not found: ${transferId}`);
 
@@ -355,11 +410,18 @@ export class StockTransferService {
       throw new Error(`Cannot directly cancel transfer in ${transfer.status} status. Please use Return to Source transfer workflow.`);
     }
 
+    if (cloudBusinessMode()) {
+      if (transfer.status === 'CANCELLED') return (await this.getTransferById(transfer.id, organizationId))!;
+      if (!['DRAFT','REQUESTED','PENDING_APPROVAL','APPROVED','ALLOCATING','READY_TO_PICK','PICKING','PICKED','PACKED'].includes(transfer.status)) {
+        throw new AppError(409, 'This transfer can no longer be cancelled.');
+      }
+    }
+
     // Release reservations and batch allocations if allocated or picked
-    TransferAllocationService.releaseTransferAllocations(transfer.id, organizationId);
+    (await TransferAllocationService.releaseTransferAllocations(transfer.id, organizationId));
 
     const nowIso = new Date().toISOString();
-    localMutate({
+    (await localMutate({
       table: 'stock_transfers',
       operation: 'UPDATE',
       data: {
@@ -369,9 +431,9 @@ export class StockTransferService {
         cancelled_at: nowIso,
         cancellation_reason: cancellationReason || 'Cancelled by user',
       },
-    });
+    }));
 
-    localMutate({
+    (await localMutate({
       table: 'transfer_events',
       operation: 'INSERT',
       data: {
@@ -384,33 +446,33 @@ export class StockTransferService {
         performed_by: cancelledBy,
         notes: `Cancelled: ${cancellationReason || 'User cancellation'}`,
       },
-    });
+    }));
 
-    return this.getTransferById(transfer.id, organizationId)!;
+    return (await this.getTransferById(transfer.id, organizationId))!;
   }
 
   /**
    * Create an explicit Return Transfer if destination rejects shipment
    */
-  static createReturnTransfer(params: {
+  static async createReturnTransfer(params: {
     originalTransferId: string;
     organizationId: string;
     reason: string;
     returnedBy: string;
     lines?: Array<{ medicineId: string; batchId: string; quantity: number }>;
-  }): StockTransfer {
+  }): Promise<StockTransfer> {
     const { originalTransferId, organizationId, reason, returnedBy, lines } = params;
 
-    const orig: any = localDb
+    const orig: any = (await localDb
       .prepare(
         `SELECT * FROM stock_transfers WHERE (id = ? OR _local_id = ?) AND (organization_id = ?)`
       )
-      .get(originalTransferId, originalTransferId, organizationId);
+      .get(originalTransferId, originalTransferId, organizationId));
 
     if (!orig) throw new Error(`Original transfer not found: ${originalTransferId}`);
 
     // Return flips source and destination
-    return this.createTransfer({
+    return (await this.createTransfer({
       organizationId,
       transferType: 'RETURN_TO_SOURCE',
       sourceLocationType: orig.destination_location_type,
@@ -426,52 +488,52 @@ export class StockTransferService {
             medicineId: l.medicineId,
             requestedQuantity: l.quantity,
           }))
-        : localDb
+        : (await localDb
             .prepare('SELECT medicine_id, requested_quantity FROM stock_transfer_items WHERE transfer_id = ?')
-            .all(orig.id)
+            .all(orig.id))
             .map((i: any) => ({
               medicineId: i.medicine_id,
               requestedQuantity: Number(i.requested_quantity),
             })),
-    });
+    }));
   }
 
   /**
    * Get single transfer by ID with all populated details
    */
-  static getTransferById(id: string, organizationId: string): StockTransfer | null {
-    const row: any = localDb
+  static async getTransferById(id: string, organizationId: string): Promise<StockTransfer | null> {
+    const row: any = (await localDb
       .prepare(
         `SELECT * FROM stock_transfers 
          WHERE (id = ? OR _local_id = ?) AND (organization_id = ?) AND _deleted = 0`
       )
-      .get(id, id, organizationId);
+      .get(id, id, organizationId));
 
     if (!row) return null;
 
-    const items: any[] = localDb
+    const items: any[] = (await localDb
       .prepare('SELECT * FROM stock_transfer_items WHERE transfer_id = ? AND _deleted = 0')
-      .all(row.id);
+      .all(row.id));
 
-    const allocations: any[] = localDb
+    const allocations: any[] = (await localDb
       .prepare('SELECT * FROM stock_transfer_batch_allocations WHERE transfer_id = ? AND _deleted = 0')
-      .all(row.id);
+      .all(row.id));
 
-    const packages: any[] = localDb
+    const packages: any[] = (await localDb
       .prepare('SELECT * FROM transfer_packages WHERE transfer_id = ? AND _deleted = 0')
-      .all(row.id);
+      .all(row.id));
 
-    const receipts: any[] = localDb
+    const receipts: any[] = (await localDb
       .prepare('SELECT * FROM transfer_receipts WHERE transfer_id = ? AND _deleted = 0')
-      .all(row.id);
+      .all(row.id));
 
-    const variances: any[] = localDb
+    const variances: any[] = (await localDb
       .prepare('SELECT * FROM transfer_variances WHERE transfer_id = ? AND _deleted = 0')
-      .all(row.id);
+      .all(row.id));
 
-    const events: any[] = localDb
+    const events: any[] = (await localDb
       .prepare('SELECT * FROM transfer_events WHERE transfer_id = ? ORDER BY created_at ASC')
-      .all(row.id);
+      .all(row.id));
 
     return {
       ...row,
@@ -532,7 +594,7 @@ export class StockTransferService {
   /**
    * List paginated transfers with filters
    */
-  static listTransfers(params: {
+  static async listTransfers(params: {
     organizationId: string;
     status?: string;
     transferType?: string;
@@ -540,9 +602,10 @@ export class StockTransferService {
     sourceLocationId?: string;
     destinationLocationId?: string;
     search?: string;
+    participantIds?: string[];
     page?: number;
     limit?: number;
-  }): { data: StockTransfer[]; total: number } {
+  }): Promise<{ data: StockTransfer[]; total: number }> {
     const {
       organizationId,
       status,
@@ -551,12 +614,21 @@ export class StockTransferService {
       sourceLocationId,
       destinationLocationId,
       search,
+      participantIds,
       page = 1,
       limit = 50,
     } = params;
 
     let whereClause = `WHERE (organization_id = ?) AND _deleted = 0`;
     const args: any[] = [organizationId];
+
+    if (participantIds) {
+      if (!participantIds.length) return { data: [], total: 0 };
+      const marks = participantIds.map(() => '?').join(',');
+      whereClause += ` AND ((source_location_type='STORE' AND source_location_id IN (${marks}))
+        OR (destination_location_type='STORE' AND destination_location_id IN (${marks})))`;
+      args.push(...participantIds, ...participantIds);
+    }
 
     if (status) {
       whereClause += ` AND status = ?`;
@@ -584,17 +656,17 @@ export class StockTransferService {
       args.push(term, term, term);
     }
 
-    const countRow: any = localDb
+    const countRow: any = (await localDb
       .prepare(`SELECT COUNT(*) as total FROM stock_transfers ${whereClause}`)
-      .get(...args);
+      .get(...args));
 
     const offset = (page - 1) * limit;
-    const rows: any[] = localDb
+    const rows: any[] = (await localDb
       .prepare(`SELECT * FROM stock_transfers ${whereClause} ORDER BY created_at DESC LIMIT ? OFFSET ?`)
-      .all(...args, limit, offset);
+      .all(...args, limit, offset));
 
     return {
-      data: rows.map((r) => this.getTransferById(r.id, organizationId)!),
+      data: (await Promise.all(rows.map(async (r) => (await this.getTransferById(r.id, organizationId))!))),
       total: Number(countRow?.total || 0),
     };
   }

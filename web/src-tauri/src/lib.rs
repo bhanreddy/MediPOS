@@ -1,4 +1,6 @@
 mod commands;
+mod offline_commands;
+mod offline_outbox;
 use tauri::Manager;
 use tauri_plugin_shell::ShellExt;
 
@@ -8,6 +10,7 @@ pub fn run() {
         .plugin(tauri_plugin_store::Builder::default().build())
         .plugin(tauri_plugin_shell::init())
         .setup(|app| {
+            offline_commands::setup(app)?;
             let app_data_dir = app.path().app_data_dir().unwrap();
             let db_path = app_data_dir.join("medical_pos.db");
 
@@ -24,6 +27,10 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             commands::get_app_info,
             commands::health_check,
+            offline_commands::queue_offline_command,
+            offline_commands::list_offline_commands,
+            offline_commands::record_offline_result,
+            offline_commands::offline_queue_summary,
         ])
         .run(tauri::generate_context!())
         .expect("failed to run MedPOS Pro desktop runtime");

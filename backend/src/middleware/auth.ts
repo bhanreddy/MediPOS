@@ -1,9 +1,27 @@
 import { Request, Response, NextFunction } from 'express';
 import jwt from 'jsonwebtoken';
 import { AuthUser } from '../types';
-import { localDb } from '../local-db';
+import { businessDb as localDb } from '../lib/businessDb';
 import { ensureCloudPosDirectory } from '../services/cloudPosDirectory';
 import { getSupabaseUser, getUserProfile } from '../lib/supabaseIdentity';
+import { resolveCloudStoreContext, validateRequestedCloudStore } from '../services/cloudStoreContext';
+import { withTenantContext } from '../lib/tenantContext';
+
+async function continueAuthenticated(req: Request, next: NextFunction) {
+  const actor = req.user!;
+  const requested = req.headers['x-store-id'];
+  let storeId: string | null = null;
+  if (process.env.DATABASE_URL && actor.clinic_id) {
+    const identity = { userId: actor.id, role: actor.role };
+    if (requested !== undefined) {
+      storeId = (await validateRequestedCloudStore(actor.clinic_id, identity, requested)).id;
+    } else if (!['OWNER','SUPER_ADMIN'].includes(actor.role)
+      && /^\/api\/(inventory(?:\/|$)|reports\/dashboard(?:[/?]|$))/.test(req.originalUrl)) {
+      storeId = await withTenantContext(actor, async () => (await resolveCloudStoreContext(actor.clinic_id!, {})).storeId);
+    }
+  }
+  return withTenantContext(actor, next, storeId);
+}
 
 export const requireAuth = async (req: Request, res: Response, next: NextFunction) => {
   // Parent router authentication is reusable within this request only.
@@ -38,7 +56,7 @@ export const requireAuth = async (req: Request, res: Response, next: NextFunctio
         let resolvedUser: any = null;
         if (!process.env.DATABASE_URL) {
           try {
-            resolvedUser = localDb.prepare('SELECT id, role, clinic_id, is_active, _deleted FROM users WHERE id = ? OR _local_id = ?').get(payload.sub, payload.sub);
+            resolvedUser = (await localDb.prepare('SELECT id, role, clinic_id, is_active, _deleted FROM users WHERE id = ? OR _local_id = ?').get(payload.sub, payload.sub));
           } catch {}
         }
 
@@ -69,11 +87,25 @@ export const requireAuth = async (req: Request, res: Response, next: NextFunctio
             email: resolvedUser.email || '',
             isImpersonating,
           };
+          if (!process.env.DATABASE_URL && req.user.clinic_id) {
+            const clinic = (await localDb.prepare('SELECT organization_id FROM clinics WHERE (id = ? OR _local_id = ?) AND _deleted = 0')
+              .get(req.user.clinic_id, req.user.clinic_id)) as { organization_id?: string } | undefined;
+            if (clinic?.organization_id) {
+              req.user.organization_id = clinic.organization_id;
+              req.user.organizationId = clinic.organization_id;
+            } else if (!isImpersonating) {
+              const memberships = (await localDb.prepare('SELECT organization_id FROM user_organization_access WHERE user_id = ? AND is_active = 1 AND _deleted = 0').all(req.user.id)) as { organization_id: string }[];
+              if (memberships.length === 1) {
+                req.user.organization_id = memberships[0].organization_id;
+                req.user.organizationId = memberships[0].organization_id;
+              }
+            }
+          }
           if (process.env.DATABASE_URL) {
             const organizationId = await ensureCloudPosDirectory(req.user, resolvedUser.full_name);
             if (organizationId) { req.user.organization_id = organizationId; req.user.organizationId = organizationId; }
           }
-          return next();
+          return await continueAuthenticated(req, next);
         }
         // User deleted from DB — fall through to Supabase path or reject
       } catch (jwtErr) {
@@ -106,7 +138,7 @@ export const requireAuth = async (req: Request, res: Response, next: NextFunctio
       return res.status(403).json({ error: { message: 'Your account setup is incomplete. Contact your administrator.', code: 'PROFILE_NOT_CONFIGURED' } });
     }
 
-    if (userRow.is_active === false || userRow.deleted_at) return res.status(403).json({ error: 'Your account is inactive. Contact your administrator.' });
+    if (userRow.is_active === false || userRow.is_active === 0 || userRow._deleted || userRow.deleted_at) return res.status(403).json({ error: 'Your account is inactive. Contact your administrator.' });
 
     let finalClinicId = userRow.clinic_id;
     let isImpersonating = false;
@@ -130,7 +162,7 @@ export const requireAuth = async (req: Request, res: Response, next: NextFunctio
 
     const organizationId = await ensureCloudPosDirectory(req.user, userRow.full_name || supabaseUser.user_metadata?.full_name);
     if (organizationId) { req.user.organization_id = organizationId; req.user.organizationId = organizationId; }
-    next();
+    await continueAuthenticated(req, next);
   } catch (error) {
     next(error);
   }

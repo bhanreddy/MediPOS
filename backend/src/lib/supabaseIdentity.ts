@@ -13,7 +13,8 @@ export interface UserProfile {
   clinic_id: string | null;
   role: string;
   full_name: string | null;
-  is_active?: boolean | null;
+  is_active?: boolean | number | null;
+  _deleted?: number | boolean;
   deleted_at?: string | null;
   email?: string | null;
 }
@@ -22,13 +23,11 @@ type ProfileResult = { data: UserProfile | null; error: { code?: string; message
 
 const SIGNING_KEYS_TTL_MS = 10 * 60_000;
 const SIGNING_KEYS_RETRY_MS = 30_000;
-const PROFILE_TTL_MS = 60_000;
 
 let signingKeys = new Map<string, KeyObject>();
 let signingKeysAt = 0;
 let signingKeysAttemptAt = 0;
 let signingKeysLoading: Promise<void> | null = null;
-const profiles = new Map<string, { profile: UserProfile; at: number }>();
 const profileLoads = new Map<string, Promise<ProfileResult>>();
 
 async function loadSigningKeys(): Promise<void> {
@@ -134,29 +133,19 @@ async function fetchProfile(userId: string): Promise<ProfileResult> {
   return { data, error };
 }
 
-/** Role and store assignment. Reused briefly so concurrent and back-to-back requests share one lookup. */
+/** Revalidate assignments on every request; only concurrent lookups share work. */
 export function getUserProfile(userId: string): Promise<ProfileResult> {
-  const cached = profiles.get(userId);
-  if (cached && Date.now() - cached.at < PROFILE_TTL_MS) return Promise.resolve({ data: cached.profile, error: null });
   const pending = profileLoads.get(userId);
   if (pending) return pending;
-  const load = fetchProfile(userId)
-    .then(({ data, error }): ProfileResult => {
-      if (data) {
-        profiles.set(userId, { profile: data, at: Date.now() });
-        if (profiles.size > 2000)
-          for (const [id, entry] of profiles) if (Date.now() - entry.at >= PROFILE_TTL_MS) profiles.delete(id);
-      }
-      return { data, error };
-    })
-    .finally(() => profileLoads.delete(userId));
+  const load = fetchProfile(userId).finally(() => {
+    if (profileLoads.get(userId) === load) profileLoads.delete(userId);
+  });
   profileLoads.set(userId, load);
   return load;
 }
 
 /** Test isolation only. */
 export function resetSupabaseIdentityCache(): void {
-  profiles.clear();
   profileLoads.clear();
   signingKeys = new Map();
   signingKeysAt = 0;

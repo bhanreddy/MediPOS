@@ -25,9 +25,9 @@ describe('Enterprise Procurement & Supplier Intelligence Engine', () => {
   let supplierAlphaId: string;
   let supplierBetaId: string;
 
-  beforeAll(() => {
+  beforeAll(async () => {
     // 1. Seed Organization & Store
-    localMutate({
+    (await localMutate({
       table: 'organizations',
       operation: 'INSERT',
       data: {
@@ -37,9 +37,9 @@ describe('Enterprise Procurement & Supplier Intelligence Engine', () => {
         legal_name: 'Procurement Test Org Pvt Ltd',
         code: 'PTO',
       },
-    });
+    }));
 
-    localMutate({
+    (await localMutate({
       table: 'stores',
       operation: 'INSERT',
       data: {
@@ -50,13 +50,17 @@ describe('Enterprise Procurement & Supplier Intelligence Engine', () => {
         display_name: 'Downtown Pharmacy',
         store_code: 'DP01',
       },
-    });
+    }));
+
+    (await localMutate({ table: 'warehouses', operation: 'INSERT', data: {
+      id: warehouseId, _local_id: warehouseId, organization_id: orgId, name: 'Procurement warehouse',
+    } }));
 
     // 2. Seed Test Medicines
     medicineAId = uuidv4();
     medicineBId = uuidv4();
 
-    localMutate({
+    (await localMutate({
       table: 'medicines',
       operation: 'INSERT',
       data: {
@@ -72,9 +76,9 @@ describe('Enterprise Procurement & Supplier Intelligence Engine', () => {
         mrp: 120.0,
         unit: 'strip',
       },
-    });
+    }));
 
-    localMutate({
+    (await localMutate({
       table: 'medicines',
       operation: 'INSERT',
       data: {
@@ -90,13 +94,13 @@ describe('Enterprise Procurement & Supplier Intelligence Engine', () => {
         mrp: 40.0,
         unit: 'strip',
       },
-    });
+    }));
 
     // 3. Seed Test Suppliers
     supplierAlphaId = uuidv4();
     supplierBetaId = uuidv4();
 
-    localMutate({
+    (await localMutate({
       table: 'suppliers',
       operation: 'INSERT',
       data: {
@@ -110,9 +114,9 @@ describe('Enterprise Procurement & Supplier Intelligence Engine', () => {
         lead_time_days: 2,
         outstanding_balance: 0,
       },
-    });
+    }));
 
-    localMutate({
+    (await localMutate({
       table: 'suppliers',
       operation: 'INSERT',
       data: {
@@ -126,15 +130,15 @@ describe('Enterprise Procurement & Supplier Intelligence Engine', () => {
         lead_time_days: 4,
         outstanding_balance: 0,
       },
-    });
+    }));
   });
 
   // -------------------------------------------------------------------------
   // SECTION 1: PROCUREMENT POLICIES & APPROVAL THRESHOLDS
   // -------------------------------------------------------------------------
   describe('1. Procurement Policies & Threshold Verification', () => {
-    test('Sets and retrieves custom organizational procurement policy', () => {
-      const policy = ProcurementPolicyService.setPolicy({
+    test('Sets and retrieves custom organizational procurement policy', async () => {
+      const policy = (await ProcurementPolicyService.setPolicy({
         organizationId: orgId,
         storeManagerApprovalLimitPaise: 5000000, // 50,000 INR -> Store Manager
         regionalManagerApprovalLimitPaise: 20000000, // 200,000 INR -> Regional Manager
@@ -142,22 +146,22 @@ describe('Enterprise Procurement & Supplier Intelligence Engine', () => {
         priceVarianceTolerancePct: 3.0,
         quantityVarianceTolerancePct: 5.0,
         minShelfLifeDaysReceipt: 180,
-      });
+      }));
 
       expect(policy.organizationId).toBe(orgId);
       expect(policy.priceVarianceTolerancePct).toBe(3.0);
       expect(policy.minShelfLifeDaysReceipt).toBe(180);
     });
 
-    test('Validates approval role requirements based on value tiers', () => {
+    test('Validates approval role requirements based on value tiers', async () => {
       // 10,000 INR -> Store Manager
-      expect(ProcurementPolicyService.getRequiredApprovalRole(orgId, 1000000)).toBe('STORE_MANAGER');
+      expect((await ProcurementPolicyService.getRequiredApprovalRole(orgId, 1000000))).toBe('STORE_MANAGER');
       // 100,000 INR -> Regional Manager
-      expect(ProcurementPolicyService.getRequiredApprovalRole(orgId, 10000000)).toBe('REGIONAL_MANAGER');
+      expect((await ProcurementPolicyService.getRequiredApprovalRole(orgId, 10000000))).toBe('REGIONAL_MANAGER');
       // 300,000 INR -> HQ Procurement
-      expect(ProcurementPolicyService.getRequiredApprovalRole(orgId, 30000000)).toBe('HQ_PROCUREMENT');
+      expect((await ProcurementPolicyService.getRequiredApprovalRole(orgId, 30000000))).toBe('HQ_PROCUREMENT');
       // 600,000 INR -> HQ Procurement (Enterprise policy ceiling)
-      expect(ProcurementPolicyService.getRequiredApprovalRole(orgId, 60000000)).toBe('HQ_PROCUREMENT');
+      expect((await ProcurementPolicyService.getRequiredApprovalRole(orgId, 60000000))).toBe('HQ_PROCUREMENT');
     });
   });
 
@@ -168,8 +172,8 @@ describe('Enterprise Procurement & Supplier Intelligence Engine', () => {
     let req1Id: string;
     let req2Id: string;
 
-    test('Creates purchase requisition with on-hand inventory context', () => {
-      const req = PurchaseRequisitionService.createRequisition({
+    test('Creates purchase requisition with on-hand inventory context', async () => {
+      const req = (await PurchaseRequisitionService.createRequisition({
         organizationId: orgId,
         storeId,
         source: 'MANUAL',
@@ -188,7 +192,7 @@ describe('Enterprise Procurement & Supplier Intelligence Engine', () => {
             justification: 'Fever clinic high turnover',
           },
         ],
-      });
+      }));
 
       req1Id = req.id;
       expect(req.requisition_number).toContain('/REQ/');
@@ -198,24 +202,24 @@ describe('Enterprise Procurement & Supplier Intelligence Engine', () => {
       expect(req.items?.[0].estimated_cost_paise).toBe(400000); // 50 * 80.00 = 4,000 INR
     });
 
-    test('Submits requisition for approval', () => {
-      const submitted = PurchaseRequisitionService.submitRequisition(req1Id, orgId);
+    test('Submits requisition for approval', async () => {
+      const submitted = (await PurchaseRequisitionService.submitRequisition(req1Id, orgId));
       expect(submitted.status).toBe('PENDING_APPROVAL');
     });
 
-    test('Approves requisition within authorized role threshold', () => {
-      const approved = PurchaseRequisitionService.approveRequisition({
+    test('Approves requisition within authorized role threshold', async () => {
+      const approved = (await PurchaseRequisitionService.approveRequisition({
         requisitionId: req1Id,
         organizationId: orgId,
         approvedBy: 'user-manager-1',
         userRole: 'STORE_MANAGER',
-      });
+      }));
       expect(approved.status).toBe('APPROVED');
       expect(approved.approved_by).toBe('user-manager-1');
     });
 
-    test('Creates second requisition and rejects it with reason', () => {
-      const req2 = PurchaseRequisitionService.createRequisition({
+    test('Creates second requisition and rejects it with reason', async () => {
+      const req2 = (await PurchaseRequisitionService.createRequisition({
         organizationId: orgId,
         storeId,
         source: 'MANUAL',
@@ -227,23 +231,23 @@ describe('Enterprise Procurement & Supplier Intelligence Engine', () => {
             requestedQuantity: 10,
           },
         ],
-      });
+      }));
       req2Id = req2.id;
-      PurchaseRequisitionService.submitRequisition(req2Id, orgId);
+      (await PurchaseRequisitionService.submitRequisition(req2Id, orgId));
 
-      const rejected = PurchaseRequisitionService.rejectRequisition({
+      const rejected = (await PurchaseRequisitionService.rejectRequisition({
         requisitionId: req2Id,
         organizationId: orgId,
         rejectedBy: 'user-manager-1',
         rejectionReason: 'Adequate safety stock in warehouse',
-      });
+      }));
 
       expect(rejected.status).toBe('REJECTED');
       expect(rejected.rejection_reason).toBe('Adequate safety stock in warehouse');
     });
 
-    test('Creates requisition from Reorder Engine recommendations', () => {
-      const autoReq = PurchaseRequisitionService.createRequisitionFromRecommendations({
+    test('Creates requisition from Reorder Engine recommendations', async () => {
+      const autoReq = (await PurchaseRequisitionService.createRequisitionFromRecommendations({
         organizationId: orgId,
         storeId,
         requestedBy: 'system-auto-reorder',
@@ -254,15 +258,15 @@ describe('Enterprise Procurement & Supplier Intelligence Engine', () => {
             reason: 'Reorder point breached (ROP: 20)',
           },
         ],
-      });
+      }));
 
       expect(autoReq.source).toBe('REORDER_ENGINE');
       expect(autoReq.items?.[0].requested_quantity).toBe(60);
       expect(autoReq.items?.[0].justification).toContain('Reorder point breached');
     });
 
-    test('Consolidates store requisitions into central warehouse requisition', () => {
-      const storeReq = PurchaseRequisitionService.createRequisition({
+    test('Consolidates store requisitions into central warehouse requisition', async () => {
+      const storeReq = (await PurchaseRequisitionService.createRequisition({
         organizationId: orgId,
         storeId,
         source: 'MANUAL',
@@ -274,15 +278,15 @@ describe('Enterprise Procurement & Supplier Intelligence Engine', () => {
             requestedQuantity: 40,
           },
         ],
-      });
+      }));
 
-      const consolidated = PurchaseRequisitionService.consolidateRequisitions({
+      const consolidated = (await PurchaseRequisitionService.consolidateRequisitions({
         organizationId: orgId,
         warehouseId,
         sourceRequisitionIds: [storeReq.id],
         requestedBy: 'hq-procurement-officer',
         notes: 'Central warehouse bulk replenishment',
-      });
+      }));
 
       expect(consolidated.source).toBe('WAREHOUSE_REPLENISHMENT');
       expect(consolidated.status).toBe('DRAFT');
@@ -294,8 +298,8 @@ describe('Enterprise Procurement & Supplier Intelligence Engine', () => {
   // SECTION 3: SUPPLIER CATALOG & COMPARISON ENGINE
   // -------------------------------------------------------------------------
   describe('3. Supplier-Product Catalog & Comparison Engine', () => {
-    beforeAll(() => {
-      SupplierCatalogService.upsertSupplierProduct({
+    beforeAll(async () => {
+      (await SupplierCatalogService.upsertSupplierProduct({
         organizationId: orgId,
         supplierId: supplierAlphaId,
         medicineId: medicineAId,
@@ -303,9 +307,9 @@ describe('Enterprise Procurement & Supplier Intelligence Engine', () => {
         standardRatePaise: 8000,
         moq: 10,
         leadTimeDays: 2,
-      });
+      }));
 
-      SupplierCatalogService.upsertSupplierProduct({
+      (await SupplierCatalogService.upsertSupplierProduct({
         organizationId: orgId,
         supplierId: supplierBetaId,
         medicineId: medicineAId,
@@ -313,23 +317,23 @@ describe('Enterprise Procurement & Supplier Intelligence Engine', () => {
         standardRatePaise: 7200,
         moq: 20,
         leadTimeDays: 4,
-      });
+      }));
     });
 
-    test('Retrieves catalog mappings and price history', () => {
-      const history = SupplierCatalogService.getPriceHistory({
+    test('Retrieves catalog mappings and price history', async () => {
+      const history = (await SupplierCatalogService.getPriceHistory({
         organizationId: orgId,
         medicineId: medicineAId,
-      });
+      }));
       expect(history.length).toBeGreaterThanOrEqual(2);
     });
 
-    test('Compares suppliers and calculates effective cost', () => {
-      const results = SupplierCatalogService.compareSuppliersForProduct({
+    test('Compares suppliers and calculates effective cost', async () => {
+      const results = (await SupplierCatalogService.compareSuppliersForProduct({
         organizationId: orgId,
         medicineId: medicineAId,
         requestedQuantity: 50,
-      });
+      }));
 
       expect(results.length).toBe(2);
 
@@ -353,8 +357,8 @@ describe('Enterprise Procurement & Supplier Intelligence Engine', () => {
     let poId: string;
     const idempotencyKey = 'po-idemp-' + Date.now();
 
-    test('Generates Purchase Order with multi-line items and rate calculation', () => {
-      const po = PurchaseOrderService.createPurchaseOrder({
+    test('Generates Purchase Order with multi-line items and rate calculation', async () => {
+      const po = (await PurchaseOrderService.createPurchaseOrder({
         organizationId: orgId,
         storeId,
         supplierId: supplierAlphaId,
@@ -376,7 +380,7 @@ describe('Enterprise Procurement & Supplier Intelligence Engine', () => {
             gstRate: 12.0,
           },
         ],
-      });
+      }));
 
       poId = po.id;
       expect(po.po_number).toContain('/PO/');
@@ -391,8 +395,8 @@ describe('Enterprise Procurement & Supplier Intelligence Engine', () => {
       expect(po.total_paise).toBe(728000);
     });
 
-    test('Prevents duplicate PO generation via Idempotency Key', () => {
-      const duplicatePo = PurchaseOrderService.createPurchaseOrder({
+    test('Prevents duplicate PO generation via Idempotency Key', async () => {
+      const duplicatePo = (await PurchaseOrderService.createPurchaseOrder({
         organizationId: orgId,
         storeId,
         supplierId: supplierAlphaId,
@@ -405,24 +409,24 @@ describe('Enterprise Procurement & Supplier Intelligence Engine', () => {
             purchaseRatePaise: 8000,
           },
         ],
-      });
+      }));
 
       // Must return existing PO ID without creating a duplicate record
       expect(duplicatePo.id).toBe(poId);
     });
 
-    test('Approves Purchase Order', () => {
-      const approved = PurchaseOrderService.approvePurchaseOrder({
+    test('Approves Purchase Order', async () => {
+      const approved = (await PurchaseOrderService.approvePurchaseOrder({
         poId,
         organizationId: orgId,
         approvedBy: 'user-manager-1',
         userRole: 'STORE_MANAGER',
-      });
+      }));
       expect(approved.status).toBe('APPROVED');
     });
 
-    test('Amends Purchase Order and generates version snapshot in purchase_order_versions', () => {
-      const amended = PurchaseOrderService.amendPurchaseOrder({
+    test('Amends Purchase Order and generates version snapshot in purchase_order_versions', async () => {
+      const amended = (await PurchaseOrderService.amendPurchaseOrder({
         poId,
         organizationId: orgId,
         amendedBy: 'user-buyer-1',
@@ -441,28 +445,28 @@ describe('Enterprise Procurement & Supplier Intelligence Engine', () => {
             gstRate: 12.0,
           },
         ],
-      });
+      }));
 
       expect(amended.version).toBe(2);
       expect(amended.versions?.length).toBe(2);
       expect(amended.versions?.[1].change_reason).toContain('Increased Paracetamol quantity');
 
       // Re-approve amended PO
-      PurchaseOrderService.approvePurchaseOrder({
+      (await PurchaseOrderService.approvePurchaseOrder({
         poId,
         organizationId: orgId,
         approvedBy: 'user-manager-1',
         userRole: 'STORE_MANAGER',
-      });
+      }));
     });
 
-    test('Records Supplier Confirmation', () => {
-      const confirmed = PurchaseOrderService.recordSupplierConfirmation({
+    test('Records Supplier Confirmation', async () => {
+      const confirmed = (await PurchaseOrderService.recordSupplierConfirmation({
         poId,
         organizationId: orgId,
         expectedDeliveryDate: new Date().toISOString().slice(0, 10),
         notes: 'Confirmed by sales rep via WhatsApp',
-      });
+      }));
       expect(confirmed.status).toBe('CONFIRMED');
     });
   });
@@ -474,11 +478,11 @@ describe('Enterprise Procurement & Supplier Intelligence Engine', () => {
     let grnId: string;
     let targetPo: any;
 
-    test('Creates GRN with batch segregation, free quantity and damage capture', () => {
-      const poRows = PurchaseOrderService.listPurchaseOrders({ organizationId: orgId });
+    test('Creates GRN with batch segregation, free quantity and damage capture', async () => {
+      const poRows = (await PurchaseOrderService.listPurchaseOrders({ organizationId: orgId }));
       targetPo = poRows.data[0];
 
-      const grn = GoodsReceiptService.createGoodsReceipt({
+      const grn = (await GoodsReceiptService.createGoodsReceipt({
         organizationId: orgId,
         storeId,
         supplierId: supplierAlphaId,
@@ -513,7 +517,7 @@ describe('Enterprise Procurement & Supplier Intelligence Engine', () => {
             mrpPaise: 4000,
           },
         ],
-      });
+      }));
 
       grnId = grn.id;
       expect(grn.grn_number).toContain('/GRN/');
@@ -526,12 +530,12 @@ describe('Enterprise Procurement & Supplier Intelligence Engine', () => {
       expect(it1?.effective_cost_paise).toBe(6897);
     });
 
-    test('Posts GRN: commits batches, updates inventory positions, and writes stock ledger', () => {
-      const posted = GoodsReceiptService.postGoodsReceipt({
+    test('Posts GRN: commits batches, updates inventory positions, and writes stock ledger', async () => {
+      const posted = (await GoodsReceiptService.postGoodsReceipt({
         grnId,
         organizationId: orgId,
         postedBy: 'user-pharmacist-receiving',
-      });
+      }));
 
       expect(posted.status).toBe('POSTED');
 
@@ -546,13 +550,13 @@ describe('Enterprise Procurement & Supplier Intelligence Engine', () => {
       expect(batchA.cost_price_paise).toBe(6897); // Blended weighted purchase cost
 
       // Verify Multi-State Inventory Position for Medicine A
-      const posA = InventoryPositionService.getOrCreatePosition({
+      const posA = (await InventoryPositionService.getOrCreatePosition({
         organizationId: orgId,
         medicineId: medicineAId,
         batchId: batchA.id,
         locationType: 'STORE',
         storeId,
-      });
+      }));
 
       expect(posA.quantity_on_hand).toBe(60); // 58 accepted + 2 damaged on hand
       expect(posA.quantity_available).toBe(58); // Available for POS sale
@@ -569,16 +573,16 @@ describe('Enterprise Procurement & Supplier Intelligence Engine', () => {
       expect(ledgerRows[0].quantity_delta).toBe(58);
 
       // Verify PO received quantity updated
-      const updatedPo = PurchaseOrderService.getPoById(targetPo.id, orgId);
+      const updatedPo = (await PurchaseOrderService.getPoById(targetPo.id, orgId));
       expect(updatedPo?.items?.[0].received_quantity).toBe(50);
       expect(updatedPo?.status).toBe('RECEIVED');
     });
 
-    test('Flags GRN receipt with short shelf-life into REVIEW status', () => {
+    test('Flags GRN receipt with short shelf-life into REVIEW status', async () => {
       // Short expiry date: 1 month from now (< 180 days policy)
       const shortExpDate = new Date(Date.now() + 86400000 * 30).toISOString().slice(0, 10);
 
-      const reviewGrn = GoodsReceiptService.createGoodsReceipt({
+      const reviewGrn = (await GoodsReceiptService.createGoodsReceipt({
         organizationId: orgId,
         storeId,
         supplierId: supplierAlphaId,
@@ -592,7 +596,7 @@ describe('Enterprise Procurement & Supplier Intelligence Engine', () => {
             purchaseRatePaise: 8000,
           },
         ],
-      });
+      }));
 
       expect(reviewGrn.status).toBe('REVIEW');
     });
@@ -605,10 +609,10 @@ describe('Enterprise Procurement & Supplier Intelligence Engine', () => {
     let invoiceId: string;
     let invoiceNumber = 'INV-ALPHA-' + Date.now();
 
-    test('Performs 3-way matching and creates purchase invoice liability WITHOUT double-adding stock', () => {
-      const poRows = PurchaseOrderService.listPurchaseOrders({ organizationId: orgId });
+    test('Performs 3-way matching and creates purchase invoice liability WITHOUT double-adding stock', async () => {
+      const poRows = (await PurchaseOrderService.listPurchaseOrders({ organizationId: orgId }));
       const targetPo = poRows.data[0];
-      const grnRows = GoodsReceiptService.listGoodsReceipts({ organizationId: orgId, poId: targetPo.id });
+      const grnRows = (await GoodsReceiptService.listGoodsReceipts({ organizationId: orgId, poId: targetPo.id }));
       const targetGrn = grnRows.data[0];
 
       // Capture stock before invoice posting
@@ -618,7 +622,7 @@ describe('Enterprise Procurement & Supplier Intelligence Engine', () => {
       const stockCountBefore = batchBefore?.quantity_remaining || 0;
 
       // 1. Create Purchase Invoice matching PO & GRN
-      const invoice = PurchaseInvoiceService.createInvoice({
+      const invoice = (await PurchaseInvoiceService.createInvoice({
         organizationId: orgId,
         storeId,
         supplierId: supplierAlphaId,
@@ -648,18 +652,18 @@ describe('Enterprise Procurement & Supplier Intelligence Engine', () => {
             gstRate: 12.0,
           },
         ],
-      });
+      }));
 
       invoiceId = invoice.id;
       expect(invoice.match_status).toBe('MATCHED');
       expect(invoice.status).toBe('MATCHED');
 
       // 2. Post Invoice to create supplier liability
-      const postedInvoice = PurchaseInvoiceService.postInvoice({
+      const postedInvoice = (await PurchaseInvoiceService.postInvoice({
         invoiceId,
         organizationId: orgId,
         postedBy: 'user-accountant-1',
-      });
+      }));
 
       expect(postedInvoice.status).toBe('POSTED');
 
@@ -677,9 +681,9 @@ describe('Enterprise Procurement & Supplier Intelligence Engine', () => {
       expect(batchAfter.quantity_remaining).toBe(stockCountBefore);
     });
 
-    test('Rejects duplicate supplier invoice number', () => {
-      expect(() => {
-        PurchaseInvoiceService.createInvoice({
+    test('Rejects duplicate supplier invoice number', async () => {
+      await expect((async () => {
+        (await PurchaseInvoiceService.createInvoice({
           organizationId: orgId,
           storeId,
           supplierId: supplierAlphaId,
@@ -693,15 +697,15 @@ describe('Enterprise Procurement & Supplier Intelligence Engine', () => {
               purchaseRatePaise: 8000,
             },
           ],
-        });
-      }).toThrow(/Duplicate Supplier Invoice/);
+        }));
+      })()).rejects.toThrow(/Duplicate Supplier Invoice/);
     });
 
-    test('Flags price mismatch exceeding variance tolerance', () => {
-      const poRows = PurchaseOrderService.listPurchaseOrders({ organizationId: orgId });
+    test('Flags price mismatch exceeding variance tolerance', async () => {
+      const poRows = (await PurchaseOrderService.listPurchaseOrders({ organizationId: orgId }));
       const targetPo = poRows.data[0];
 
-      const mismatchInv = PurchaseInvoiceService.createInvoice({
+      const mismatchInv = (await PurchaseInvoiceService.createInvoice({
         organizationId: orgId,
         storeId,
         supplierId: supplierAlphaId,
@@ -717,29 +721,29 @@ describe('Enterprise Procurement & Supplier Intelligence Engine', () => {
             purchaseRatePaise: 9500, // ₹95 vs PO ₹80 (18.75% price hike, exceeds 3% tolerance)
           },
         ],
-      });
+      }));
 
       expect(mismatchInv.match_status).toBe('PRICE_VARIANCE');
 
       // Cannot post mismatched invoice without supervisor override
-      expect(() => {
-        PurchaseInvoiceService.postInvoice({
+      await expect((async () => {
+        (await PurchaseInvoiceService.postInvoice({
           invoiceId: mismatchInv.id,
           organizationId: orgId,
           postedBy: 'user-accountant-1',
-        });
-      }).toThrow(/Cannot post invoice with unmatched variance/);
+        }));
+      })()).rejects.toThrow(/Cannot post invoice with unmatched variance/);
 
       // Supervisor approves variance exception
-      ThreeWayMatchingService.approveMatchException({
+      (await ThreeWayMatchingService.approveMatchException({
         matchResultId: mismatchInv.match_result!.id,
         organizationId: orgId,
         approvedBy: 'user-owner-1',
         userRole: 'OWNER',
         reason: 'Authorized manufacturer price revision pass-through',
-      });
+      }));
 
-      const updated = PurchaseInvoiceService.getInvoiceById(mismatchInv.id, orgId);
+      const updated = (await PurchaseInvoiceService.getInvoiceById(mismatchInv.id, orgId));
       expect(updated?.match_status).toBe('MATCHED');
     });
   });
@@ -748,8 +752,8 @@ describe('Enterprise Procurement & Supplier Intelligence Engine', () => {
   // SECTION 7: SUPPLIER PAYABLES & MULTI-INVOICE FIFO PAYMENTS
   // -------------------------------------------------------------------------
   describe('7. Supplier Payable Ledger, FIFO Payment Allocation & Ageing', () => {
-    test('Records supplier payment and performs multi-invoice FIFO allocation', () => {
-      const payRes = SupplierPayableService.recordPayment({
+    test('Records supplier payment and performs multi-invoice FIFO allocation', async () => {
+      const payRes = (await SupplierPayableService.recordPayment({
         organizationId: orgId,
         storeId,
         supplierId: supplierAlphaId,
@@ -759,26 +763,26 @@ describe('Enterprise Procurement & Supplier Intelligence Engine', () => {
         amountPaise: 400000, // Partial payment of ₹4,000 (400,000 paise)
         notes: 'Partial payment against open invoices',
         recordedBy: 'user-cashier-1',
-      });
+      }));
 
       expect(payRes.payment_number).toContain('/PAY/');
       expect((payRes as any).allocations?.length).toBeGreaterThanOrEqual(1);
 
       // Verify running ledger statement
-      const statement = SupplierPayableService.getLedgerStatement({
+      const statement = (await SupplierPayableService.getLedgerStatement({
         organizationId: orgId,
         supplierId: supplierAlphaId,
-      });
+      }));
 
       expect(statement.data.length).toBeGreaterThanOrEqual(2);
       expect(statement.total).toBeGreaterThanOrEqual(2);
     });
 
-    test('Computes 5-bucket supplier overdue ageing breakdown', () => {
-      const ageing = SupplierPayableService.getSupplierAgeing({
+    test('Computes 5-bucket supplier overdue ageing breakdown', async () => {
+      const ageing = (await SupplierPayableService.getSupplierAgeing({
         organizationId: orgId,
         supplierId: supplierAlphaId,
-      });
+      }));
 
       expect(ageing.length).toBeGreaterThanOrEqual(1);
       expect(ageing[0].supplierName).toBe('Alpha Pharma Distributors');
@@ -790,14 +794,14 @@ describe('Enterprise Procurement & Supplier Intelligence Engine', () => {
   // SECTION 8: PURCHASE RETURNS & DEBIT NOTES
   // -------------------------------------------------------------------------
   describe('8. Purchase Returns, Batch Reduction & Statutory Debit Notes', () => {
-    test('Executes Purchase Return against batch, reduces stock, and issues Debit Note', () => {
+    test('Executes Purchase Return against batch, reduces stock, and issues Debit Note', async () => {
       const batchA: any = localDb
         .prepare(`SELECT * FROM medicine_batches WHERE batch_number = 'AMX-B901' AND organization_id = ?`)
         .get(orgId);
 
       const stockBefore = batchA?.quantity_remaining || 58; // 58 units
 
-      const returnDoc = PurchaseReturnService.createPurchaseReturn({
+      const returnDoc = (await PurchaseReturnService.createPurchaseReturn({
         organizationId: orgId,
         storeId,
         supplierId: supplierAlphaId,
@@ -813,7 +817,7 @@ describe('Enterprise Procurement & Supplier Intelligence Engine', () => {
             gstRate: 12.0,
           },
         ],
-      });
+      }));
 
       expect(returnDoc.return_number).toContain('/PRET/');
       expect(returnDoc.status).toBe('POSTED');
@@ -832,10 +836,10 @@ describe('Enterprise Procurement & Supplier Intelligence Engine', () => {
       expect(retLedger.quantity_delta).toBe(-8);
 
       // 3. Verify Debit Note generated
-      const debitNotes = PurchaseReturnService.listDebitNotes({
+      const debitNotes = (await PurchaseReturnService.listDebitNotes({
         organizationId: orgId,
         supplierId: supplierAlphaId,
-      });
+      }));
       expect(debitNotes.length).toBeGreaterThanOrEqual(1);
       expect(debitNotes[0].debit_note_number).toContain('/DN/');
 
@@ -847,13 +851,13 @@ describe('Enterprise Procurement & Supplier Intelligence Engine', () => {
       expect(ledgerDN.debit_paise).toBe(returnDoc.lines?.[0]?.total_paise);
     });
 
-    test('Prevents Purchase Return exceeding available batch stock', () => {
+    test('Prevents Purchase Return exceeding available batch stock', async () => {
       const batchA: any = localDb
         .prepare(`SELECT * FROM medicine_batches WHERE batch_number = 'AMX-B901' AND organization_id = ?`)
         .get(orgId);
 
-      expect(() => {
-        PurchaseReturnService.createPurchaseReturn({
+      await expect((async () => {
+        (await PurchaseReturnService.createPurchaseReturn({
           organizationId: orgId,
           storeId,
           supplierId: supplierAlphaId,
@@ -866,8 +870,8 @@ describe('Enterprise Procurement & Supplier Intelligence Engine', () => {
               quantity: 9999, // Exceeds stock
             },
           ],
-        });
-      }).toThrow(/Insufficient stock for batch/);
+        }));
+      })()).rejects.toThrow(/Insufficient stock for batch/);
     });
   });
 
@@ -875,8 +879,8 @@ describe('Enterprise Procurement & Supplier Intelligence Engine', () => {
   // SECTION 9: SUPPLIER INTELLIGENCE & SCORECARD
   // -------------------------------------------------------------------------
   describe('9. Supplier Intelligence Scorecards & Procurement Dashboard', () => {
-    test('Calculates comprehensive supplier scorecard and rating grade', () => {
-      const scorecard = SupplierIntelligenceService.getSupplierScorecard(orgId, supplierAlphaId);
+    test('Calculates comprehensive supplier scorecard and rating grade', async () => {
+      const scorecard = (await SupplierIntelligenceService.getSupplierScorecard(orgId, supplierAlphaId));
 
       expect(scorecard.supplierName).toBe('Alpha Pharma Distributors');
       expect(scorecard.totalOrders).toBeGreaterThanOrEqual(1);
@@ -888,8 +892,8 @@ describe('Enterprise Procurement & Supplier Intelligence Engine', () => {
       expect(['A+', 'A', 'B', 'C', 'D']).toContain(scorecard.ratingGrade);
     });
 
-    test('Aggregates Procurement Command Center Dashboard Summary KPIs', () => {
-      const summary = SupplierIntelligenceService.getDashboardSummary(orgId, storeId);
+    test('Aggregates Procurement Command Center Dashboard Summary KPIs', async () => {
+      const summary = (await SupplierIntelligenceService.getDashboardSummary(orgId, storeId));
 
       expect(summary).toBeDefined();
       expect(typeof summary.openRequisitionsCount).toBe('number');

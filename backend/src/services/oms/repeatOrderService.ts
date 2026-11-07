@@ -1,5 +1,5 @@
 // repeatOrderService.ts — One-Tap Repeat Order Evaluation Engine
-import { localDb } from '../../local-db';
+import { businessDb as localDb } from '../../lib/businessDb';
 import { InventoryAvailabilityService } from '../inventory/inventoryAvailabilityService';
 import { AppError } from '../../lib/appError';
 
@@ -36,11 +36,11 @@ export class RepeatOrderService {
   /**
    * Evaluate a previous sale or order for repeat ordering
    */
-  static evaluateRepeatOrder(params: {
+  static async evaluateRepeatOrder(params: {
     sourceId: string;
     organizationId: string;
     storeId?: string | null;
-  }): RepeatOrderEvaluationResult {
+  }): Promise<RepeatOrderEvaluationResult> {
     const { sourceId, organizationId, storeId = null } = params;
 
     let customerId = '';
@@ -53,16 +53,16 @@ export class RepeatOrderService {
     let sourceType: 'SALE' | 'ORDER' = 'SALE';
 
     // Check if sourceId matches a previous Sale
-    const saleRow: any = localDb
+    const saleRow: any = (await localDb
       .prepare('SELECT * FROM sales WHERE (id = ? OR _local_id = ?) AND organization_id = ?')
-      .get(sourceId, sourceId, organizationId);
+      .get(sourceId, sourceId, organizationId));
 
     if (saleRow) {
       sourceType = 'SALE';
       customerId = saleRow.customer_id || '';
-      const saleItems: any[] = localDb
+      const saleItems: any[] = (await localDb
         .prepare('SELECT * FROM sale_items WHERE sale_id = ?')
-        .all(saleRow.id || saleRow._local_id);
+        .all(saleRow.id || saleRow._local_id));
 
       historicalLines = saleItems.map(si => ({
         medicineId: si.medicine_id,
@@ -72,9 +72,9 @@ export class RepeatOrderService {
       }));
     } else {
       // Check if sourceId matches a previous Order
-      const orderRow: any = localDb
+      const orderRow: any = (await localDb
         .prepare('SELECT * FROM orders WHERE (id = ? OR _local_id = ?) AND organization_id = ?')
-        .get(sourceId, sourceId, organizationId);
+        .get(sourceId, sourceId, organizationId));
 
       if (!orderRow) {
         throw new AppError(404, 'Source historical sale or order not found', 'SOURCE_NOT_FOUND');
@@ -82,9 +82,9 @@ export class RepeatOrderService {
 
       sourceType = 'ORDER';
       customerId = orderRow.customer_id;
-      const orderItems: any[] = localDb
+      const orderItems: any[] = (await localDb
         .prepare('SELECT * FROM order_items WHERE order_id = ? AND _deleted = 0')
-        .all(orderRow.id || orderRow._local_id);
+        .all(orderRow.id || orderRow._local_id));
 
       historicalLines = orderItems.map(oi => ({
         medicineId: oi.medicine_id,
@@ -98,9 +98,9 @@ export class RepeatOrderService {
     let availableCount = 0;
 
     for (const hl of historicalLines) {
-      const medRow: any = localDb
+      const medRow: any = (await localDb
         .prepare('SELECT * FROM medicines WHERE (id = ? OR _local_id = ?) AND organization_id = ? AND _deleted = 0')
-        .get(hl.medicineId, hl.medicineId, organizationId);
+        .get(hl.medicineId, hl.medicineId, organizationId));
 
       if (!medRow || medRow.discontinued_at || medRow.is_active === 0) {
         items.push({
@@ -123,12 +123,12 @@ export class RepeatOrderService {
       const priceChanged = Math.abs(currentPrice - hl.historicalPrice) > 0.01;
 
       // Check current stock availability
-      const avail = InventoryAvailabilityService.getAvailability({
+      const avail = (await InventoryAvailabilityService.getAvailability({
         organizationId,
         medicineId: hl.medicineId,
         locationType: 'STORE',
         storeId,
-      });
+      }));
 
       const isStockAvailable = avail.totalAvailable >= hl.quantity;
       const isRxRequired = Boolean(medRow.prescription_required);
@@ -136,7 +136,7 @@ export class RepeatOrderService {
       // Check prescription validity if Rx required
       let isRxValid = false;
       if (isRxRequired && customerId) {
-        const rxRow: any = localDb
+        const rxRow: any = (await localDb
           .prepare(
             `SELECT p.id, p.verification_status, p.valid_until 
              FROM prescriptions p 
@@ -145,7 +145,7 @@ export class RepeatOrderService {
                AND p.verification_status = 'VERIFIED' AND p._deleted = 0
              ORDER BY p.created_at DESC LIMIT 1`
           )
-          .get(customerId, hl.medicineId, medRow.name);
+          .get(customerId, hl.medicineId, medRow.name));
 
         if (rxRow) {
           const isNotExpired = !rxRow.valid_until || new Date(rxRow.valid_until) >= new Date();

@@ -1,7 +1,19 @@
-import { localDb } from '../local-db';
+import { createHash } from 'node:crypto';
+import { queryRaw } from '../lib/postgresDb';
+import { businessDb as localDb, cloudBusinessMode } from '../lib/businessDb';
 import { localMutate } from '../lib/localMutate';
 import { v4 as uuidv4 } from 'uuid';
 import { AppError } from '../lib/appError';
+
+function decodeSnapshot(row: Record<string, any>) {
+  const parse = (value: unknown) => typeof value === 'string' ? JSON.parse(value) : value;
+  return {
+    ...row,
+    cart_snapshot: parse(row.cart_snapshot),
+    customer_snapshot: parse(row.customer_snapshot),
+    totals_snapshot: parse(row.totals_snapshot),
+  };
+}
 
 export interface ParkSaleParams {
   organizationId: string;
@@ -15,20 +27,22 @@ export interface ParkSaleParams {
   totalsSnapshot?: any;
   notes?: string;
   expiresInMinutes?: number;
+  requestId?: string;
+  resumeId?: string;
 }
 
 export class ParkedSalesService {
   /**
    * Generates next sequential park token for store (e.g., P101, P102)
    */
-  private static generateToken(storeId: string): string {
+  private static async generateToken(storeId: string): Promise<string> {
     const todayStr = new Date().toISOString().split('T')[0];
-    const countRow: any = localDb
+    const countRow: any = (await localDb
       .prepare(
         `SELECT COUNT(*) as cnt FROM parked_sales 
          WHERE store_id = ? AND created_at >= ?`
       )
-      .get(storeId, todayStr);
+      .get(storeId, todayStr));
 
     const seq = (countRow?.cnt || 0) + 1;
     return `P${String(seq).padStart(3, '0')}`;
@@ -37,7 +51,7 @@ export class ParkedSalesService {
   /**
    * Parks an active transaction
    */
-  static parkSale(params: ParkSaleParams) {
+  static async parkSale(params: ParkSaleParams) {
     const {
       organizationId,
       storeId,
@@ -50,14 +64,39 @@ export class ParkedSalesService {
       totalsSnapshot = {},
       notes = '',
       expiresInMinutes = 1440, // 24 hours
+      requestId, resumeId,
     } = params;
 
+    const expiresAt = new Date(Date.now() + expiresInMinutes * 60 * 1000).toISOString();
+    const fingerprint = createHash('sha256').update(JSON.stringify({customerId, cartSnapshot, customerSnapshot, totalsSnapshot, notes, resumeId})).digest('hex');
+    if (cloudBusinessMode()) {
+      await queryRaw('SELECT pg_advisory_xact_lock(hashtextextended(?, 0))', [`park:${storeId}`]);
+      if (requestId) {
+        const [previous] = await queryRaw('SELECT p.*, r.request_hash AS request_hash, r.actor_id AS request_actor FROM counter_park_receipts r JOIN parked_sales p ON p.id = r.parked_sale_id WHERE r.store_id = ? AND r.request_id = ?', [storeId, requestId]);
+        if (previous) {
+          if (previous.request_hash !== fingerprint || previous.request_actor !== cashierId) {
+            throw new AppError(409, 'This park request was already used.');
+          }
+          return decodeSnapshot(previous);
+        }
+      }
+      if (resumeId) {
+        const draft = await this.requireClaim(resumeId, storeId, cashierId);
+        const [updated] = await queryRaw(
+          `UPDATE parked_sales SET cart_snapshot = ?::text::jsonb, customer_snapshot = ?::text::jsonb,
+            totals_snapshot = ?::text::jsonb, customer_id = ?, notes = ?, status = 'PARKED', expires_at = ?,
+            updated_at = now() WHERE id = ? RETURNING *`,
+          [JSON.stringify(cartSnapshot), JSON.stringify(customerSnapshot), JSON.stringify(totalsSnapshot),
+           customerId, notes, expiresAt, draft.id],
+        );
+        await this.rememberRequest(storeId, requestId, fingerprint, cashierId, draft.id);
+        return decodeSnapshot(updated);
+      }
+    }
     const id = uuidv4();
-    const token = this.generateToken(storeId);
-    const now = new Date();
-    const expiresAt = new Date(now.getTime() + expiresInMinutes * 60 * 1000).toISOString();
+    const token = (await this.generateToken(storeId));
 
-    const record = localMutate({
+    const record = (await localMutate({
       table: 'parked_sales',
       operation: 'INSERT',
       data: {
@@ -70,17 +109,18 @@ export class ParkedSalesService {
         cashier_id: cashierId,
         customer_id: customerId,
         park_token: token,
-        cart_snapshot: typeof cartSnapshot === 'string' ? cartSnapshot : JSON.stringify(cartSnapshot),
-        customer_snapshot: typeof customerSnapshot === 'string' ? customerSnapshot : JSON.stringify(customerSnapshot),
-        totals_snapshot: typeof totalsSnapshot === 'string' ? totalsSnapshot : JSON.stringify(totalsSnapshot),
+        cart_snapshot: cloudBusinessMode() ? cartSnapshot : typeof cartSnapshot === 'string' ? cartSnapshot : JSON.stringify(cartSnapshot),
+        customer_snapshot: cloudBusinessMode() ? customerSnapshot : typeof customerSnapshot === 'string' ? customerSnapshot : JSON.stringify(customerSnapshot),
+        totals_snapshot: cloudBusinessMode() ? totalsSnapshot : typeof totalsSnapshot === 'string' ? totalsSnapshot : JSON.stringify(totalsSnapshot),
         notes,
         status: 'PARKED',
         expires_at: expiresAt,
       },
-    });
+    }));
 
+    if (cloudBusinessMode()) await this.rememberRequest(storeId, requestId, fingerprint, cashierId, id);
     return {
-      ...record,
+      ...(cloudBusinessMode() ? decodeSnapshot(record) : record),
       park_token: token,
       expires_at: expiresAt,
     };
@@ -89,15 +129,29 @@ export class ParkedSalesService {
   /**
    * Lists active parked sales for a store
    */
-  static listParked(storeId: string) {
+  static async listParked(storeId: string, cashierId?: string, search?: string) {
+    if (cloudBusinessMode()) {
+      const needle = search?.trim() ?? '';
+      const rows = await queryRaw(
+        `SELECT p.*, u.full_name AS cashier_name FROM parked_sales p LEFT JOIN users u ON u.id = p.cashier_id
+         WHERE p.store_id = ? AND p.deleted_at IS NULL AND p.expires_at > now()
+           AND (p.status = 'PARKED' OR (p.status = 'RESUMED' AND p.resumed_by = ?::uuid))
+           AND (? = '' OR strpos(lower(p.park_token), lower(?)) > 0
+             OR strpos(lower(COALESCE(p.customer_snapshot->>'name', p.customer_snapshot::text, '')), lower(?)) > 0
+             OR strpos(lower(COALESCE(p.notes, '')), lower(?)) > 0)
+         ORDER BY p.created_at DESC LIMIT 100`,
+        [storeId, cashierId ?? null, needle, needle, needle, needle],
+      );
+      return rows.map(decodeSnapshot);
+    }
     const nowIso = new Date().toISOString();
-    const rows: any[] = localDb
+    const rows: any[] = (await localDb
       .prepare(
         `SELECT * FROM parked_sales 
          WHERE store_id = ? AND status = 'PARKED' AND expires_at > ? AND _deleted = 0
          ORDER BY created_at DESC`
       )
-      .all(storeId, nowIso);
+      .all(storeId, nowIso));
 
     return rows.map(r => ({
       ...r,
@@ -110,7 +164,7 @@ export class ParkedSalesService {
   /**
    * Resumes a parked sale (supports cross-counter recall in the same store)
    */
-  static resumeParked(params: {
+  static async resumeParked(params: {
     parkedId: string;
     storeId: string;
     resumingCounterId?: string | null;
@@ -119,9 +173,26 @@ export class ParkedSalesService {
   }) {
     const { parkedId, storeId, resumingCounterId = null, resumingTerminalId = null, resumingUserId } = params;
 
-    const row: any = localDb
+    if (cloudBusinessMode()) {
+      const [row] = await queryRaw(
+        `SELECT * FROM parked_sales WHERE (id::text = ? OR _local_id = ? OR park_token = ?)
+         AND store_id = ? AND deleted_at IS NULL AND expires_at > now()
+         ORDER BY created_at DESC LIMIT 1 FOR UPDATE`, [parkedId, parkedId, parkedId, storeId],
+      );
+      if (!row) throw new AppError(404, 'Parked bill not found in this store.');
+      if (row.status === 'RESUMED' && row.resumed_by === resumingUserId) return decodeSnapshot(row);
+      if (row.status !== 'PARKED') throw new AppError(409, 'This bill is already claimed or completed.');
+      const [claimed] = await queryRaw(
+        `UPDATE parked_sales SET status = 'RESUMED', resumed_at = now(), resumed_by = ?,
+          resumed_counter_id = ?, resumed_terminal_id = ?, updated_at = now() WHERE id = ? RETURNING *`,
+        [resumingUserId, resumingCounterId, resumingTerminalId, row.id],
+      );
+      return { ...decodeSnapshot(claimed), original_counter_id: row.counter_id, original_cashier_id: row.cashier_id };
+    }
+
+    const row: any = (await localDb
       .prepare('SELECT * FROM parked_sales WHERE (id = ? OR _local_id = ? OR park_token = ?) AND store_id = ? AND _deleted = 0')
-      .get(parkedId, parkedId, parkedId, storeId);
+      .get(parkedId, parkedId, parkedId, storeId));
 
     if (!row) {
       throw new AppError(404, `Parked bill not found in this store: ${parkedId}`, 'PARKED_BILL_NOT_FOUND');
@@ -133,19 +204,19 @@ export class ParkedSalesService {
 
     const nowIso = new Date().toISOString();
     if (row.expires_at && row.expires_at < nowIso) {
-      localMutate({
+      (await localMutate({
         table: 'parked_sales',
         operation: 'UPDATE',
         data: {
           _local_id: row._local_id || row.id,
           status: 'EXPIRED',
         },
-      });
+      }));
       throw new AppError(400, 'Parked bill has expired', 'PARKED_BILL_EXPIRED');
     }
 
     // Mark as resumed
-    localMutate({
+    (await localMutate({
       table: 'parked_sales',
       operation: 'UPDATE',
       data: {
@@ -156,7 +227,7 @@ export class ParkedSalesService {
         resumed_terminal_id: resumingTerminalId,
         resumed_by: resumingUserId,
       },
-    });
+    }));
 
     return {
       id: row.id || row._local_id,
@@ -172,22 +243,59 @@ export class ParkedSalesService {
   /**
    * Cancels a parked sale
    */
-  static cancelParked(parkedId: string, storeId: string) {
-    const row: any = localDb
+  static async cancelParked(parkedId: string, storeId: string, cashierId?: string, owner = false) {
+    if (cloudBusinessMode()) {
+      const [row] = await queryRaw(
+        'SELECT * FROM parked_sales WHERE id = ? AND store_id = ? AND deleted_at IS NULL FOR UPDATE',
+        [parkedId, storeId],
+      );
+      if (!row) throw new AppError(404, 'Parked bill not found.');
+      const actorId = row.status === 'RESUMED' ? row.resumed_by : row.cashier_id;
+      if (!owner && actorId !== cashierId && row.cancelled_by !== cashierId) throw new AppError(403, 'Only the assigned cashier or an owner can cancel this draft.');
+      if (row.status === 'CANCELLED') return { success: true };
+      if (!['PARKED', 'RESUMED'].includes(row.status)) throw new AppError(409, 'This draft is no longer active.');
+      await queryRaw("UPDATE parked_sales SET status = 'CANCELLED', cancelled_at = now(), cancelled_by = ?, updated_at = now() WHERE id = ?", [cashierId, row.id]);
+      return { success: true };
+    }
+    const row: any = (await localDb
       .prepare('SELECT * FROM parked_sales WHERE (id = ? OR _local_id = ?) AND store_id = ?')
-      .get(parkedId, parkedId, storeId);
+      .get(parkedId, parkedId, storeId));
 
     if (!row) throw new AppError(404, 'Parked bill not found', 'PARKED_BILL_NOT_FOUND');
 
-    localMutate({
+    (await localMutate({
       table: 'parked_sales',
       operation: 'UPDATE',
       data: {
         _local_id: row._local_id || row.id,
         status: 'CANCELLED',
       },
-    });
+    }));
 
     return { success: true };
   }
+  private static async rememberRequest(storeId: string, requestId: string | undefined, fingerprint: string, cashierId: string, parkedId: string) {
+    if (!requestId) return;
+    await queryRaw(
+      'INSERT INTO counter_park_receipts (store_id, request_id, parked_sale_id, actor_id, request_hash) VALUES (?, ?, ?, ?, ?)',
+      [storeId, requestId, parkedId, cashierId, fingerprint],
+    );
+  }
+
+  static async requireClaim(parkedId: string, storeId: string, cashierId: string) {
+    const [row] = await queryRaw(
+      `SELECT * FROM parked_sales WHERE id = ? AND store_id = ? AND resumed_by = ? AND status = 'RESUMED'
+        AND deleted_at IS NULL AND expires_at > now() FOR UPDATE`, [parkedId, storeId, cashierId],
+    );
+    if (!row) throw new AppError(409, 'Resume this parked bill before completing it.', 'PARKED_BILL_NOT_CLAIMED');
+    return row;
+  }
+
+  static async completeClaim(parkedId: string, saleId: string) {
+    await queryRaw(
+      "UPDATE parked_sales SET status = 'COMPLETED', completed_sale_id = ?, updated_at = now() WHERE id = ?",
+      [saleId, parkedId],
+    );
+  }
+
 }

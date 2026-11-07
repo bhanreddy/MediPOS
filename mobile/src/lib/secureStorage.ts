@@ -82,6 +82,10 @@ export const SecureStorage = {
     await enqueue(async () => {
       if (expected !== revision)
         throw new Error('Session changed before login completed.');
+      // Remove the old account profile before committing a new login. A crash
+      // between token persistence and setUser must never restore that profile.
+      user = null;
+      await SecureStore.deleteItemAsync(KEYS.USER);
       // One write keeps rotating access/refresh tokens together across app restarts.
       if (rememberSession) await SecureStore.setItemAsync(KEYS.SESSION, JSON.stringify(pair));
       if (expected !== revision)

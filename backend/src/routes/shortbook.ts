@@ -65,7 +65,7 @@ shortbookRouter.post('/order-drafts/:id/cancel', requireAuth, requireRole('OWNER
 shortbookRouter.get('/consolidated', requireAuth, async (req, res, next) => {
   try {
     const clinicId = req.user!.clinic_id;
-    const data = ShortbookV2Service.getConsolidatedShortbook(clinicId);
+    const data = (await ShortbookV2Service.getConsolidatedShortbook(clinicId));
     res.json({ data });
   } catch (err) {
     next(err);

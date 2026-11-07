@@ -4,14 +4,15 @@ import { createApp } from './app';
 import { printServerReady } from './lib/consoleStyle';
 import sql from './db';
 import { runPendingMigrations } from './lib/runMigrations';
+import { verifyCheckpointCutover } from './services/checkpointCutover';
 import { logger } from './lib/logger';
 
 // Default 5001: macOS often binds 5000 to AirPlay Receiver, which returns 403 to random HTTP and blocks the API.
 const PORT = process.env.X_ZOHO_CATALYST_LISTEN_PORT || process.env.PORT || 5001;
 
 async function start() {
-  if (process.env.X_ZOHO_CATALYST_LISTEN_PORT && process.env.DURABLE_RUNTIME !== 'postgres') {
-    throw new Error('Catalyst requires DURABLE_RUNTIME=postgres to protect embedded workflow data');
+  if (process.env.X_ZOHO_CATALYST_LISTEN_PORT && !process.env.DATABASE_URL) {
+    throw new Error('Catalyst requires PostgreSQL for cloud business data');
   }
   let ready = false;
   const app = createApp();
@@ -23,6 +24,7 @@ async function start() {
   const server = gateway.listen(PORT, () => printServerReady(Number(PORT)));
   try {
     await runPendingMigrations();
+    await verifyCheckpointCutover();
   } catch (err) {
     logger.error('Startup migrations failed', { err });
     server.close();

@@ -1,4 +1,5 @@
-import { localDb } from '../../local-db';
+import { forEachAsync } from '../../lib/businessDb';
+import { businessDb as localDb } from '../../lib/businessDb';
 import { localMutate } from '../../lib/localMutate';
 import {
   Prescription,
@@ -13,7 +14,7 @@ import { v4 as uuidv4 } from 'uuid';
 import { AppError } from '../../lib/appError';
 
 export class PrescriptionService {
-  static createPrescription(params: {
+  static async createPrescription(params: {
     organizationId: string;
     storeId?: string | null;
     patientId?: string | null;
@@ -22,6 +23,8 @@ export class PrescriptionService {
     doctorId?: string | null;
     doctorName: string;
     doctorRegistrationNumber: string;
+    doctorAddress?: string;
+    writtenDate?: string;
     prescribedAt?: string;
     validFrom?: string;
     validUntil?: string | null;
@@ -47,7 +50,7 @@ export class PrescriptionService {
       substitution_allowed?: boolean;
       notes?: string | null;
     }>;
-  }): { prescription: Prescription; isDuplicateHashWarning: boolean } {
+  }): Promise<{ prescription: Prescription; isDuplicateHashWarning: boolean }> {
     const {
       organizationId,
       storeId = null,
@@ -56,6 +59,7 @@ export class PrescriptionService {
       doctorId = null,
       doctorName,
       doctorRegistrationNumber,
+      doctorAddress, writtenDate,
       prescribedAt = new Date().toISOString(),
       validFrom = new Date().toISOString(),
       validUntil = null,
@@ -70,9 +74,9 @@ export class PrescriptionService {
     // Check for duplicate document hash
     let isDuplicateHashWarning = false;
     if (documentHash) {
-      const existingHash: any = localDb
+      const existingHash: any = (await localDb
         .prepare('SELECT id FROM prescriptions WHERE organization_id = ? AND document_hash = ? AND _deleted = 0')
-        .get(organizationId, documentHash);
+        .get(organizationId, documentHash));
       if (existingHash) {
         isDuplicateHashWarning = true;
       }
@@ -81,18 +85,18 @@ export class PrescriptionService {
     // Auto-resolve or register Doctor Master record while preserving snapshots
     let resolvedDoctorId: string | null = doctorId || null;
     if (!resolvedDoctorId && doctorRegistrationNumber) {
-      const doc = DoctorService.findOrCreateByRegistration({
+      const doc = (await DoctorService.findOrCreateByRegistration({
         organizationId,
         name: doctorName,
         registrationNumber: doctorRegistrationNumber,
-      });
+      }));
       resolvedDoctorId = doc.id || doc._local_id || null;
     }
 
     const prescriptionId = uuidv4();
     const rxNumber = params.prescriptionNumber || `RX-${Date.now().toString().slice(-8)}`;
 
-    const rxRecord = localMutate({
+    const rxRecord = (await localMutate({
       table: 'prescriptions',
       operation: 'INSERT',
       data: {
@@ -106,6 +110,7 @@ export class PrescriptionService {
         doctor_id: resolvedDoctorId || null,
         doctor_name_snapshot: doctorName.trim(),
         doctor_registration_number_snapshot: doctorRegistrationNumber.trim().toUpperCase(),
+        ...(process.env.DATABASE_URL ? { doctor_address_snapshot: doctorAddress, written_date: writtenDate } : {}),
         prescribed_at: prescribedAt,
         valid_from: validFrom,
         valid_until: validUntil,
@@ -118,16 +123,16 @@ export class PrescriptionService {
         created_by: createdBy,
         created_at: new Date().toISOString(),
       },
-    }) as Prescription;
+    })) as Prescription;
 
     // Insert Prescription Items
     const insertedItems: PrescriptionItem[] = [];
-    items.forEach((item, index) => {
+    (await forEachAsync(items, async (item, index) => {
       const itemId = uuidv4();
       const seq = item.sequence || index + 1;
       const matchStatus = item.matched_product_id ? 'AUTO_MATCHED' : 'UNMATCHED';
 
-      const itemRecord = localMutate({
+      const itemRecord = (await localMutate({
         table: 'prescription_items',
         operation: 'INSERT',
         data: {
@@ -154,10 +159,10 @@ export class PrescriptionService {
           match_status: matchStatus,
           created_at: new Date().toISOString(),
         },
-      }) as PrescriptionItem;
+      })) as PrescriptionItem;
 
       insertedItems.push(itemRecord);
-    });
+    }));
 
     rxRecord.items = insertedItems;
 
@@ -167,22 +172,22 @@ export class PrescriptionService {
     };
   }
 
-  static getPrescriptionById(id: string): Prescription | null {
-    const rx: any = localDb
+  static async getPrescriptionById(id: string): Promise<Prescription | null> {
+    const rx: any = (await localDb
       .prepare('SELECT * FROM prescriptions WHERE (id = ? OR _local_id = ?) AND _deleted = 0')
-      .get(id, id);
+      .get(id, id));
 
     if (!rx) return null;
 
-    const items: any[] = localDb
+    const items: any[] = (await localDb
       .prepare('SELECT * FROM prescription_items WHERE prescription_id = ? AND _deleted = 0 ORDER BY sequence ASC')
-      .all(rx.id || rx._local_id);
+      .all(rx.id || rx._local_id));
 
     rx.items = items;
     return rx as Prescription;
   }
 
-  static getQueue(params: {
+  static async getQueue(params: {
     organizationId: string;
     storeId?: string;
     status?: PrescriptionStatus;
@@ -190,7 +195,7 @@ export class PrescriptionService {
     patientId?: string;
     page?: number;
     limit?: number;
-  }): { prescriptions: Prescription[]; total: number; page: number; totalPages: number } {
+  }): Promise<{ prescriptions: Prescription[]; total: number; page: number; totalPages: number }> {
     const { organizationId, storeId, status, assignedTo, patientId, page = 1, limit = 20 } = params;
     const offset = (page - 1) * limit;
 
@@ -217,22 +222,22 @@ export class PrescriptionService {
       sqlParams.push(patientId);
     }
 
-    const countRow: any = localDb
+    const countRow: any = (await localDb
       .prepare(`SELECT COUNT(*) as count FROM prescriptions ${whereClause}`)
-      .get(...sqlParams);
+      .get(...sqlParams));
 
     const total = Number(countRow?.count || 0);
     const totalPages = Math.ceil(total / limit) || 1;
 
     const query = `SELECT * FROM prescriptions ${whereClause} ORDER BY created_at DESC LIMIT ? OFFSET ?`;
-    const rows: any[] = localDb.prepare(query).all(...sqlParams, limit, offset);
+    const rows: any[] = (await localDb.prepare(query).all(...sqlParams, limit, offset));
 
-    rows.forEach((rx) => {
-      const items: any[] = localDb
+    (await forEachAsync(rows, async (rx) => {
+      const items: any[] = (await localDb
         .prepare('SELECT * FROM prescription_items WHERE prescription_id = ? AND _deleted = 0 ORDER BY sequence ASC')
-        .all(rx.id || rx._local_id);
+        .all(rx.id || rx._local_id));
       rx.items = items;
-    });
+    }));
 
     return {
       prescriptions: rows as Prescription[],
@@ -242,14 +247,14 @@ export class PrescriptionService {
     };
   }
 
-  static claimPrescription(params: { prescriptionId: string; pharmacistId: string }): Prescription {
-    const rx = this.getPrescriptionById(params.prescriptionId);
+  static async claimPrescription(params: { prescriptionId: string; pharmacistId: string }): Promise<Prescription> {
+    const rx = (await this.getPrescriptionById(params.prescriptionId));
     if (!rx) {
       throw new Error('Prescription not found');
     }
 
     const pId = rx.id || rx._local_id!;
-    localMutate({
+    (await localMutate({
       table: 'prescriptions',
       operation: 'UPDATE',
       data: {
@@ -259,12 +264,12 @@ export class PrescriptionService {
         assigned_at: new Date().toISOString(),
         verification_status: 'IN_REVIEW',
       },
-    });
+    }));
 
-    return this.getPrescriptionById(pId)!;
+    return (await this.getPrescriptionById(pId))!;
   }
 
-  static verifyPrescription(params: {
+  static async verifyPrescription(params: {
     prescriptionId: string;
     verifiedBy: string;
     itemUpdates?: Array<{
@@ -274,8 +279,8 @@ export class PrescriptionService {
       substitutionAllowed?: boolean;
     }>;
     notes?: string;
-  }): Prescription {
-    const rx = this.getPrescriptionById(params.prescriptionId);
+  }): Promise<Prescription> {
+    const rx = (await this.getPrescriptionById(params.prescriptionId));
     if (!rx) {
       throw new Error('Prescription not found');
     }
@@ -283,21 +288,21 @@ export class PrescriptionService {
     const pId = rx.id || rx._local_id!;
 
     for (const upd of params.itemUpdates || []) {
-      const item = localDb.prepare('SELECT prescription_id FROM prescription_items WHERE (id = ? OR _local_id = ?) AND _deleted = 0').get(upd.itemId, upd.itemId) as { prescription_id: string } | undefined;
+      const item = (await localDb.prepare('SELECT prescription_id FROM prescription_items WHERE (id = ? OR _local_id = ?) AND _deleted = 0').get(upd.itemId, upd.itemId)) as { prescription_id: string } | undefined;
       if (!item || item.prescription_id !== pId) throw new AppError(400, 'Item does not belong to this prescription');
       if (upd.prescribedQuantity !== undefined && (!Number.isInteger(upd.prescribedQuantity) || upd.prescribedQuantity <= 0)) throw new AppError(400, 'Prescribed quantity must be a positive integer');
     }
 
     // Perform item updates if provided
     if (params.itemUpdates && params.itemUpdates.length > 0) {
-      params.itemUpdates.forEach((upd) => {
-        const itemRow: any = localDb
+      (await forEachAsync(params.itemUpdates, async (upd) => {
+        const itemRow: any = (await localDb
           .prepare('SELECT * FROM prescription_items WHERE id = ? OR _local_id = ?')
-          .get(upd.itemId, upd.itemId);
+          .get(upd.itemId, upd.itemId));
 
         if (itemRow) {
           const iId = itemRow.id || itemRow._local_id;
-          localMutate({
+          (await localMutate({
             table: 'prescription_items',
             operation: 'UPDATE',
             data: {
@@ -308,13 +313,13 @@ export class PrescriptionService {
               substitution_allowed: upd.substitutionAllowed !== undefined ? (upd.substitutionAllowed ? 1 : 0) : itemRow.substitution_allowed,
               match_status: upd.matchedProductId ? 'VERIFIED' : itemRow.match_status,
             },
-          });
+          }));
         }
-      });
+      }));
     }
 
     const verifiedAt = new Date().toISOString();
-    localMutate({
+    (await localMutate({
       table: 'prescriptions',
       operation: 'UPDATE',
       data: {
@@ -326,24 +331,24 @@ export class PrescriptionService {
         verified_at: verifiedAt,
         notes: params.notes || rx.notes,
       },
-    });
+    }));
 
-    return this.getPrescriptionById(pId)!;
+    return (await this.getPrescriptionById(pId))!;
   }
 
-  static rejectPrescription(params: {
+  static async rejectPrescription(params: {
     prescriptionId: string;
     rejectedBy: string;
     rejectionReason: RejectionReason | string;
     notes?: string;
-  }): Prescription {
-    const rx = this.getPrescriptionById(params.prescriptionId);
+  }): Promise<Prescription> {
+    const rx = (await this.getPrescriptionById(params.prescriptionId));
     if (!rx) {
       throw new Error('Prescription not found');
     }
 
     const pId = rx.id || rx._local_id!;
-    localMutate({
+    (await localMutate({
       table: 'prescriptions',
       operation: 'UPDATE',
       data: {
@@ -356,8 +361,8 @@ export class PrescriptionService {
         rejection_reason: params.rejectionReason,
         notes: params.notes || rx.notes,
       },
-    });
+    }));
 
-    return this.getPrescriptionById(pId)!;
+    return (await this.getPrescriptionById(pId))!;
   }
 }

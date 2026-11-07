@@ -1,34 +1,37 @@
 import { useCallback, useEffect, useState } from 'react';
 import { apiClient } from '@/api/client';
 import { store } from '@/utils/storage';
+import { useAuthStore } from '@/stores/authStore';
 
-const UPI_STORAGE_KEY = 'upi_vpa';
 
 /** Merchant UPI VPA from clinic profile (`/clinics/me`), cached in MMKV. */
 export function useUpiId() {
-  const [upiId, setUpiId] = useState('');
+  const user = useAuthStore(state => state.user);
+  const scope = user?.id && user.clinicId ? `${user.id}:${user.clinicId}` : '';
+  const storageKey = `upi_vpa:${scope}`;
+  const [saved, setSaved] = useState({ scope: '', value: '' });
   const [isLoading, setIsLoading] = useState(true);
 
   const applyUpi = useCallback((id: string) => {
-    setUpiId(id);
-    if (id) store.set(UPI_STORAGE_KEY, id);
-    else store.delete(UPI_STORAGE_KEY);
-  }, []);
+    const current = useAuthStore.getState().user;
+    if (!scope || scope !== `${current?.id}:${current?.clinicId}`) return;
+    setSaved({ scope, value: id });
+    if (id) store.set(storageKey, id);
+    else store.delete(storageKey);
+  }, [scope, storageKey]);
 
   const loadUpi = useCallback(async () => {
     try {
       const res = await apiClient.get('/clinics/me');
       const vpa = String(res.data?.data?.upi_vpa ?? '').trim();
-      if (vpa) {
-        applyUpi(vpa);
-        return;
-      }
+      applyUpi(vpa);
+      return;
     } catch {
       /* use cache */
     }
-    const cached = store.getString(UPI_STORAGE_KEY);
-    if (cached) applyUpi(cached);
-  }, [applyUpi]);
+    const cached = scope ? store.getString(storageKey) : undefined;
+    applyUpi(cached || '');
+  }, [applyUpi, scope, storageKey]);
 
   useEffect(() => {
     let mounted = true;
@@ -40,5 +43,5 @@ export function useUpiId() {
     };
   }, [loadUpi]);
 
-  return { upiId, isLoading, reloadUpiId: loadUpi };
+  return { upiId: saved.scope === scope ? saved.value : '', isLoading, reloadUpiId: loadUpi };
 }

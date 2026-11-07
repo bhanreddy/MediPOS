@@ -53,5 +53,5 @@ export const baseMedicineSchema = z.object({
   _local_id: z.string().optional(),
 });
 
-export const createMedicineSchema = baseMedicineSchema.transform(({ clinic_id, ...rest }) => rest);
-export const updateMedicineSchema = baseMedicineSchema.partial().transform(({ clinic_id, ...rest }) => rest);
+export const createMedicineSchema = baseMedicineSchema.transform(({ clinic_id, organization_id, ...rest }) => rest);
+export const updateMedicineSchema = baseMedicineSchema.partial().transform(({ clinic_id, organization_id, ...rest }) => rest);

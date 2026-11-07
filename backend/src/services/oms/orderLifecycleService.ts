@@ -1,5 +1,6 @@
+import { tenantRecord } from '../../lib/tenantRecords';
 // orderLifecycleService.ts — Core Order Lifecycle & Orchestration Service
-import { localDb } from '../../local-db';
+import { businessDb as localDb } from '../../lib/businessDb';
 import { localMutate } from '../../lib/localMutate';
 import { v4 as uuidv4 } from 'uuid';
 import { DocumentNumberingService } from '../documentNumbering';
@@ -77,7 +78,7 @@ export class OrderLifecycleService {
   /**
    * Create an unconfirmed Draft order (no inventory reservation)
    */
-  static createDraftOrder(params: CreateOrderParams): { orderId: string; order: Order; items: OrderItem[] } {
+  static async createDraftOrder(params: CreateOrderParams): Promise<{ orderId: string; order: Order; items: OrderItem[] }> {
     const {
       organizationId,
       customerId,
@@ -95,15 +96,23 @@ export class OrderLifecycleService {
       createdBy = 'SYSTEM',
     } = params;
 
-    const customer: any = localDb
-      .prepare('SELECT * FROM customers WHERE id = ? OR _local_id = ?')
-      .get(customerId, customerId);
+    const customer = (await tenantRecord('customers', customerId, organizationId));
 
     if (!customer) {
       throw new AppError(404, `Customer not found: ${customerId}`, 'CUSTOMER_NOT_FOUND');
     }
 
-    const quote = OrderQuoteService.generateQuote({
+    if (patientId) (await tenantRecord('customers', patientId, organizationId));
+    for (const item of items) {
+      if (item.prescription_id) (await tenantRecord('prescriptions', item.prescription_id, organizationId));
+      if (item.prescription_item_id) {
+        const prescriptionItem = (await tenantRecord('prescription_items', item.prescription_item_id, organizationId));
+        if (item.prescription_id && prescriptionItem.prescription_id !== item.prescription_id)
+          throw new AppError(404, 'Prescription item not found', 'PRESCRIPTION_ITEM_NOT_FOUND');
+      }
+    }
+
+    const quote = (await OrderQuoteService.generateQuote({
       organizationId,
       storeId: requestedStoreId,
       customerId,
@@ -112,13 +121,13 @@ export class OrderLifecycleService {
       items,
       couponCode,
       redeemLoyaltyCredits,
-    });
+    }));
 
     const orderId = uuidv4();
     const orderNumber = `DRAFT-${Math.random().toString(36).substring(2, 8).toUpperCase()}`;
     const nowIso = new Date().toISOString();
 
-    const orderRecord = localMutate({
+    const orderRecord = (await localMutate({
       table: 'orders',
       operation: 'INSERT',
       data: {
@@ -159,13 +168,13 @@ export class OrderLifecycleService {
         created_at: nowIso,
         updated_at: nowIso,
       },
-    });
+    }));
 
     const insertedItems: OrderItem[] = [];
     for (const qLine of quote.commercialQuote.lines) {
       const origItem = items.find(i => i.medicine_id === qLine.medicineId);
       const itemId = uuidv4();
-      const itemRecord = localMutate({
+      const itemRecord = (await localMutate({
         table: 'order_items',
         operation: 'INSERT',
         data: {
@@ -197,7 +206,7 @@ export class OrderLifecycleService {
           created_at: nowIso,
           updated_at: nowIso,
         },
-      });
+      }));
       insertedItems.push(itemRecord);
     }
 
@@ -207,7 +216,7 @@ export class OrderLifecycleService {
   /**
    * Authoritative Order Confirmation Flow
    */
-  static confirmOrder(params: CreateOrderParams): { orderId: string; orderNumber: string; order: Order; items: OrderItem[] } {
+  static async confirmOrder(params: CreateOrderParams): Promise<{ orderId: string; orderNumber: string; order: Order; items: OrderItem[] }> {
     const {
       organizationId,
       customerId,
@@ -231,14 +240,14 @@ export class OrderLifecycleService {
 
     // 1. Idempotency Guard: If key provided, check for existing order
     if (idempotencyKey) {
-      const existingOrder: any = localDb
+      const existingOrder: any = (await localDb
         .prepare('SELECT * FROM orders WHERE idempotency_key = ? AND organization_id = ?')
-        .get(idempotencyKey, organizationId);
+        .get(idempotencyKey, organizationId));
 
       if (existingOrder) {
-        const existingItems = localDb
+        const existingItems = (await localDb
           .prepare('SELECT * FROM order_items WHERE order_id = ? AND _deleted = 0')
-          .all(existingOrder.id);
+          .all(existingOrder.id));
         return {
           orderId: existingOrder.id,
           orderNumber: existingOrder.order_number,
@@ -249,9 +258,9 @@ export class OrderLifecycleService {
     }
 
     // 2. Validate Customer
-    const customer: any = localDb
+    const customer: any = (await localDb
       .prepare('SELECT * FROM customers WHERE (id = ? OR _local_id = ?) AND organization_id = ?')
-      .get(customerId, customerId, organizationId);
+      .get(customerId, customerId, organizationId));
 
     if (!customer) {
       throw new AppError(404, `Customer not found: ${customerId}`, 'CUSTOMER_NOT_FOUND');
@@ -261,9 +270,9 @@ export class OrderLifecycleService {
     let resolvedAddress: any = null;
     if (fulfilmentType === 'HOME_DELIVERY') {
       if (addressId) {
-        resolvedAddress = CustomerAddressService.getAddressById(addressId, organizationId);
+        resolvedAddress = (await CustomerAddressService.getAddressById(addressId, organizationId));
       } else if (deliveryAddress) {
-        resolvedAddress = CustomerAddressService.saveAddress({
+        resolvedAddress = (await CustomerAddressService.saveAddress({
           organizationId,
           customerId,
           recipientName: deliveryAddress.recipient_name,
@@ -278,7 +287,7 @@ export class OrderLifecycleService {
           latitude: deliveryAddress.latitude,
           longitude: deliveryAddress.longitude,
           deliveryInstructions: deliveryAddress.delivery_instructions,
-        });
+        }));
       }
 
       if (!resolvedAddress) {
@@ -287,7 +296,17 @@ export class OrderLifecycleService {
     }
 
     // 4. Generate Server-Side Authoritative Commercial Quote
-    const quote = OrderQuoteService.generateQuote({
+    if (patientId) (await tenantRecord('customers', patientId, organizationId));
+    for (const item of items) {
+      if (item.prescription_id) (await tenantRecord('prescriptions', item.prescription_id, organizationId));
+      if (item.prescription_item_id) {
+        const prescriptionItem = (await tenantRecord('prescription_items', item.prescription_item_id, organizationId));
+        if (item.prescription_id && prescriptionItem.prescription_id !== item.prescription_id)
+          throw new AppError(404, 'Prescription item not found', 'PRESCRIPTION_ITEM_NOT_FOUND');
+      }
+    }
+
+    const quote = (await OrderQuoteService.generateQuote({
       organizationId,
       storeId: requestedStoreId,
       customerId,
@@ -296,7 +315,7 @@ export class OrderLifecycleService {
       items,
       couponCode,
       redeemLoyaltyCredits,
-    });
+    }));
 
     // 5. Prescription Safety Verification
     let prescriptionStatus: OrderPrescriptionStatus = 'NOT_REQUIRED';
@@ -305,16 +324,16 @@ export class OrderLifecycleService {
 
       // Check if any verified prescription is attached for the items
       for (const it of items) {
-        const medRow: any = localDb
+        const medRow: any = (await localDb
           .prepare('SELECT name, prescription_required FROM medicines WHERE id = ? OR _local_id = ?')
-          .get(it.medicine_id, it.medicine_id);
+          .get(it.medicine_id, it.medicine_id));
 
         if (medRow?.prescription_required) {
           let hasVerifiedRx = false;
           if (it.prescription_id) {
-            const rx: any = localDb
+            const rx: any = (await localDb
               .prepare("SELECT verification_status, status FROM prescriptions WHERE (id = ? OR _local_id = ?) AND _deleted = 0")
-              .get(it.prescription_id, it.prescription_id);
+              .get(it.prescription_id, it.prescription_id));
             if (rx?.verification_status === 'VERIFIED') {
               hasVerifiedRx = true;
             }
@@ -328,7 +347,7 @@ export class OrderLifecycleService {
     }
 
     // 6. Select Best Eligible Fulfilment Location
-    const selectedLocation = FulfilmentEngine.selectBestLocation({
+    const selectedLocation = (await FulfilmentEngine.selectBestLocation({
       organizationId,
       items,
       fulfilmentType,
@@ -338,7 +357,7 @@ export class OrderLifecycleService {
         : null,
       pincode: resolvedAddress?.pincode || null,
       requireSingleStoreFulfilment: true,
-    });
+    }));
 
     const fulfilmentStoreId = selectedLocation.locationId;
 
@@ -346,13 +365,13 @@ export class OrderLifecycleService {
     let confirmedOrder: Order | null = null;
     let confirmedItems: OrderItem[] = [];
 
-    const executeConfirmationTx = localDb.transaction(() => {
+    const executeConfirmationTx = localDb.transaction(async () => {
       const orderId = uuidv4();
-      const orderNumber = DocumentNumberingService.generate({
+      const orderNumber = (await DocumentNumberingService.generate({
         organizationId,
         storeId: fulfilmentStoreId,
         documentType: 'ORDER',
-      });
+      }));
 
       const nowIso = new Date().toISOString();
 
@@ -370,7 +389,7 @@ export class OrderLifecycleService {
         prescriptionStatus === 'PENDING_REVIEW' ? 'PRESCRIPTION_PENDING' : 'CONFIRMED';
 
       // Insert Order Record
-      const orderRecord = localMutate({
+      const orderRecord = (await localMutate({
         table: 'orders',
         operation: 'INSERT',
         data: {
@@ -416,12 +435,12 @@ export class OrderLifecycleService {
           created_at: nowIso,
           updated_at: nowIso,
         },
-      });
+      }));
 
       // Insert Address Snapshot if Home Delivery
       if (resolvedAddress) {
         const snapId = uuidv4();
-        localMutate({
+        (await localMutate({
           table: 'order_address_snapshots',
           operation: 'INSERT',
           data: {
@@ -445,11 +464,11 @@ export class OrderLifecycleService {
             delivery_instructions: resolvedAddress.delivery_instructions || null,
             created_at: nowIso,
           },
-        });
+        }));
       }
 
       // Save Commercial Snapshot
-      OrderQuoteService.saveCommercialSnapshot(orderId, organizationId, quote);
+      (await OrderQuoteService.saveCommercialSnapshot(orderId, organizationId, quote));
 
       // Insert Order Items
       const orderItemsToReserve: Array<{ orderItemId: string; medicineId: string; baseQuantity: number }> = [];
@@ -457,7 +476,7 @@ export class OrderLifecycleService {
       for (const qLine of quote.commercialQuote.lines) {
         const origItem = items.find(i => i.medicine_id === qLine.medicineId);
         const itemId = uuidv4();
-        const itemRecord = localMutate({
+        const itemRecord = (await localMutate({
           table: 'order_items',
           operation: 'INSERT',
           data: {
@@ -489,7 +508,7 @@ export class OrderLifecycleService {
             created_at: nowIso,
             updated_at: nowIso,
           },
-        });
+        }));
         confirmedItems.push(itemRecord);
         orderItemsToReserve.push({
           orderItemId: itemId,
@@ -500,7 +519,7 @@ export class OrderLifecycleService {
 
       // Create Fulfilment Group Header
       const fulfilmentId = uuidv4();
-      localMutate({
+      (await localMutate({
         table: 'order_fulfilments',
         operation: 'INSERT',
         data: {
@@ -518,22 +537,22 @@ export class OrderLifecycleService {
           created_at: nowIso,
           updated_at: nowIso,
         },
-      });
+      }));
 
       // Lock FEFO Inventory Reservations (unless blocked on prescription review)
       if (prescriptionStatus !== 'PENDING_REVIEW') {
-        const allocations = OrderReservationService.reserveOrderStock({
+        const allocations = (await OrderReservationService.reserveOrderStock({
           orderId,
           organizationId,
           storeId: fulfilmentStoreId,
           items: orderItemsToReserve,
           createdBy,
-        });
+        }));
 
         // Insert Order Fulfilment Items
         for (const alloc of allocations) {
           const fiId = uuidv4();
-          localMutate({
+          (await localMutate({
             table: 'order_fulfilment_items',
             operation: 'INSERT',
             data: {
@@ -553,24 +572,24 @@ export class OrderLifecycleService {
               created_at: nowIso,
               updated_at: nowIso,
             },
-          });
+          }));
         }
 
         // Update items to RESERVED
-        localDb
+        (await localDb
           .prepare("UPDATE order_items SET status = 'RESERVED', updated_at = ?, _updated_at = ? WHERE order_id = ?")
-          .run(nowIso, nowIso, orderId);
+          .run(nowIso, nowIso, orderId));
 
-        localDb
+        (await localDb
           .prepare("UPDATE orders SET status = 'INVENTORY_RESERVED', fulfilment_status = 'RESERVED', updated_at = ?, _updated_at = ? WHERE id = ?")
-          .run(nowIso, nowIso, orderId);
+          .run(nowIso, nowIso, orderId));
       }
 
       // Record Prepaid Payment if provided
       if (prepaidPayment) {
         const pTxId = uuidv4();
         const amtPaise = Math.round(Number(prepaidPayment.amount || quote.grandTotal) * 100);
-        localMutate({
+        (await localMutate({
           table: 'payment_transactions',
           operation: 'INSERT',
           data: {
@@ -588,11 +607,11 @@ export class OrderLifecycleService {
             status: 'COMPLETED',
             created_at: nowIso,
           },
-        });
+        }));
       }
 
       // Log Confirmation Event
-      OrderEventService.logEvent({
+      (await OrderEventService.logEvent({
         orderId,
         fulfilmentId,
         organizationId,
@@ -608,12 +627,12 @@ export class OrderLifecycleService {
           isPrepaid: Boolean(prepaidPayment),
         },
         notes: `Order #${orderNumber} confirmed at ${selectedLocation.locationName}`,
-      });
+      }));
 
-      confirmedOrder = localDb.prepare('SELECT * FROM orders WHERE id = ?').get(orderId) as any;
+      confirmedOrder = (await localDb.prepare('SELECT * FROM orders WHERE id = ?').get(orderId)) as any;
     });
 
-    executeConfirmationTx();
+    (await executeConfirmationTx());
 
     return {
       orderId: confirmedOrder!.id,
@@ -626,17 +645,17 @@ export class OrderLifecycleService {
   /**
    * Cancel an order and safely release/refund
    */
-  static cancelOrder(params: {
+  static async cancelOrder(params: {
     orderId: string;
     organizationId: string;
     reason?: OrderCancellationReason | string;
     cancelledByUserId: string;
-  }): { success: boolean; order: Order } {
+  }): Promise<{ success: boolean; order: Order }> {
     const { orderId, organizationId, reason = 'CUSTOMER_REQUEST', cancelledByUserId } = params;
 
-    const order: any = localDb
+    const order: any = (await localDb
       .prepare('SELECT * FROM orders WHERE (id = ? OR _local_id = ?) AND organization_id = ?')
-      .get(orderId, orderId, organizationId);
+      .get(orderId, orderId, organizationId));
 
     if (!order) {
       throw new AppError(404, 'Order not found', 'ORDER_NOT_FOUND');
@@ -649,18 +668,18 @@ export class OrderLifecycleService {
 
     const nowIso = new Date().toISOString();
 
-    const cancelTx = localDb.transaction(() => {
+    const cancelTx = localDb.transaction(async () => {
       // 1. Release all active inventory reservations
-      OrderReservationService.releaseOrderReservations(order.id, organizationId);
+      (await OrderReservationService.releaseOrderReservations(order.id, organizationId));
 
       // 2. If prepaid, create refund record
       if (order.payment_status === 'PAID' || order.payment_status === 'PARTIALLY_PAID') {
-        const paymentTx: any = localDb
+        const paymentTx: any = (await localDb
           .prepare("SELECT * FROM payment_transactions WHERE order_id = ? AND status = 'COMPLETED'")
-          .get(order.id);
+          .get(order.id));
 
         const refundId = uuidv4();
-        localMutate({
+        (await localMutate({
           table: 'order_refunds',
           operation: 'INSERT',
           data: {
@@ -679,13 +698,13 @@ export class OrderLifecycleService {
             created_at: nowIso,
             updated_at: nowIso,
           },
-        });
+        }));
 
-        localDb
+        (await localDb
           .prepare("UPDATE orders SET payment_status = 'REFUND_PENDING' WHERE id = ?")
-          .run(order.id);
+          .run(order.id));
 
-        OrderEventService.logEvent({
+        (await OrderEventService.logEvent({
           orderId: order.id,
           organizationId,
           eventType: 'REFUND_INITIATED',
@@ -695,11 +714,11 @@ export class OrderLifecycleService {
             reason,
           },
           notes: `Refund of ₹${order.grand_total} initiated for cancelled prepaid order`,
-        });
+        }));
       }
 
       // 3. Mark Order as CANCELLED
-      localMutate({
+      (await localMutate({
         table: 'orders',
         operation: 'UPDATE',
         data: {
@@ -710,17 +729,17 @@ export class OrderLifecycleService {
           cancellation_reason: reason,
           updated_at: nowIso,
         },
-      });
+      }));
 
-      localDb
+      (await localDb
         .prepare("UPDATE order_items SET status = 'CANCELLED', updated_at = ?, _updated_at = ? WHERE order_id = ?")
-        .run(nowIso, nowIso, order.id);
+        .run(nowIso, nowIso, order.id));
 
-      localDb
+      (await localDb
         .prepare("UPDATE order_fulfilments SET status = 'CANCELLED', cancelled_at = ?, cancellation_reason = ?, updated_at = ?, _updated_at = ? WHERE order_id = ?")
-        .run(nowIso, reason, nowIso, nowIso, order.id);
+        .run(nowIso, reason, nowIso, nowIso, order.id));
 
-      OrderEventService.logEvent({
+      (await OrderEventService.logEvent({
         orderId: order.id,
         organizationId,
         eventType: 'CANCELLED',
@@ -729,30 +748,30 @@ export class OrderLifecycleService {
         actorId: cancelledByUserId,
         details: { reason },
         notes: `Order cancelled. Reason: ${reason}`,
-      });
+      }));
     });
 
-    cancelTx();
+    (await cancelTx());
 
-    const updated = localDb.prepare('SELECT * FROM orders WHERE id = ?').get(order.id);
+    const updated = (await localDb.prepare('SELECT * FROM orders WHERE id = ?').get(order.id));
     return { success: true, order: updated as any as Order };
   }
 
   /**
    * Reassign fulfilment store
    */
-  static reassignFulfilmentStore(params: {
+  static async reassignFulfilmentStore(params: {
     orderId: string;
     organizationId: string;
     targetStoreId: string;
     reassignedByUserId: string;
     reason?: string;
-  }): { success: boolean; order: Order } {
+  }): Promise<{ success: boolean; order: Order }> {
     const { orderId, organizationId, targetStoreId, reassignedByUserId, reason = 'MANUAL_REASSIGNMENT' } = params;
 
-    const order: any = localDb
+    const order: any = (await localDb
       .prepare('SELECT * FROM orders WHERE (id = ? OR _local_id = ?) AND organization_id = ?')
-      .get(orderId, orderId, organizationId);
+      .get(orderId, orderId, organizationId));
 
     if (!order) throw new AppError(404, 'Order not found', 'ORDER_NOT_FOUND');
 
@@ -760,25 +779,25 @@ export class OrderLifecycleService {
       throw new AppError(400, `Cannot reassign order in status '${order.status}'`, 'CANNOT_REASSIGN_ORDER');
     }
 
-    const targetStore: any = localDb
+    const targetStore: any = (await localDb
       .prepare('SELECT * FROM stores WHERE (id = ? OR _local_id = ?) AND organization_id = ?')
-      .get(targetStoreId, targetStoreId, organizationId);
+      .get(targetStoreId, targetStoreId, organizationId));
 
     if (!targetStore) throw new AppError(404, 'Target store not found', 'STORE_NOT_FOUND');
 
     const nowIso = new Date().toISOString();
 
-    const reassignTx = localDb.transaction(() => {
+    const reassignTx = localDb.transaction(async () => {
       // 1. Release old store reservations
-      OrderReservationService.releaseOrderReservations(order.id, organizationId);
+      (await OrderReservationService.releaseOrderReservations(order.id, organizationId));
 
       // 2. Clear old fulfilment items
-      localDb.prepare('DELETE FROM order_fulfilment_items WHERE order_id = ?').run(order.id);
+      (await localDb.prepare('DELETE FROM order_fulfilment_items WHERE order_id = ?').run(order.id));
 
       // 3. Query items to reserve at new store
-      const items: any[] = localDb
+      const items: any[] = (await localDb
         .prepare("SELECT * FROM order_items WHERE order_id = ? AND _deleted = 0 AND status != 'CANCELLED'")
-        .all(order.id);
+        .all(order.id));
 
       const itemsToReserve = items.map(it => ({
         orderItemId: it.id,
@@ -787,27 +806,27 @@ export class OrderLifecycleService {
       }));
 
       // 4. Reserve stock at new store
-      const newAllocations = OrderReservationService.reserveOrderStock({
+      const newAllocations = (await OrderReservationService.reserveOrderStock({
         orderId: order.id,
         organizationId,
         storeId: targetStore.id,
         items: itemsToReserve,
         createdBy: reassignedByUserId,
-      });
+      }));
 
       // 5. Update fulfilment header and re-insert items
-      const fulfilment: any = localDb
+      const fulfilment: any = (await localDb
         .prepare('SELECT id FROM order_fulfilments WHERE order_id = ?')
-        .get(order.id);
+        .get(order.id));
 
       if (fulfilment) {
-        localDb
+        (await localDb
           .prepare('UPDATE order_fulfilments SET store_id = ?, updated_at = ?, _updated_at = ? WHERE id = ?')
-          .run(targetStore.id, nowIso, nowIso, fulfilment.id);
+          .run(targetStore.id, nowIso, nowIso, fulfilment.id));
 
         for (const alloc of newAllocations) {
           const fiId = uuidv4();
-          localMutate({
+          (await localMutate({
             table: 'order_fulfilment_items',
             operation: 'INSERT',
             data: {
@@ -827,12 +846,12 @@ export class OrderLifecycleService {
               created_at: nowIso,
               updated_at: nowIso,
             },
-          });
+          }));
         }
       }
 
       // 6. Update order header
-      localMutate({
+      (await localMutate({
         table: 'orders',
         operation: 'UPDATE',
         data: {
@@ -840,9 +859,9 @@ export class OrderLifecycleService {
           fulfilment_store_id: targetStore.id,
           updated_at: nowIso,
         },
-      });
+      }));
 
-      OrderEventService.logEvent({
+      (await OrderEventService.logEvent({
         orderId: order.id,
         organizationId,
         eventType: 'FULFILMENT_REASSIGNED',
@@ -854,12 +873,12 @@ export class OrderLifecycleService {
           reason,
         },
         notes: `Fulfilment reassigned to store ${targetStore.name}. Reason: ${reason}`,
-      });
+      }));
     });
 
-    reassignTx();
+    (await reassignTx());
 
-    const updated = localDb.prepare('SELECT * FROM orders WHERE id = ?').get(order.id);
+    const updated = (await localDb.prepare('SELECT * FROM orders WHERE id = ?').get(order.id));
     return { success: true, order: updated as any as Order };
   }
 }

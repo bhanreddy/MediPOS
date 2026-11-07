@@ -1,5 +1,5 @@
 // transferAllocationService.ts — Concurrency-Safe FEFO Batch Allocation & Reservation Engine
-import { localDb } from '../../local-db';
+import { businessDb as localDb, cloudBusinessMode, lockBusinessRows } from '../../lib/businessDb';
 import { localMutate } from '../../lib/localMutate';
 import { v4 as uuidv4 } from 'uuid';
 import { StockTransferBatchAllocation, StockTransfer } from '../../domain/transferTypes';
@@ -11,7 +11,7 @@ export class TransferAllocationService {
   /**
    * Run FEFO batch allocation for an approved transfer at source location
    */
-  static allocateTransfer(params: {
+  static async allocateTransfer(params: {
     transferId: string;
     organizationId: string;
     allocatedBy: string;
@@ -20,15 +20,16 @@ export class TransferAllocationService {
       batchId: string;
       quantity: number;
     }>;
-  }): StockTransferBatchAllocation[] {
+  }): Promise<StockTransferBatchAllocation[]> {
     const { transferId, organizationId, allocatedBy, customAllocations } = params;
 
-    const transfer: any = localDb
+    await lockBusinessRows('stock_transfers',[transferId]);
+    const transfer: any = (await localDb
       .prepare(
         `SELECT * FROM stock_transfers 
          WHERE (id = ? OR _local_id = ?) AND (organization_id = ?) AND _deleted = 0`
       )
-      .get(transferId, transferId, organizationId);
+      .get(transferId, transferId, organizationId));
 
     if (!transfer) {
       throw new Error(`Stock transfer not found: ${transferId}`);
@@ -38,15 +39,15 @@ export class TransferAllocationService {
       throw new Error(`Cannot allocate transfer in status: ${transfer.status}`);
     }
 
-    const policy = TransferPolicyService.getPolicy(organizationId);
+    const policy = (await TransferPolicyService.getPolicy(organizationId));
     const todayStr = new Date().toISOString().split('T')[0];
 
     // Fetch transfer items
-    const items: any[] = localDb
+    const items: any[] = (await localDb
       .prepare(
         `SELECT * FROM stock_transfer_items WHERE transfer_id = ? AND _deleted = 0`
       )
-      .all(transfer.id);
+      .all(transfer.id));
 
     if (items.length === 0) {
       throw new Error('Transfer contains no items to allocate');
@@ -57,8 +58,19 @@ export class TransferAllocationService {
     const sourceWarehouseId = transfer.source_location_type === 'WAREHOUSE' ? transfer.source_location_id : null;
     const isRecallOrQuarantine = transfer.stock_state_transferred === 'RECALLED' || transfer.stock_state_transferred === 'QUARANTINED';
 
+    if (cloudBusinessMode() && sourceStoreId) {
+      const medicineIds = [...new Set(items.map(item=>item.medicine_id))];
+      const placeholders = medicineIds.map(()=>'?').join(',');
+      const stocked = await localDb.prepare(`SELECT id,medicine_id FROM medicine_batches
+        WHERE organization_id=? AND store_id=? AND medicine_id IN (${placeholders})
+          AND deleted_at IS NULL AND is_disposed=false AND quantity_remaining>0 ORDER BY id FOR UPDATE`)
+        .all(organizationId,sourceStoreId,...medicineIds);
+      for (const batch of stocked) await InventoryPositionService.getOrCreatePosition({
+        organizationId,medicineId:batch.medicine_id,batchId:batch.id,locationType:'STORE',storeId:sourceStoreId,
+      });
+    }
     // Clear previous draft allocations and release previous reservations
-    this.releaseTransferAllocations(transfer.id, organizationId);
+    (await this.releaseTransferAllocations(transfer.id, organizationId));
 
     for (const item of items) {
       const requiredQty = Number(item.base_quantity_requested || item.requested_quantity);
@@ -67,12 +79,12 @@ export class TransferAllocationService {
       if (customAllocations && customAllocations.length > 0) {
         const itemCustoms = customAllocations.filter((ca) => ca.itemId === item.id || ca.itemId === item._local_id);
         for (const ca of itemCustoms) {
-          const batch: any = localDb
+          const batch: any = (await localDb
             .prepare(
               `SELECT * FROM medicine_batches 
                WHERE (id = ? OR _local_id = ?) AND (medicine_id = ? OR medicine_id = ?) AND _deleted = 0`
             )
-            .get(ca.batchId, ca.batchId, item.medicine_id, item.medicine_id);
+            .get(ca.batchId, ca.batchId, item.medicine_id, item.medicine_id));
 
           if (!batch) throw new Error(`Batch not found: ${ca.batchId}`);
 
@@ -82,7 +94,7 @@ export class TransferAllocationService {
           // Reserve at source inventory position
           let resId: string | null = null;
           if (!isRecallOrQuarantine) {
-            const res = InventoryReservationService.createReservation({
+            const res = (await InventoryReservationService.createReservation({
               organizationId,
               locationType: transfer.source_location_type,
               storeId: sourceStoreId,
@@ -94,11 +106,11 @@ export class TransferAllocationService {
               sourceId: transfer.id,
               durationMinutes: 1440, // 24 hours
               createdBy: allocatedBy,
-            });
+            }));
             resId = res.id;
           }
 
-          const record = localMutate({
+          const record = (await localMutate({
             table: 'stock_transfer_batch_allocations',
             operation: 'INSERT',
             data: {
@@ -116,7 +128,7 @@ export class TransferAllocationService {
               quantity_allocated: ca.quantity,
               reservation_id: resId,
             },
-          });
+          }));
           allocations.push(record as any);
           allocatedForItem += ca.quantity;
         }
@@ -124,7 +136,7 @@ export class TransferAllocationService {
         // Automatic FEFO Allocation
         let candidateBatches: any[] = [];
         if (transfer.source_location_type === 'STORE') {
-          candidateBatches = localDb
+          candidateBatches = (await localDb
             .prepare(
               `SELECT mb.*, ip.quantity_available, ip.quantity_recalled, ip.quantity_quarantined
                FROM medicine_batches mb
@@ -132,12 +144,12 @@ export class TransferAllocationService {
                WHERE (mb.medicine_id = ? OR mb.medicine_id = ?)
                  AND (ip.store_id = ? OR ip.store_id = ?)
                  AND ip.location_type = 'STORE'
-                 AND mb._deleted = 0
+                 AND mb._deleted = 0 AND (mb.is_disposed = 0 OR mb.is_disposed IS NULL)
                ORDER BY mb.expiry_date ASC`
             )
-            .all(item.medicine_id, item.medicine_id, sourceStoreId, sourceStoreId);
+            .all(item.medicine_id, item.medicine_id, sourceStoreId, sourceStoreId));
         } else {
-          candidateBatches = localDb
+          candidateBatches = (await localDb
             .prepare(
               `SELECT mb.*, ip.quantity_available, ip.quantity_recalled, ip.quantity_quarantined
                FROM medicine_batches mb
@@ -145,10 +157,10 @@ export class TransferAllocationService {
                WHERE (mb.medicine_id = ? OR mb.medicine_id = ?)
                  AND (ip.warehouse_id = ? OR ip.warehouse_id = ?)
                  AND ip.location_type = 'WAREHOUSE'
-                 AND mb._deleted = 0
+                 AND mb._deleted = 0 AND (mb.is_disposed = 0 OR mb.is_disposed IS NULL)
                ORDER BY mb.expiry_date ASC`
             )
-            .all(item.medicine_id, item.medicine_id, sourceWarehouseId, sourceWarehouseId);
+            .all(item.medicine_id, item.medicine_id, sourceWarehouseId, sourceWarehouseId));
         }
 
         let needed = requiredQty;
@@ -180,7 +192,7 @@ export class TransferAllocationService {
           // Reserve at source
           let resId: string | null = null;
           if (transfer.stock_state_transferred === 'AVAILABLE') {
-            const res = InventoryReservationService.createReservation({
+            const res = (await InventoryReservationService.createReservation({
               organizationId,
               locationType: transfer.source_location_type,
               storeId: sourceStoreId,
@@ -192,11 +204,11 @@ export class TransferAllocationService {
               sourceId: transfer.id,
               durationMinutes: 1440,
               createdBy: allocatedBy,
-            });
+            }));
             resId = res.id;
           }
 
-          const record = localMutate({
+          const record = (await localMutate({
             table: 'stock_transfer_batch_allocations',
             operation: 'INSERT',
             data: {
@@ -214,7 +226,7 @@ export class TransferAllocationService {
               quantity_allocated: allocQty,
               reservation_id: resId,
             },
-          });
+          }));
           allocations.push(record as any);
 
           allocatedForItem += allocQty;
@@ -223,28 +235,28 @@ export class TransferAllocationService {
       }
 
       // Update allocated quantity on transfer item
-      localMutate({
+      (await localMutate({
         table: 'stock_transfer_items',
         operation: 'UPDATE',
         data: {
           _local_id: item._local_id || item.id,
           allocated_quantity: allocatedForItem,
         },
-      });
+      }));
     }
 
     // Advance transfer status to READY_TO_PICK
-    localMutate({
+    (await localMutate({
       table: 'stock_transfers',
       operation: 'UPDATE',
       data: {
         _local_id: transfer._local_id || transfer.id,
         status: 'READY_TO_PICK',
       },
-    });
+    }));
 
     // Log event
-    localMutate({
+    (await localMutate({
       table: 'transfer_events',
       operation: 'INSERT',
       data: {
@@ -257,7 +269,7 @@ export class TransferAllocationService {
         performed_by: allocatedBy,
         notes: `Allocated ${allocations.length} batch lots`,
       },
-    });
+    }));
 
     return allocations;
   }
@@ -265,24 +277,24 @@ export class TransferAllocationService {
   /**
    * Release all batch allocations and inventory reservations for a transfer
    */
-  static releaseTransferAllocations(transferId: string, organizationId: string): void {
-    const existingAllocs: any[] = localDb
+  static async releaseTransferAllocations(transferId: string, organizationId: string): Promise<void> {
+    const existingAllocs: any[] = (await localDb
       .prepare(
         `SELECT * FROM stock_transfer_batch_allocations WHERE transfer_id = ? AND _deleted = 0`
       )
-      .all(transferId);
+      .all(transferId));
 
     for (const alloc of existingAllocs) {
       if (alloc.reservation_id) {
         try {
-          InventoryReservationService.releaseReservation(alloc.reservation_id);
+          (await InventoryReservationService.releaseReservation(alloc.reservation_id));
         } catch {
           // Ignore if already released or expired
         }
       }
     }
 
-    localDb.prepare('DELETE FROM stock_transfer_batch_allocations WHERE transfer_id = ?').run(transferId);
-    localDb.prepare('UPDATE stock_transfer_items SET allocated_quantity = 0, picked_quantity = 0 WHERE transfer_id = ?').run(transferId);
+    (await localDb.prepare('DELETE FROM stock_transfer_batch_allocations WHERE transfer_id = ?').run(transferId));
+    (await localDb.prepare('UPDATE stock_transfer_items SET allocated_quantity = 0, picked_quantity = 0 WHERE transfer_id = ?').run(transferId));
   }
 }

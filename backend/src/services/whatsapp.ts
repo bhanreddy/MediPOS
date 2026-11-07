@@ -72,7 +72,7 @@ export async function sendInvoiceWhatsApp(params: {
   clinicName: string;
   invoiceUrl: string;
 }): Promise<boolean> {
-  return sendWhatsAppMessage({
+  return (await sendWhatsAppMessage({
     phoneNumber: params.customerPhone,
     templateName: 'invoice_ready',
     templateParams: [
@@ -82,7 +82,7 @@ export async function sendInvoiceWhatsApp(params: {
       params.clinicName,
       params.invoiceUrl,
     ],
-  });
+  }));
 }
 
 /**
@@ -96,7 +96,7 @@ export async function sendRefillReminderWhatsApp(params: {
   clinicName: string;
   clinicPhone: string;
 }): Promise<boolean> {
-  return sendWhatsAppMessage({
+  return (await sendWhatsAppMessage({
     phoneNumber: params.customerPhone,
     templateName: 'refill_reminder',
     templateParams: [
@@ -105,7 +105,7 @@ export async function sendRefillReminderWhatsApp(params: {
       params.clinicName,
       params.clinicPhone,
     ],
-  });
+  }));
 }
 
 /**
@@ -118,7 +118,7 @@ export async function sendOutstandingReminderWhatsApp(params: {
   outstandingAmount: number;
   clinicName: string;
 }): Promise<boolean> {
-  return sendWhatsAppMessage({
+  return (await sendWhatsAppMessage({
     phoneNumber: params.customerPhone,
     templateName: 'outstanding_reminder',
     templateParams: [
@@ -126,7 +126,7 @@ export async function sendOutstandingReminderWhatsApp(params: {
       params.outstandingAmount.toFixed(2),
       params.clinicName,
     ],
-  });
+  }));
 }
 
 /**
@@ -138,9 +138,9 @@ export async function sendLowStockAlertWhatsApp(params: {
   clinicName: string;
   count: number;
 }): Promise<boolean> {
-  return sendWhatsAppMessage({
+  return (await sendWhatsAppMessage({
     phoneNumber: params.ownerPhone,
     templateName: 'low_stock_alert',
     templateParams: [params.clinicName, params.count.toString()],
-  });
+  }));
 }

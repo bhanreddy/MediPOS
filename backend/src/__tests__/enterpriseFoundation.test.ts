@@ -1,3 +1,4 @@
+import { businessDb } from '../lib/businessDb';
 import { localDb } from '../local-db';
 import { localMutate } from '../lib/localMutate';
 import { Money } from '../lib/money';
@@ -13,7 +14,7 @@ describe('Enterprise Pharmacy Domain & Multi-Store Foundation (Task 1)', () => {
   let testOrgId: string;
   let defaultStoreId: string;
 
-  beforeAll(() => {
+  beforeAll(async () => {
     // Clean up test data first to ensure pristine test state
     localDb.prepare('DELETE FROM clinics WHERE id = ?').run(testClinicId);
     localDb.prepare('DELETE FROM medicines WHERE clinic_id = ?').run(testClinicId);
@@ -44,7 +45,7 @@ describe('Enterprise Pharmacy Domain & Multi-Store Foundation (Task 1)', () => {
       );
 
     // Initial migration setup
-    const res = OrganizationMigrationService.migrateClinic(testClinicId);
+    const res = (await OrganizationMigrationService.migrateClinic(testClinicId));
     testOrgId = res.organizationId;
     defaultStoreId = res.storeId;
   });
@@ -69,8 +70,8 @@ describe('Enterprise Pharmacy Domain & Multi-Store Foundation (Task 1)', () => {
   });
 
   // ── 1. EXISTING TENANT MIGRATION ──────────────────────────────────────────
-  test('1. Existing Tenant Migration: automatically migrates clinic to organization & default store', () => {
-    const res = OrganizationMigrationService.migrateClinic(testClinicId);
+  test('1. Existing Tenant Migration: automatically migrates clinic to organization & default store', async () => {
+    const res = (await OrganizationMigrationService.migrateClinic(testClinicId));
     expect(res.clinicId).toBe(testClinicId);
     expect(res.organizationId).toBeTruthy();
     expect(res.storeId).toBeTruthy();
@@ -87,10 +88,10 @@ describe('Enterprise Pharmacy Domain & Multi-Store Foundation (Task 1)', () => {
   });
 
   // ── 2. ORGANIZATION CREATION ──────────────────────────────────────────────
-  test('2. Organization Creation: explicit org creation with tax, currency and FY configuration', () => {
+  test('2. Organization Creation: explicit org creation with tax, currency and FY configuration', async () => {
     const orgId = uuidv4();
     const orgCode = `ORG-MAX-${Date.now().toString().slice(-4)}`;
-    localMutate({
+    (await localMutate({
       table: 'organizations',
       operation: 'INSERT',
       data: {
@@ -106,7 +107,7 @@ describe('Enterprise Pharmacy Domain & Multi-Store Foundation (Task 1)', () => {
         default_state_code: '07',
         status: 'active',
       },
-    });
+    }));
 
     const row: any = localDb.prepare('SELECT * FROM organizations WHERE id = ?').get(orgId);
     expect(row).toBeDefined();
@@ -125,11 +126,11 @@ describe('Enterprise Pharmacy Domain & Multi-Store Foundation (Task 1)', () => {
   });
 
   // ── 4. MULTIPLE STORES PER ORGANIZATION ───────────────────────────────────
-  test('4. Multiple Stores per Organization: creates branch stores under the same parent organization', () => {
+  test('4. Multiple Stores per Organization: creates branch stores under the same parent organization', async () => {
     const store2Id = uuidv4();
     const store3Id = uuidv4();
 
-    localMutate({
+    (await localMutate({
       table: 'stores',
       operation: 'INSERT',
       data: {
@@ -143,9 +144,9 @@ describe('Enterprise Pharmacy Domain & Multi-Store Foundation (Task 1)', () => {
         state_code: '36',
         status: 'active',
       },
-    });
+    }));
 
-    localMutate({
+    (await localMutate({
       table: 'stores',
       operation: 'INSERT',
       data: {
@@ -159,7 +160,7 @@ describe('Enterprise Pharmacy Domain & Multi-Store Foundation (Task 1)', () => {
         state_code: '36',
         status: 'active',
       },
-    });
+    }));
 
     const stores: any[] = localDb
       .prepare('SELECT * FROM stores WHERE organization_id = ? AND _deleted = 0')
@@ -173,11 +174,11 @@ describe('Enterprise Pharmacy Domain & Multi-Store Foundation (Task 1)', () => {
   });
 
   // ── 5. USER AUTHORIZED FOR ONE STORE ──────────────────────────────────────
-  test('5. User Authorized for One Store: single store cashier permission assignment', () => {
+  test('5. User Authorized for One Store: single store cashier permission assignment', async () => {
     const cashierUserId = uuidv4();
     const banjaraStore: any = localDb.prepare("SELECT id FROM stores WHERE store_code = 'HYD-BANJARA'").get();
 
-    localMutate({
+    (await localMutate({
       table: 'user_store_access',
       operation: 'INSERT',
       data: {
@@ -189,7 +190,7 @@ describe('Enterprise Pharmacy Domain & Multi-Store Foundation (Task 1)', () => {
         is_default: 1,
         is_active: 1,
       },
-    });
+    }));
 
     const accessRows: any[] = localDb
       .prepare('SELECT * FROM user_store_access WHERE user_id = ? AND is_active = 1')
@@ -201,10 +202,10 @@ describe('Enterprise Pharmacy Domain & Multi-Store Foundation (Task 1)', () => {
   });
 
   // ── 6. USER AUTHORIZED FOR ALL STORES ─────────────────────────────────────
-  test('6. User Authorized for All Stores: organization owner / regional manager org-wide access', () => {
+  test('6. User Authorized for All Stores: organization owner / regional manager org-wide access', async () => {
     const regionalManagerId = uuidv4();
 
-    localMutate({
+    (await localMutate({
       table: 'user_organization_access',
       operation: 'INSERT',
       data: {
@@ -214,7 +215,7 @@ describe('Enterprise Pharmacy Domain & Multi-Store Foundation (Task 1)', () => {
         role: 'REGIONAL_MANAGER',
         is_active: 1,
       },
-    });
+    }));
 
     const orgAccess: any = localDb
       .prepare('SELECT * FROM user_organization_access WHERE user_id = ? AND organization_id = ?')
@@ -226,13 +227,13 @@ describe('Enterprise Pharmacy Domain & Multi-Store Foundation (Task 1)', () => {
   });
 
   // ── 7. CROSS-STORE ACCESS REJECTION ───────────────────────────────────────
-  test('7. Cross-Store Access Rejection: prevents a store cashier from accessing other stores', () => {
+  test('7. Cross-Store Access Rejection: prevents a store cashier from accessing other stores', async () => {
     const restrictedCashierId = uuidv4();
     const banjaraStore: any = localDb.prepare("SELECT id FROM stores WHERE store_code = 'HYD-BANJARA'").get();
     const hitechStore: any = localDb.prepare("SELECT id FROM stores WHERE store_code = 'HYD-HITECH'").get();
 
     // Grant access only to Banjara Store
-    localMutate({
+    (await localMutate({
       table: 'user_store_access',
       operation: 'INSERT',
       data: {
@@ -243,7 +244,7 @@ describe('Enterprise Pharmacy Domain & Multi-Store Foundation (Task 1)', () => {
         role: 'CASHIER',
         is_active: 1,
       },
-    });
+    }));
 
     // Verification check for Hitech store
     const unauthorizedAccess: any = localDb
@@ -254,11 +255,11 @@ describe('Enterprise Pharmacy Domain & Multi-Store Foundation (Task 1)', () => {
   });
 
   // ── 8. COUNTER CREATION ───────────────────────────────────────────────────
-  test('8. Counter Creation: creates multiple billing counters in a store', () => {
+  test('8. Counter Creation: creates multiple billing counters in a store', async () => {
     const counter1Id = uuidv4();
     const counter2Id = uuidv4();
 
-    localMutate({
+    (await localMutate({
       table: 'counters',
       operation: 'INSERT',
       data: {
@@ -270,9 +271,9 @@ describe('Enterprise Pharmacy Domain & Multi-Store Foundation (Task 1)', () => {
         name: 'Express Billing Counter',
         status: 'active',
       },
-    });
+    }));
 
-    localMutate({
+    (await localMutate({
       table: 'counters',
       operation: 'INSERT',
       data: {
@@ -284,7 +285,7 @@ describe('Enterprise Pharmacy Domain & Multi-Store Foundation (Task 1)', () => {
         name: '24x7 Night Window',
         status: 'active',
       },
-    });
+    }));
 
     const counters: any[] = localDb
       .prepare('SELECT * FROM counters WHERE store_id = ? AND _deleted = 0')
@@ -296,11 +297,11 @@ describe('Enterprise Pharmacy Domain & Multi-Store Foundation (Task 1)', () => {
   });
 
   // ── 9. TERMINAL REGISTRATION ──────────────────────────────────────────────
-  test('9. Terminal Registration: registers POS terminals with hardware UUID & platform', () => {
+  test('9. Terminal Registration: registers POS terminals with hardware UUID & platform', async () => {
     const terminalId = uuidv4();
     const deviceUuid = 'DEV-POS-MAC-9876';
 
-    localMutate({
+    (await localMutate({
       table: 'terminals',
       operation: 'INSERT',
       data: {
@@ -315,7 +316,7 @@ describe('Enterprise Pharmacy Domain & Multi-Store Foundation (Task 1)', () => {
         app_version: '2.4.0',
         status: 'active',
       },
-    });
+    }));
 
     const terminal: any = localDb.prepare('SELECT * FROM terminals WHERE device_uuid = ?').get(deviceUuid);
     expect(terminal).toBeDefined();
@@ -324,11 +325,11 @@ describe('Enterprise Pharmacy Domain & Multi-Store Foundation (Task 1)', () => {
   });
 
   // ── 10. STORE-AWARE SALE ──────────────────────────────────────────────────
-  test('10. Store-Aware Sale: sale checkout records organization, store, counter, and terminal context', () => {
+  test('10. Store-Aware Sale: sale checkout records organization, store, counter, and terminal context', async () => {
     const medId = uuidv4();
     const batchId = uuidv4();
 
-    localMutate({
+    (await localMutate({
       table: 'medicines',
       operation: 'INSERT',
       data: {
@@ -341,9 +342,9 @@ describe('Enterprise Pharmacy Domain & Multi-Store Foundation (Task 1)', () => {
         gst_rate: 12,
         is_active: 1,
       },
-    });
+    }));
 
-    localMutate({
+    (await localMutate({
       table: 'medicine_batches',
       operation: 'INSERT',
       data: {
@@ -360,27 +361,27 @@ describe('Enterprise Pharmacy Domain & Multi-Store Foundation (Task 1)', () => {
         purchase_price: 40,
         mrp: 80,
       },
-    });
+    }));
 
     // Initialize inventory position
-    InventoryPositionService.getOrCreatePosition({
+    (await InventoryPositionService.getOrCreatePosition({
       organizationId: testOrgId,
       medicineId: medId,
       batchId,
       locationType: 'STORE',
       storeId: defaultStoreId,
       initialStock: 50,
-    });
+    }));
 
     // Execute Store-Aware Sale
-    const invoiceNum = DocumentNumberingService.generate({
+    const invoiceNum = (await DocumentNumberingService.generate({
       organizationId: testOrgId,
       storeId: defaultStoreId,
       documentType: 'SALE_INVOICE',
-    });
+    }));
 
     const saleId = uuidv4();
-    localMutate({
+    (await localMutate({
       table: 'sales',
       operation: 'INSERT',
       data: {
@@ -400,9 +401,9 @@ describe('Enterprise Pharmacy Domain & Multi-Store Foundation (Task 1)', () => {
         payment_mode: 'cash',
         payment_status: 'paid',
       },
-    });
+    }));
 
-    localMutate({
+    (await localMutate({
       table: 'sale_items',
       operation: 'INSERT',
       data: {
@@ -417,20 +418,20 @@ describe('Enterprise Pharmacy Domain & Multi-Store Foundation (Task 1)', () => {
         unit_price: 80,
         total: 160,
       },
-    });
+    }));
 
     // Stock deduction & Ledger insertion
     localDb.prepare('UPDATE medicine_batches SET quantity_remaining = quantity_remaining - 2 WHERE id = ?').run(batchId);
-    InventoryPositionService.adjustStock({
+    (await InventoryPositionService.adjustStock({
       organizationId: testOrgId,
       medicineId: medId,
       batchId,
       locationType: 'STORE',
       storeId: defaultStoreId,
       quantityDelta: -2,
-    });
+    }));
 
-    localMutate({
+    (await localMutate({
       table: 'stock_ledger',
       operation: 'INSERT',
       data: {
@@ -447,7 +448,7 @@ describe('Enterprise Pharmacy Domain & Multi-Store Foundation (Task 1)', () => {
         balance_after: 48,
         reference_id: saleId,
       },
-    });
+    }));
 
     const saleRow: any = localDb.prepare('SELECT * FROM sales WHERE id = ?').get(saleId);
     expect(saleRow.organization_id).toBe(testOrgId);
@@ -459,12 +460,12 @@ describe('Enterprise Pharmacy Domain & Multi-Store Foundation (Task 1)', () => {
   });
 
   // ── 11. STORE-AWARE PURCHASE ──────────────────────────────────────────────
-  test('11. Store-Aware Purchase: inward purchase updates store-specific batch stock & ledger', () => {
+  test('11. Store-Aware Purchase: inward purchase updates store-specific batch stock & ledger', async () => {
     const medId = uuidv4();
     const purchaseId = uuidv4();
     const batchId = uuidv4();
 
-    localMutate({
+    (await localMutate({
       table: 'medicines',
       operation: 'INSERT',
       data: {
@@ -476,9 +477,9 @@ describe('Enterprise Pharmacy Domain & Multi-Store Foundation (Task 1)', () => {
         gst_rate: 12,
         is_active: 1,
       },
-    });
+    }));
 
-    localMutate({
+    (await localMutate({
       table: 'purchases',
       operation: 'INSERT',
       data: {
@@ -492,9 +493,9 @@ describe('Enterprise Pharmacy Domain & Multi-Store Foundation (Task 1)', () => {
         grand_total: 500,
         net_amount: 500,
       },
-    });
+    }));
 
-    localMutate({
+    (await localMutate({
       table: 'medicine_batches',
       operation: 'INSERT',
       data: {
@@ -511,18 +512,18 @@ describe('Enterprise Pharmacy Domain & Multi-Store Foundation (Task 1)', () => {
         purchase_price: 5,
         mrp: 10,
       },
-    });
+    }));
 
-    InventoryPositionService.getOrCreatePosition({
+    (await InventoryPositionService.getOrCreatePosition({
       organizationId: testOrgId,
       medicineId: medId,
       batchId,
       locationType: 'STORE',
       storeId: defaultStoreId,
       initialStock: 100,
-    });
+    }));
 
-    localMutate({
+    (await localMutate({
       table: 'stock_ledger',
       operation: 'INSERT',
       data: {
@@ -537,7 +538,7 @@ describe('Enterprise Pharmacy Domain & Multi-Store Foundation (Task 1)', () => {
         balance_after: 100,
         reference_id: purchaseId,
       },
-    });
+    }));
 
     const purchaseRow: any = localDb.prepare('SELECT * FROM purchases WHERE id = ?').get(purchaseId);
     expect(purchaseRow.store_id).toBe(defaultStoreId);
@@ -547,9 +548,9 @@ describe('Enterprise Pharmacy Domain & Multi-Store Foundation (Task 1)', () => {
   });
 
   // ── 12. STORE-AWARE EXPENSE ───────────────────────────────────────────────
-  test('12. Store-Aware Expense: expense records store, counter, and terminal attribution', () => {
+  test('12. Store-Aware Expense: expense records store, counter, and terminal attribution', async () => {
     const expenseId = uuidv4();
-    localMutate({
+    (await localMutate({
       table: 'expenses',
       operation: 'INSERT',
       data: {
@@ -565,7 +566,7 @@ describe('Enterprise Pharmacy Domain & Multi-Store Foundation (Task 1)', () => {
         description: 'Store Electricity Bill',
         expense_date: '2026-08-09',
       },
-    });
+    }));
 
     const expRow: any = localDb.prepare('SELECT * FROM expenses WHERE id = ?').get(expenseId);
     expect(expRow.organization_id).toBe(testOrgId);
@@ -574,12 +575,12 @@ describe('Enterprise Pharmacy Domain & Multi-Store Foundation (Task 1)', () => {
   });
 
   // ── 13. STOCK LEDGER LOCATION ATTRIBUTION ─────────────────────────────────
-  test('13. Stock Ledger Location Attribution: ledger tracks source, destination, store, and counter info', () => {
+  test('13. Stock Ledger Location Attribution: ledger tracks source, destination, store, and counter info', async () => {
     const ledgerId = uuidv4();
     const medId = uuidv4();
     const batchId = uuidv4();
 
-    localMutate({
+    (await localMutate({
       table: 'stock_ledger',
       operation: 'INSERT',
       data: {
@@ -599,7 +600,7 @@ describe('Enterprise Pharmacy Domain & Multi-Store Foundation (Task 1)', () => {
         destination_location_id: 'store-branch-2',
         reference_id: 'TRF-001',
       },
-    });
+    }));
 
     const ledgerRow: any = localDb.prepare('SELECT * FROM stock_ledger WHERE id = ?').get(ledgerId);
     expect(ledgerRow.movement_type).toBe('TRANSFER_OUT');
@@ -609,30 +610,30 @@ describe('Enterprise Pharmacy Domain & Multi-Store Foundation (Task 1)', () => {
   });
 
   // ── 14. INVENTORY POSITION CREATION ───────────────────────────────────────
-  test('14. Inventory Position Creation: verifies distinct stock tracking across store and warehouse', () => {
+  test('14. Inventory Position Creation: verifies distinct stock tracking across store and warehouse', async () => {
     const medId = uuidv4();
     const batchId = uuidv4();
     const warehouseId = uuidv4();
 
     // Store position
-    InventoryPositionService.getOrCreatePosition({
+    (await InventoryPositionService.getOrCreatePosition({
       organizationId: testOrgId,
       medicineId: medId,
       batchId,
       locationType: 'STORE',
       storeId: defaultStoreId,
       initialStock: 25,
-    });
+    }));
 
     // Warehouse position for same batch
-    InventoryPositionService.getOrCreatePosition({
+    (await InventoryPositionService.getOrCreatePosition({
       organizationId: testOrgId,
       medicineId: medId,
       batchId,
       locationType: 'WAREHOUSE',
       warehouseId,
       initialStock: 500,
-    });
+    }));
 
     const storePos: any = localDb.prepare('SELECT * FROM inventory_positions WHERE batch_id = ? AND store_id = ?').get(batchId, defaultStoreId);
     const whPos: any = localDb.prepare('SELECT * FROM inventory_positions WHERE batch_id = ? AND warehouse_id = ?').get(batchId, warehouseId);
@@ -642,12 +643,12 @@ describe('Enterprise Pharmacy Domain & Multi-Store Foundation (Task 1)', () => {
   });
 
   // ── 15. INVENTORY RECONCILIATION ──────────────────────────────────────────
-  test('15. Inventory Reconciliation: diagnostic reconciliation between ledger, positions, and batch', () => {
+  test('15. Inventory Reconciliation: diagnostic reconciliation between ledger, positions, and batch', async () => {
     const medId = uuidv4();
     const batchId = uuidv4();
 
     // 1. Matched scenario
-    localMutate({
+    (await localMutate({
       table: 'medicine_batches',
       operation: 'INSERT',
       data: {
@@ -664,18 +665,18 @@ describe('Enterprise Pharmacy Domain & Multi-Store Foundation (Task 1)', () => {
         purchase_price: 10,
         mrp: 20,
       },
-    });
+    }));
 
-    InventoryPositionService.getOrCreatePosition({
+    (await InventoryPositionService.getOrCreatePosition({
       organizationId: testOrgId,
       medicineId: medId,
       batchId,
       locationType: 'STORE',
       storeId: defaultStoreId,
       initialStock: 60,
-    });
+    }));
 
-    localMutate({
+    (await localMutate({
       table: 'stock_ledger',
       operation: 'INSERT',
       data: {
@@ -689,32 +690,32 @@ describe('Enterprise Pharmacy Domain & Multi-Store Foundation (Task 1)', () => {
         quantity_delta: 60,
         balance_after: 60,
       },
-    });
+    }));
 
-    const reportMatched = InventoryReconciliationService.reconcileBatch({ batchId, storeId: defaultStoreId });
+    const reportMatched = (await InventoryReconciliationService.reconcileBatch({ batchId, storeId: defaultStoreId }));
     expect(reportMatched.status).toBe('MATCHED');
     expect(reportMatched.discrepancyDelta).toBe(0);
 
     // 2. Mismatch scenario
     localDb.prepare('UPDATE inventory_positions SET quantity_on_hand = 55 WHERE batch_id = ? AND store_id = ?').run(batchId, defaultStoreId);
-    const reportMismatch = InventoryReconciliationService.reconcileBatch({ batchId, storeId: defaultStoreId });
+    const reportMismatch = (await InventoryReconciliationService.reconcileBatch({ batchId, storeId: defaultStoreId }));
     expect(reportMismatch.status).toBe('MISMATCH');
     expect(reportMismatch.discrepancyDelta).toBeGreaterThan(0);
   });
 
   // ── 16. ATOMIC DOCUMENT NUMBERING ─────────────────────────────────────────
-  test('16. Atomic Document Numbering: generates predictable and consecutive sequence numbers', () => {
-    const num1 = DocumentNumberingService.generate({
+  test('16. Atomic Document Numbering: generates predictable and consecutive sequence numbers', async () => {
+    const num1 = (await DocumentNumberingService.generate({
       organizationId: testOrgId,
       storeId: defaultStoreId,
       documentType: 'SALE_INVOICE',
-    });
+    }));
 
-    const num2 = DocumentNumberingService.generate({
+    const num2 = (await DocumentNumberingService.generate({
       organizationId: testOrgId,
       storeId: defaultStoreId,
       documentType: 'SALE_INVOICE',
-    });
+    }));
 
     expect(num1).toBeTruthy();
     expect(num2).toBeTruthy();
@@ -727,13 +728,13 @@ describe('Enterprise Pharmacy Domain & Multi-Store Foundation (Task 1)', () => {
 
   // ── 17. CONCURRENT INVOICE SEQUENCE GENERATION ────────────────────────────
   test('17. Concurrent Invoice Sequence Generation: multiple parallel requests receive distinct sequential numbers', async () => {
-    const promises = Array.from({ length: 25 }, () =>
+    const promises = Array.from({ length: 25 }, async () =>
       Promise.resolve(
-        DocumentNumberingService.generate({
+        (await DocumentNumberingService.generate({
           organizationId: testOrgId,
           storeId: defaultStoreId,
           documentType: 'SALE_INVOICE',
-        })
+        }))
       )
     );
 
@@ -743,12 +744,12 @@ describe('Enterprise Pharmacy Domain & Multi-Store Foundation (Task 1)', () => {
   });
 
   // ── 18. CONCURRENT STOCK DEDUCTION ────────────────────────────────────────
-  test('18. Concurrent Stock Deduction: race condition test (Stock=5, A sells 4, B sells 3 -> exactly one succeeds)', () => {
+  test('18. Concurrent Stock Deduction: race condition test (Stock=5, A sells 4, B sells 3 -> exactly one succeeds)', async () => {
     const medId = uuidv4();
     const batchId = uuidv4();
     const initialStock = 5;
 
-    localMutate({
+    (await localMutate({
       table: 'medicine_batches',
       operation: 'INSERT',
       data: {
@@ -765,33 +766,33 @@ describe('Enterprise Pharmacy Domain & Multi-Store Foundation (Task 1)', () => {
         purchase_price: 10,
         mrp: 20,
       },
-    });
+    }));
 
-    InventoryPositionService.getOrCreatePosition({
+    (await InventoryPositionService.getOrCreatePosition({
       organizationId: testOrgId,
       medicineId: medId,
       batchId,
       locationType: 'STORE',
       storeId: defaultStoreId,
       initialStock,
-    });
+    }));
 
     // Atomic seller helper simulating database row-level condition
     const attemptAtomicSale = (qtyToSell: number) => {
-      return localDb.transaction(() => {
+      return businessDb.transaction(async () => {
         const batch: any = localDb.prepare('SELECT quantity_remaining FROM medicine_batches WHERE id = ?').get(batchId);
         if (!batch || batch.quantity_remaining < qtyToSell) {
           throw new Error(`INSUFFICIENT_STOCK: Available ${batch?.quantity_remaining}, requested ${qtyToSell}`);
         }
         localDb.prepare('UPDATE medicine_batches SET quantity_remaining = quantity_remaining - ? WHERE id = ?').run(qtyToSell, batchId);
-        InventoryPositionService.adjustStock({
+        (await InventoryPositionService.adjustStock({
           organizationId: testOrgId,
           medicineId: medId,
           batchId,
           locationType: 'STORE',
           storeId: defaultStoreId,
           quantityDelta: -qtyToSell,
-        });
+        }));
         return true;
       })();
     };
@@ -801,14 +802,14 @@ describe('Enterprise Pharmacy Domain & Multi-Store Foundation (Task 1)', () => {
 
     // Terminal A attempts 4 units
     try {
-      outcomeA = attemptAtomicSale(4);
+      outcomeA = (await attemptAtomicSale(4));
     } catch {
       outcomeA = false;
     }
 
     // Terminal B attempts 3 units
     try {
-      outcomeB = attemptAtomicSale(3);
+      outcomeB = (await attemptAtomicSale(3));
     } catch {
       outcomeB = false;
     }
@@ -824,11 +825,11 @@ describe('Enterprise Pharmacy Domain & Multi-Store Foundation (Task 1)', () => {
   });
 
   // ── 19. ALTERNATE BARCODE UNIQUENESS ───────────────────────────────────────
-  test('19. Alternate Barcode Uniqueness: supports pack/strip/unit barcodes and prevents duplicates', () => {
+  test('19. Alternate Barcode Uniqueness: supports pack/strip/unit barcodes and prevents duplicates', async () => {
     const medId = uuidv4();
     const barcodeStr = '8901086001234';
 
-    localMutate({
+    (await localMutate({
       table: 'product_barcodes',
       operation: 'INSERT',
       data: {
@@ -841,7 +842,7 @@ describe('Enterprise Pharmacy Domain & Multi-Store Foundation (Task 1)', () => {
         conversion_factor: 10.0,
         is_primary: 1,
       },
-    });
+    }));
 
     const bcRow: any = localDb.prepare('SELECT * FROM product_barcodes WHERE barcode = ? AND organization_id = ?').get(barcodeStr, testOrgId);
     expect(bcRow).toBeDefined();
@@ -854,12 +855,12 @@ describe('Enterprise Pharmacy Domain & Multi-Store Foundation (Task 1)', () => {
   });
 
   // ── 20. OFFLINE SALE RETAINING STORE / TERMINAL CONTEXT ───────────────────
-  test('20. Offline Sale Retaining Store/Terminal Context: offline sync push preserves organization, store, and terminal context with local UUID idempotency', () => {
+  test('20. Offline Sale Retaining Store/Terminal Context: offline sync push preserves organization, store, and terminal context with local UUID idempotency', async () => {
     const offlineLocalId = `LOCAL-OFFLINE-${Date.now()}`;
     const medId = uuidv4();
     const batchId = uuidv4();
 
-    const offlineSale: any = localMutate({
+    const offlineSale: any = (await localMutate({
       table: 'sales',
       operation: 'INSERT',
       data: {
@@ -878,14 +879,14 @@ describe('Enterprise Pharmacy Domain & Multi-Store Foundation (Task 1)', () => {
         payment_mode: 'cash',
         payment_status: 'paid',
       },
-    });
+    }));
 
     expect(offlineSale._local_id).toBe(offlineLocalId);
     expect(offlineSale.store_id).toBe(defaultStoreId);
     expect(offlineSale.terminal_id).toBe('T1');
 
     // Repeated push with same _local_id must be idempotent
-    const duplicatePush = localMutate({
+    const duplicatePush = (await localMutate({
       table: 'sales',
       operation: 'INSERT',
       data: {
@@ -896,7 +897,7 @@ describe('Enterprise Pharmacy Domain & Multi-Store Foundation (Task 1)', () => {
         invoice_number: 'OFFLINE-INV-001',
         grand_total: 100,
       },
-    });
+    }));
 
     const salesCount: any = localDb
       .prepare('SELECT COUNT(*) as cnt FROM sales WHERE _local_id = ?')

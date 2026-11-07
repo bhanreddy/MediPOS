@@ -1,5 +1,5 @@
 // supplierIntelligenceService.ts — Enterprise Supplier Performance Analytics, Transparent Scorecards & Procurement Dashboard
-import { localDb } from '../../local-db';
+import { businessDb as localDb } from '../../lib/businessDb';
 import { businessDate } from '../../lib/businessDate';
 import { AppError } from '../../lib/appError';
 import { Money } from '../../lib/money';
@@ -12,13 +12,13 @@ export class SupplierIntelligenceService {
   /**
    * Compute Transparent Component-Based Scorecard for a Supplier
    */
-  static getSupplierScorecard(organizationId: string, supplierId: string): SupplierScorecard {
-    const supplier: any = localDb
+  static async getSupplierScorecard(organizationId: string, supplierId: string): Promise<SupplierScorecard> {
+    const supplier: any = (await localDb
       .prepare(
         `SELECT * FROM suppliers
          WHERE (id = ? OR _local_id = ?) AND (organization_id = ?) LIMIT 1`
       )
-      .get(supplierId, supplierId, organizationId);
+      .get(supplierId, supplierId, organizationId));
 
     if (!supplier) {
       throw new AppError(404, 'Supplier not found');
@@ -27,13 +27,13 @@ export class SupplierIntelligenceService {
     const configuredLeadTime = Number(supplier.lead_time_days || 2);
 
     // 1. Fetch all POs for supplier
-    const poRows: any[] = localDb
+    const poRows: any[] = (await localDb
       .prepare(
         `SELECT * FROM purchase_orders
          WHERE (organization_id = ?)
            AND (supplier_id = ? OR supplier_id = ?) AND _deleted = 0`
       )
-      .all(organizationId, supplierId, supplierId);
+      .all(organizationId, supplierId, supplierId));
 
     const totalOrders = poRows.length;
     let totalPurchaseValuePaise = 0;
@@ -42,7 +42,7 @@ export class SupplierIntelligenceService {
     }
 
     // 2. Fetch all GRNs for supplier to calculate lead time, on-time delivery, fill rate, damages, schemes
-    const grnRows: any[] = localDb
+    const grnRows: any[] = (await localDb
       .prepare(
         `SELECT grn.*, po.expected_delivery_date, po.order_date
          FROM goods_receipts grn
@@ -50,7 +50,7 @@ export class SupplierIntelligenceService {
          WHERE (grn.organization_id = ?)
            AND (grn.supplier_id = ? OR grn.supplier_id = ?) AND grn.status = 'POSTED' AND grn._deleted = 0`
       )
-      .all(organizationId, supplierId, supplierId);
+      .all(organizationId, supplierId, supplierId));
 
     let totalLeadTimeDaysSum = 0;
     let leadTimeObservations = 0;
@@ -80,7 +80,7 @@ export class SupplierIntelligenceService {
     const onTimeDeliveryRatePct = totalDeliveries > 0 ? Math.round((onTimeDeliveries / totalDeliveries) * 10000) / 100 : 100.0;
 
     // 3. Fetch GRN line items for fill rate, short, excess, damage, rejection
-    const grnItemRows: any[] = localDb
+    const grnItemRows: any[] = (await localDb
       .prepare(
         `SELECT gri.*, poi.free_quantity_expected
          FROM goods_receipt_items gri
@@ -89,7 +89,7 @@ export class SupplierIntelligenceService {
          WHERE (gri.organization_id = ?)
            AND (grn.supplier_id = ? OR grn.supplier_id = ?) AND grn.status = 'POSTED' AND gri._deleted = 0`
       )
-      .all(organizationId, supplierId, supplierId);
+      .all(organizationId, supplierId, supplierId));
 
     let totalOrderedUnits = 0;
     let totalAcceptedUnits = 0;
@@ -128,24 +128,24 @@ export class SupplierIntelligenceService {
     const schemeFulfilmentRatePct = totalExpectedFreeUnits > 0 ? Math.min(100, Math.round((totalActualFreeUnits / totalExpectedFreeUnits) * 10000) / 100) : 100.0;
 
     // 4. Fetch Purchase Returns
-    const returnRows: any[] = localDb
+    const returnRows: any[] = (await localDb
       .prepare(
         `SELECT COUNT(*) as count FROM purchase_returns
          WHERE (organization_id = ?)
            AND (supplier_id = ? OR supplier_id = ?) AND _deleted = 0`
       )
-      .all(organizationId, supplierId, supplierId);
+      .all(organizationId, supplierId, supplierId));
     const returnCount = Number(returnRows[0]?.count || 0);
     const purchaseReturnRatePct = totalDeliveries > 0 ? Math.round((returnCount / totalDeliveries) * 10000) / 100 : 0.0;
 
     // 5. Fetch Invoice Mismatches
-    const invoiceRows: any[] = localDb
+    const invoiceRows: any[] = (await localDb
       .prepare(
         `SELECT match_status FROM purchase_invoices
          WHERE (organization_id = ?)
            AND (supplier_id = ? OR supplier_id = ?) AND _deleted = 0`
       )
-      .all(organizationId, supplierId, supplierId);
+      .all(organizationId, supplierId, supplierId));
 
     const totalInvoices = invoiceRows.length;
     const mismatchInvoices = invoiceRows.filter(i => i.match_status !== 'MATCHED').length;
@@ -207,42 +207,42 @@ export class SupplierIntelligenceService {
   /**
    * Get High-Level Procurement Command Center Dashboard Summary
    */
-  static getDashboardSummary(organizationId: string, storeId?: string | null): ProcurementDashboardSummary {
+  static async getDashboardSummary(organizationId: string, storeId?: string | null): Promise<ProcurementDashboardSummary> {
     const orgCond = 'organization_id = ? AND _deleted = 0';
     const storeCond = storeId ? ' AND (store_id = ? OR store_id IS NULL)' : '';
 
     const scope = storeId ? [organizationId, storeId] : [organizationId];
-    const openReqs: any = localDb.prepare(`SELECT COUNT(*) as cnt FROM purchase_requisitions WHERE ${orgCond} ${storeCond} AND status IN ('DRAFT', 'SUBMITTED', 'PENDING_APPROVAL')`).get(...scope);
-    const pendingAppr: any = localDb.prepare(`SELECT COUNT(*) as cnt FROM purchase_requisitions WHERE ${orgCond} ${storeCond} AND status = 'PENDING_APPROVAL'`).get(...scope);
+    const openReqs: any = (await localDb.prepare(`SELECT COUNT(*) as cnt FROM purchase_requisitions WHERE ${orgCond} ${storeCond} AND status IN ('DRAFT', 'SUBMITTED', 'PENDING_APPROVAL')`).get(...scope));
+    const pendingAppr: any = (await localDb.prepare(`SELECT COUNT(*) as cnt FROM purchase_requisitions WHERE ${orgCond} ${storeCond} AND status = 'PENDING_APPROVAL'`).get(...scope));
 
-    const openPos: any = localDb.prepare(`SELECT COUNT(*) as cnt, COALESCE(SUM(total_paise), 0) as val FROM purchase_orders WHERE ${orgCond} ${storeCond} AND status IN ('APPROVED', 'SENT', 'CONFIRMED', 'PARTIALLY_RECEIVED')`).get(...scope);
-    const partialPos: any = localDb.prepare(`SELECT COUNT(*) as cnt FROM purchase_orders WHERE ${orgCond} ${storeCond} AND status = 'PARTIALLY_RECEIVED'`).get(...scope);
+    const openPos: any = (await localDb.prepare(`SELECT COUNT(*) as cnt, COALESCE(SUM(total_paise), 0) as val FROM purchase_orders WHERE ${orgCond} ${storeCond} AND status IN ('APPROVED', 'SENT', 'CONFIRMED', 'PARTIALLY_RECEIVED')`).get(...scope));
+    const partialPos: any = (await localDb.prepare(`SELECT COUNT(*) as cnt FROM purchase_orders WHERE ${orgCond} ${storeCond} AND status = 'PARTIALLY_RECEIVED'`).get(...scope));
 
-    const timezone = (localDb.prepare('SELECT timezone FROM organizations WHERE id = ? OR _local_id = ?').get(organizationId, organizationId) as { timezone?: string } | undefined)?.timezone;
+    const timezone = ((await localDb.prepare('SELECT timezone FROM organizations WHERE id = ? OR _local_id = ?').get(organizationId, organizationId)) as { timezone?: string } | undefined)?.timezone;
     const todayStr = businessDate(new Date(), timezone || 'Asia/Kolkata');
-    const expDeliveries: any = localDb.prepare(`SELECT COUNT(*) as cnt FROM purchase_orders WHERE ${orgCond} ${storeCond} AND expected_delivery_date = ? AND status IN ('APPROVED', 'SENT', 'CONFIRMED')`).get(...scope, todayStr);
+    const expDeliveries: any = (await localDb.prepare(`SELECT COUNT(*) as cnt FROM purchase_orders WHERE ${orgCond} ${storeCond} AND expected_delivery_date = ? AND status IN ('APPROVED', 'SENT', 'CONFIRMED')`).get(...scope, todayStr));
 
-    const grnReview: any = localDb.prepare(`SELECT COUNT(*) as cnt FROM goods_receipts WHERE ${orgCond} ${storeCond} AND status = 'REVIEW'`).get(...scope);
-    const matchExceptions: any = localDb.prepare(`SELECT COUNT(*) as cnt FROM purchase_invoices WHERE ${orgCond} ${storeCond} AND match_status != 'MATCHED' AND status != 'POSTED'`).get(...scope);
+    const grnReview: any = (await localDb.prepare(`SELECT COUNT(*) as cnt FROM goods_receipts WHERE ${orgCond} ${storeCond} AND status = 'REVIEW'`).get(...scope));
+    const matchExceptions: any = (await localDb.prepare(`SELECT COUNT(*) as cnt FROM purchase_invoices WHERE ${orgCond} ${storeCond} AND match_status != 'MATCHED' AND status != 'POSTED'`).get(...scope));
 
-    const suppBalances: any = localDb.prepare(`SELECT COALESCE(SUM(outstanding_balance), 0) as total FROM suppliers WHERE ${orgCond}`).get(organizationId);
+    const suppBalances: any = (await localDb.prepare(`SELECT COALESCE(SUM(outstanding_balance), 0) as total FROM suppliers WHERE ${orgCond}`).get(organizationId));
     const totalSupplierOutstandingPaise = Money.toPaise(Number(suppBalances?.total || 0));
 
-    const overduePayables: any = localDb.prepare(`SELECT COALESCE(SUM(balance_due_paise), 0) as overdue FROM purchase_invoices WHERE ${orgCond} ${storeCond} AND due_date < ? AND payment_status != 'PAID' AND status = 'POSTED'`).get(...scope, todayStr);
+    const overduePayables: any = (await localDb.prepare(`SELECT COALESCE(SUM(balance_due_paise), 0) as overdue FROM purchase_invoices WHERE ${orgCond} ${storeCond} AND due_date < ? AND payment_status != 'PAID' AND status = 'POSTED'`).get(...scope, todayStr));
 
-    const returnsMonth: any = localDb.prepare(`SELECT COUNT(*) as cnt FROM purchase_returns WHERE ${orgCond} ${storeCond}`).get(...scope);
+    const returnsMonth: any = (await localDb.prepare(`SELECT COUNT(*) as cnt FROM purchase_returns WHERE ${orgCond} ${storeCond}`).get(...scope));
 
     // Scheme savings: calculated from free quantities on posted GRNs
     const grnOrgCond = 'grn.organization_id = ? AND grn._deleted = 0';
     const grnStoreCond = storeId ? ' AND (grn.store_id = ? OR grn.store_id IS NULL)' : '';
-    const schemeSavingsRow: any = localDb
+    const schemeSavingsRow: any = (await localDb
       .prepare(
         `SELECT COALESCE(SUM(gri.free_quantity * gri.purchase_rate_paise), 0) as savings
          FROM goods_receipt_items gri
          JOIN goods_receipts grn ON grn.id = gri.grn_id OR grn._local_id = gri.grn_id
          WHERE ${grnOrgCond} ${grnStoreCond} AND grn.status = 'POSTED'`
       )
-      .get(...scope);
+      .get(...scope));
 
     return {
       openRequisitionsCount: Number(openReqs?.cnt || 0),

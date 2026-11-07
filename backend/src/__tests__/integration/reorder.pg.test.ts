@@ -239,7 +239,7 @@ import { errorHandler } from "../../middleware/errorHandler";
         .mockImplementation(async (input) => {
           if (input.table === "purchase_items")
             throw Error("Simulated receipt item failure");
-          return original(input);
+          return (await original(input));
         });
       expect(
         (await request(app).post("/purchases").send(receipt(id, 7))).status,
@@ -313,13 +313,13 @@ import { errorHandler } from "../../middleware/errorHandler";
     });
     test("message-write failure rolls back PO creation and idempotency checkpoint", async () => {
       const original = persistence.queryRaw;
-      jest.spyOn(persistence, "queryRaw").mockImplementation(((
+      jest.spyOn(persistence, "queryRaw").mockImplementation((async (
         query: string,
         params: any[],
       ) => {
         if (query.includes("INSERT INTO supplier_message_drafts"))
           throw Error("Simulated message persistence failure");
-        return original(query, params);
+        return (await original(query, params));
       }) as typeof original);
       expect((await create()).status).toBe(500);
       expect(

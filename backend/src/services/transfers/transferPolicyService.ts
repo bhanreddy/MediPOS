@@ -1,5 +1,5 @@
 // transferPolicyService.ts — Transfer Policies & Approval Tier Evaluation
-import { localDb } from '../../local-db';
+import { businessDb as localDb } from '../../lib/businessDb';
 import { localMutate } from '../../lib/localMutate';
 import { v4 as uuidv4 } from 'uuid';
 import { TransferPolicy, TransferType } from '../../domain/transferTypes';
@@ -8,13 +8,13 @@ export class TransferPolicyService {
   /**
    * Get policy for an organization with sensible defaults
    */
-  static getPolicy(organizationId: string): TransferPolicy {
-    const row: any = localDb
+  static async getPolicy(organizationId: string): Promise<TransferPolicy> {
+    const row: any = (await localDb
       .prepare(
         `SELECT * FROM transfer_policies
          WHERE (organization_id = ?) AND _deleted = 0 LIMIT 1`
       )
-      .get(organizationId);
+      .get(organizationId));
 
     if (row) {
       return {
@@ -51,11 +51,11 @@ export class TransferPolicyService {
   /**
    * Set or update policy for an organization
    */
-  static setPolicy(policy: Partial<TransferPolicy> & { organizationId: string }): TransferPolicy {
-    const existing = this.getPolicy(policy.organizationId);
+  static async setPolicy(policy: Partial<TransferPolicy> & { organizationId: string }): Promise<TransferPolicy> {
+    const existing = (await this.getPolicy(policy.organizationId));
     const id = existing.id || uuidv4();
 
-    localMutate({
+    (await localMutate({
       table: 'transfer_policies',
       operation: existing.id ? 'UPDATE' : 'INSERT',
       data: {
@@ -73,21 +73,21 @@ export class TransferPolicyService {
         allow_partial_receipt: policy.allowPartialReceipt !== undefined ? (policy.allowPartialReceipt ? 1 : 0) : (existing.allowPartialReceipt ? 1 : 0),
         auto_close_on_exact_receipt: policy.autoCloseOnExactReceipt !== undefined ? (policy.autoCloseOnExactReceipt ? 1 : 0) : (existing.autoCloseOnExactReceipt ? 1 : 0),
       },
-    });
+    }));
 
-    return this.getPolicy(policy.organizationId);
+    return (await this.getPolicy(policy.organizationId));
   }
 
   /**
    * Determine required approval role based on value and transfer type
    */
-  static getRequiredApprovalRole(
+  static async getRequiredApprovalRole(
     organizationId: string,
     amountPaise: number,
     transferType: TransferType,
     isControlled: boolean = false
-  ): 'AUTO' | 'STORE_MANAGER' | 'REGIONAL_MANAGER' | 'HQ_PROCUREMENT' {
-    const policy = this.getPolicy(organizationId);
+  ): Promise<'AUTO' | 'STORE_MANAGER' | 'REGIONAL_MANAGER' | 'HQ_PROCUREMENT'> {
+    const policy = (await this.getPolicy(organizationId));
 
     // Emergency and recall transfers can follow configured policies
     if (transferType === 'WAREHOUSE_TO_STORE' && policy.autoApproveRoutineTransfers && amountPaise <= policy.autoApproveValueLimitPaise && !isControlled) {

@@ -88,14 +88,14 @@ whatsappRouter.post(
       for (let i = 0; i < list.length; i += batchSize) {
         const chunk = list.slice(i, i + batchSize);
         await Promise.all(
-          chunk.map((c) =>
-            sendWhatsAppMessage({
+          chunk.map(async (c) =>
+            (await sendWhatsAppMessage({
               phoneNumber: String(c.phone),
               templateName: parsed.template_name,
               templateParams: parsed.template_params.length
                 ? parsed.template_params
                 : [c.name || 'Customer'],
-            })
+            }))
           )
         );
         queued += chunk.length;

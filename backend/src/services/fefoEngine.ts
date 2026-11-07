@@ -1,4 +1,5 @@
-import { localDb } from '../local-db';
+import { allocateFefo } from './fefoAllocation';
+import { businessDb as localDb, lockBusinessRows, cloudBusinessMode } from '../lib/businessDb';
 import { AppError } from '../lib/appError';
 
 export interface BatchCandidate {
@@ -92,20 +93,20 @@ export class FEFOEngine {
   /**
    * Plans FEFO allocations across available batches for a medicine.
    */
-  static planAllocations(params: {
+  static async planAllocations(params: {
     medicineId: string;
     storeId: string;
     organizationId: string;
     requestedQuantity: number;
     manualBatchId?: string | null;
     asOf?: Date;
-  }): {
+  }): Promise<{
     allocations: BatchAllocation[];
     totalAllocated: number;
     recommendedBatchId: string | null;
     hasNearExpiryWarning: boolean;
     hasBlockingExpired: boolean;
-  } {
+  }> {
     const {
       medicineId,
       storeId,
@@ -122,7 +123,7 @@ export class FEFOEngine {
     const todayStr = asOf.toISOString().split('T')[0];
 
     // Query non-disposed, non-deleted batches with available stock for this store
-    const rawBatches: any[] = localDb
+    const readBatches=async()=> localDb
       .prepare(
         `SELECT mb.*, 
                 COALESCE(ip.quantity_on_hand, mb.quantity_remaining, 0) as pos_on_hand,
@@ -142,14 +143,16 @@ export class FEFOEngine {
          ORDER BY mb.expiry_date ASC`
       )
       .all(organizationId, storeId, medicineId, medicineId, storeId);
+    let rawBatches:any[]=await readBatches();
+    if(cloudBusinessMode()){await lockBusinessRows('medicine_batches',rawBatches.map(batch=>batch.id));rawBatches=await readBatches();}
 
     // Active recalls check
-    const activeRecalls: any[] = localDb
+    const activeRecalls: any[] = (await localDb
       .prepare(
         `SELECT batch_id FROM product_recalls 
          WHERE organization_id = ? AND status = 'ACTIVE' AND (product_id = ? OR product_id = ?)`
       )
-      .all(organizationId, medicineId, medicineId);
+      .all(organizationId, medicineId, medicineId));
     const recalledBatchIds = new Set(activeRecalls.map((r) => r.batch_id).filter(Boolean));
     const isAllRecalled = activeRecalls.some((r) => !r.batch_id);
 
@@ -167,77 +170,15 @@ export class FEFOEngine {
     const validNonExpired = batches.filter(b => b.expiry_date >= todayStr);
     const recommendedBatchId = validNonExpired.length > 0 ? (validNonExpired[0].id || validNonExpired[0]._local_id) : null;
 
-    let allocations: BatchAllocation[] = [];
-    let remainingToAllocate = requestedQuantity;
-    let hasNearExpiryWarning = false;
-    let hasBlockingExpired = false;
-
-    if (manualBatchId) {
-      // Manual batch override flow
-      const targetBatch = batches.find(b => b.id === manualBatchId || b._local_id === manualBatchId);
-      if (!targetBatch) {
-        throw new AppError(404, `Selected batch ${manualBatchId} not found or out of stock`, 'BATCH_NOT_FOUND');
-      }
-
-      const safety = this.evaluateExpirySafety(targetBatch.expiry_date, asOf);
-      if (safety.severity === 'BLOCKING') {
-        throw new AppError(400, `Cannot select expired batch (${targetBatch.expiry_date})`, 'EXPIRED_BATCH_BLOCKED');
-      }
-
-      const available = Number(targetBatch.quantity_remaining || 0);
-      if (available < requestedQuantity) {
-        throw new AppError(
-          409,
-          `Selected batch ${targetBatch.batch_number} has only ${available} units available (requested ${requestedQuantity})`,
-          'INSUFFICIENT_BATCH_STOCK'
-        );
-      }
-
-      allocations.push({
-        batchId: targetBatch.id || targetBatch._local_id,
-        batchNumber: targetBatch.batch_number,
-        expiryDate: targetBatch.expiry_date,
-        allocatedQuantity: requestedQuantity,
-        mrp: Number(targetBatch.mrp || 0),
-        purchasePrice: Number(targetBatch.purchase_price || 0),
-        safety,
-      });
-
-      if (safety.severity === 'WARNING') hasNearExpiryWarning = true;
-    } else {
-      // Standard FEFO multi-batch allocation (filtering out expired batches)
-      for (const batch of validNonExpired) {
-        if (remainingToAllocate <= 0) break;
-
-        const available = Number(batch.quantity_remaining || 0);
-        const take = Math.min(remainingToAllocate, available);
-        const safety = this.evaluateExpirySafety(batch.expiry_date, asOf);
-
-        allocations.push({
-          batchId: batch.id || batch._local_id,
-          batchNumber: batch.batch_number,
-          expiryDate: batch.expiry_date,
-          allocatedQuantity: take,
-          mrp: Number(batch.mrp || 0),
-          purchasePrice: Number(batch.purchase_price || 0),
-          safety,
-        });
-
-        if (safety.severity === 'WARNING') hasNearExpiryWarning = true;
-        if (safety.severity === 'BLOCKING') hasBlockingExpired = true;
-
-        remainingToAllocate -= take;
-      }
-
-      if (remainingToAllocate > 0) {
-        const totalAvailable = validNonExpired.reduce((sum, b) => sum + Number(b.quantity_remaining || 0), 0);
-        throw new AppError(
-          409,
-          `Insufficient non-expired stock. Requested: ${requestedQuantity}, Total available: ${totalAvailable}`,
-          'INSUFFICIENT_STOCK'
-        );
-      }
-    }
+    const manual=manualBatchId?batches.find(batch=>batch.id===manualBatchId||batch._local_id===manualBatchId):null;
+    if(manualBatchId&&!manual)throw new AppError(404,'Selected batch not found','BATCH_NOT_FOUND');
+    if(manual&&manual.expiry_date<todayStr)throw new AppError(400,'Cannot select expired batch','EXPIRED_BATCH_BLOCKED');
+    const totalAvailable=validNonExpired.reduce((sum,batch)=>sum+Number(batch.quantity_remaining||0),0);
+    if(!manual&&totalAvailable<requestedQuantity)throw new AppError(409,`Insufficient non-expired stock. Requested: ${requestedQuantity}, Total available: ${totalAvailable}`,'INSUFFICIENT_STOCK');
+    const planned=allocateFefo(validNonExpired.map(batch=>({...batch,id:batch.id||batch._local_id,available:cloudBusinessMode()?Math.min(Number(batch.quantity_remaining||0),Number(batch.pos_available??batch.quantity_remaining??0)):Number(batch.quantity_remaining||0)})),requestedQuantity,manual?.id||manual?._local_id);
+    const allocations:BatchAllocation[]=planned.map(({batch,quantity})=>({batchId:batch.id,batchNumber:batch.batch_number,expiryDate:batch.expiry_date,allocatedQuantity:quantity,mrp:Number(batch.mrp||0),purchasePrice:Number(batch.purchase_price||0),safety:this.evaluateExpirySafety(batch.expiry_date,asOf)}));
+    const hasNearExpiryWarning=allocations.some(allocation=>allocation.safety.severity==='WARNING');
+    const hasBlockingExpired=false;
 
     return {
       allocations,

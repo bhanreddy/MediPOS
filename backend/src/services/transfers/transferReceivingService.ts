@@ -1,5 +1,7 @@
+import { createHash } from 'node:crypto';
+import { AppError } from '../../lib/appError';
 // transferReceivingService.ts — Transfer Receiving, Partial Inward & Discrepancy Capture Engine
-import { localDb } from '../../local-db';
+import { businessDb as localDb, cloudBusinessMode, lockBusinessRows } from '../../lib/businessDb';
 import { localMutate } from '../../lib/localMutate';
 import { v4 as uuidv4 } from 'uuid';
 import { StockTransfer, TransferReceipt } from '../../domain/transferTypes';
@@ -17,7 +19,7 @@ export class TransferReceivingService {
    * 6. Records variances in transfer_variances table
    * 7. Updates transfer status to RECEIVED or PARTIALLY_RECEIVED or VARIANCE_REVIEW
    */
-  static receiveTransfer(params: {
+  static async receiveTransfer(params: {
     transferId: string;
     organizationId: string;
     receivedBy: string;
@@ -37,7 +39,7 @@ export class TransferReceivingService {
     }>;
     idempotencyKey?: string;
     notes?: string;
-  }): { transfer: StockTransfer; receipt: TransferReceipt } {
+  }): Promise<{ transfer: StockTransfer; receipt: TransferReceipt }> {
     const {
       transferId,
       organizationId,
@@ -48,52 +50,59 @@ export class TransferReceivingService {
       notes,
     } = params;
 
-    const transfer: any = localDb
+    await lockBusinessRows('stock_transfers',[transferId]);
+    const transfer: any = (await localDb
       .prepare(
         `SELECT * FROM stock_transfers 
          WHERE (id = ? OR _local_id = ?) AND (organization_id = ?) AND _deleted = 0`
       )
-      .get(transferId, transferId, organizationId);
+      .get(transferId, transferId, organizationId));
 
     if (!transfer) throw new Error(`Stock transfer not found: ${transferId}`);
 
     // Validate receiver access to destination location
-    const hasDestAccess = LocationService.validateUserAccess(
+    const hasDestAccess = (await LocationService.validateUserAccess(
       receivedBy,
       transfer.destination_location_type,
       transfer.destination_location_id,
       organizationId
-    );
+    ));
     if (!hasDestAccess) {
       throw new Error(`Security Violation: User ${receivedBy} is not authorized to receive stock at destination ${transfer.destination_location_id}`);
     }
 
-    if (
-      transfer.status !== 'DISPATCHED' &&
-      transfer.status !== 'IN_TRANSIT' &&
-      transfer.status !== 'PARTIALLY_RECEIVED'
-    ) {
-      throw new Error(`Cannot receive transfer in status: ${transfer.status}`);
-    }
+    const fingerprint = createHash('sha256').update(JSON.stringify({ receivedBy, conditionStatus, items, notes })).digest('hex');
 
     // Check duplicate receipt idempotency
     if (idempotencyKey) {
-      const existingReceipt: any = localDb
-        .prepare('SELECT * FROM transfer_receipts WHERE idempotency_key = ? AND _deleted = 0')
-        .get(idempotencyKey);
+      const existingReceipt: any = (await localDb
+        .prepare('SELECT * FROM transfer_receipts WHERE idempotency_key = ? AND organization_id = ? AND transfer_id = ? AND _deleted = 0')
+        .get(idempotencyKey, organizationId, transfer.id));
       if (existingReceipt) {
+        if (cloudBusinessMode() && existingReceipt.request_hash && existingReceipt.request_hash !== fingerprint) {
+          throw new AppError(409, 'Receipt identifier was already used for different details.');
+        }
         return { transfer, receipt: existingReceipt };
       }
     }
 
+    if (!['DISPATCHED','IN_TRANSIT','PARTIALLY_RECEIVED','VARIANCE_REVIEW'].includes(transfer.status)) {
+      throw new Error(`Cannot receive transfer in status: ${transfer.status}`);
+    }
+
+    if (cloudBusinessMode()) {
+      if (!Array.isArray(items) || !items.length) throw new Error('Receipt must include at least one allocation');
+      await lockBusinessRows('medicine_batches', [...new Set(items.map(item=>item.batchId))]);
+    }
+
     const nowIso = new Date().toISOString();
     const receiptId = uuidv4();
-    const existingReceiptCount: any = localDb
+    const existingReceiptCount: any = (await localDb
       .prepare('SELECT COUNT(*) as cnt FROM transfer_receipts WHERE transfer_id = ?')
-      .get(transfer.id);
+      .get(transfer.id));
     const receiptNum = `${transfer.transfer_number}/REC-${String((existingReceiptCount?.cnt || 0) + 1).padStart(2, '0')}`;
 
-    const receipt = localMutate({
+    const receipt = (await localMutate({
       table: 'transfer_receipts',
       operation: 'INSERT',
       data: {
@@ -107,9 +116,10 @@ export class TransferReceivingService {
         status: 'COMPLETED',
         condition_status: conditionStatus,
         idempotency_key: idempotencyKey || null,
+        ...(cloudBusinessMode() ? { request_hash: fingerprint } : {}),
         notes: notes || null,
       },
-    });
+    }));
 
     const sourceStoreId = transfer.source_location_type === 'STORE' ? transfer.source_location_id : null;
     const sourceWarehouseId = transfer.source_location_type === 'WAREHOUSE' ? transfer.source_location_id : null;
@@ -124,11 +134,11 @@ export class TransferReceivingService {
     const isQuarantined = transfer.stock_state_transferred === 'QUARANTINED';
 
     for (const item of items) {
-      const alloc: any = localDb
+      const alloc: any = (await localDb
         .prepare(
           `SELECT * FROM stock_transfer_batch_allocations WHERE id = ? OR _local_id = ?`
         )
-        .get(item.batchAllocationId, item.batchAllocationId);
+        .get(item.batchAllocationId, item.batchAllocationId));
 
       const dispatchedQty = alloc ? Number(alloc.quantity_dispatched || alloc.quantity_picked || alloc.quantity_allocated) : 0;
       const acceptedQty = Number(item.quantityAccepted || 0);
@@ -136,9 +146,21 @@ export class TransferReceivingService {
       const shortQty = Number(item.quantityShort || 0);
       const excessQty = Number(item.quantityExcess || 0);
       const rejectedQty = Number(item.quantityRejected || 0);
+      if (cloudBusinessMode()) {
+        if (!alloc || alloc.transfer_id!==transfer.id || alloc.transfer_item_id!==item.transferItemId ||
+            alloc.medicine_id!==item.medicineId || alloc.batch_id!==item.batchId)
+          throw new Error('Receipt line does not match a dispatched batch allocation');
+        const quantities=[acceptedQty,damagedQty,shortQty,excessQty,rejectedQty];
+        if (quantities.some(quantity=>!Number.isSafeInteger(quantity)||quantity<0) || !quantities.some(quantity=>quantity>0))
+          throw new Error('Receipt quantities must be nonnegative whole numbers');
+        const counted=await localDb.prepare(`SELECT COALESCE(SUM(quantity_accepted+quantity_damaged+quantity_short+quantity_rejected),0) AS quantity
+          FROM transfer_receipt_items WHERE batch_allocation_id=?`).get(alloc.id);
+        if (acceptedQty+damagedQty+shortQty+rejectedQty>dispatchedQty-Number(counted.quantity))
+          throw new Error('Receipt exceeds the remaining dispatched quantity');
+      }
 
       // Record receipt item line
-      localMutate({
+      (await localMutate({
         table: 'transfer_receipt_items',
         operation: 'INSERT',
         data: {
@@ -158,12 +180,12 @@ export class TransferReceivingService {
           destination_bin_id: item.destinationBinId || null,
           damage_notes: item.damageNotes || null,
         },
-      });
+      }));
 
       // 1. Decrement in-transit position at source
-      const transitClearQty = acceptedQty + damagedQty + shortQty;
+      const transitClearQty = acceptedQty + damagedQty + shortQty + (cloudBusinessMode() ? rejectedQty : 0);
       if (transitClearQty > 0) {
-        InventoryPositionService.updateStateQuantities({
+        (await InventoryPositionService.updateStateQuantities({
           organizationId,
           medicineId: item.medicineId,
           batchId: item.batchId,
@@ -171,13 +193,14 @@ export class TransferReceivingService {
           storeId: sourceStoreId,
           warehouseId: sourceWarehouseId,
           inTransitDelta: -transitClearQty,
-        });
+        }));
       }
 
       // 2. Increment destination inventory positions
       const destPhysicalInward = acceptedQty + damagedQty;
+      let destinationBalance: number | null = null;
       if (destPhysicalInward > 0) {
-        InventoryPositionService.adjustStock({
+        const position = await InventoryPositionService.adjustStock({
           organizationId,
           medicineId: item.medicineId,
           batchId: item.batchId,
@@ -186,11 +209,12 @@ export class TransferReceivingService {
           warehouseId: destWarehouseId,
           quantityDelta: destPhysicalInward,
         });
+        destinationBalance = position.quantity_on_hand;
 
         // Sub-state segregation:
         if (isRecalled) {
           // Preserve recalled state at destination
-          InventoryPositionService.updateStateQuantities({
+          (await InventoryPositionService.updateStateQuantities({
             organizationId,
             medicineId: item.medicineId,
             batchId: item.batchId,
@@ -198,10 +222,10 @@ export class TransferReceivingService {
             storeId: destStoreId,
             warehouseId: destWarehouseId,
             recalledDelta: destPhysicalInward,
-          });
+          }));
         } else if (isQuarantined) {
           // Preserve quarantined state at destination
-          InventoryPositionService.updateStateQuantities({
+          (await InventoryPositionService.updateStateQuantities({
             organizationId,
             medicineId: item.medicineId,
             batchId: item.batchId,
@@ -209,11 +233,11 @@ export class TransferReceivingService {
             storeId: destStoreId,
             warehouseId: destWarehouseId,
             quarantinedDelta: destPhysicalInward,
-          });
+          }));
         } else {
           // Normal transfer: damaged units quarantined
           if (damagedQty > 0) {
-            InventoryPositionService.updateStateQuantities({
+            (await InventoryPositionService.updateStateQuantities({
               organizationId,
               medicineId: item.medicineId,
               batchId: item.batchId,
@@ -221,7 +245,7 @@ export class TransferReceivingService {
               storeId: destStoreId,
               warehouseId: destWarehouseId,
               damagedDelta: damagedQty,
-            });
+            }));
           }
         }
       }
@@ -229,7 +253,7 @@ export class TransferReceivingService {
       // 3. Write immutable stock ledger entry at destination: TRANSFER_IN
       if (destPhysicalInward > 0) {
         const ledgerId = uuidv4();
-        localMutate({
+        (await localMutate({
           table: 'stock_ledger',
           operation: 'INSERT',
           data: {
@@ -243,6 +267,7 @@ export class TransferReceivingService {
             warehouse_id: destWarehouseId,
             movement_type: 'TRANSFER_IN',
             quantity_delta: destPhysicalInward,
+            balance_after: destinationBalance,
             reference_id: transfer.id,
             reference_type: 'TRANSFER',
             cost_per_unit: (alloc?.unit_cost_paise || 0) / 100,
@@ -251,7 +276,7 @@ export class TransferReceivingService {
             created_by: receivedBy,
             created_at: nowIso,
           },
-        });
+        }));
       }
 
       // 4. Record variances if damaged, short, or excess
@@ -260,7 +285,7 @@ export class TransferReceivingService {
       if (shortQty > 0) {
         hasVariance = true;
         const varId = uuidv4();
-        localMutate({
+        (await localMutate({
           table: 'transfer_variances',
           operation: 'INSERT',
           data: {
@@ -281,10 +306,10 @@ export class TransferReceivingService {
             reported_by: receivedBy,
             reported_at: nowIso,
           },
-        });
+        }));
 
         // Write ledger loss/shortage trace
-        localMutate({
+        (await localMutate({
           table: 'stock_ledger',
           operation: 'INSERT',
           data: {
@@ -305,13 +330,13 @@ export class TransferReceivingService {
             created_by: receivedBy,
             created_at: nowIso,
           },
-        });
+        }));
       }
 
       if (damagedQty > 0) {
         hasVariance = true;
         const varId = uuidv4();
-        localMutate({
+        (await localMutate({
           table: 'transfer_variances',
           operation: 'INSERT',
           data: {
@@ -332,13 +357,13 @@ export class TransferReceivingService {
             reported_by: receivedBy,
             reported_at: nowIso,
           },
-        });
+        }));
       }
 
       if (excessQty > 0) {
         hasVariance = true;
         const varId = uuidv4();
-        localMutate({
+        (await localMutate({
           table: 'transfer_variances',
           operation: 'INSERT',
           data: {
@@ -359,12 +384,12 @@ export class TransferReceivingService {
             reported_by: receivedBy,
             reported_at: nowIso,
           },
-        });
+        }));
       }
 
       // Update allocation received, damaged, short counters
       if (alloc) {
-        localMutate({
+        (await localMutate({
           table: 'stock_transfer_batch_allocations',
           operation: 'UPDATE',
           data: {
@@ -374,7 +399,7 @@ export class TransferReceivingService {
             quantity_short: Number(alloc.quantity_short || 0) + shortQty,
             quantity_excess: Number(alloc.quantity_excess || 0) + excessQty,
           },
-        });
+        }));
       }
 
       totalAcceptedThisReceipt += acceptedQty;
@@ -382,17 +407,17 @@ export class TransferReceivingService {
     }
 
     // Update transfer items total received
-    const allReceiptItems: any[] = localDb
+    const allReceiptItems: any[] = (await localDb
       .prepare(
         `SELECT transfer_item_id, SUM(quantity_accepted) as acc, SUM(quantity_damaged) as dam, SUM(quantity_short) as sho
          FROM transfer_receipt_items
          WHERE transfer_id = ?
          GROUP BY transfer_item_id`
       )
-      .all(transfer.id);
+      .all(transfer.id));
 
     for (const ri of allReceiptItems) {
-      localMutate({
+      (await localMutate({
         table: 'stock_transfer_items',
         operation: 'UPDATE',
         data: {
@@ -401,13 +426,20 @@ export class TransferReceivingService {
           damaged_quantity: Number(ri.dam || 0),
           short_quantity: Number(ri.sho || 0),
         },
-      });
+      }));
     }
 
     // Compute cumulative total received vs total dispatched
     const totalDispatched = Number(transfer.total_quantity_dispatched || transfer.total_quantity_requested);
     const cumulativeReceived = Number(transfer.total_quantity_received || 0) + totalAcceptedThisReceipt + totalDamagedThisReceipt;
 
+    if (cloudBusinessMode()) {
+      const [shortfalls] = await localDb.prepare(
+        `SELECT COALESCE(SUM(quantity_short + quantity_rejected),0) AS units
+         FROM transfer_receipt_items WHERE transfer_id = ?`,
+      ).all(transfer.id);
+      if (Number(shortfalls.units) > 0) hasVariance = true;
+    }
     let nextStatus = 'RECEIVED';
     if (hasVariance) {
       nextStatus = 'VARIANCE_REVIEW';
@@ -415,7 +447,7 @@ export class TransferReceivingService {
       nextStatus = 'PARTIALLY_RECEIVED';
     }
 
-    const updatedTransfer = localMutate({
+    const updatedTransfer = (await localMutate({
       table: 'stock_transfers',
       operation: 'UPDATE',
       data: {
@@ -426,9 +458,9 @@ export class TransferReceivingService {
         received_at: nowIso,
         completed_at: nextStatus === 'RECEIVED' ? nowIso : null,
       },
-    });
+    }));
 
-    localMutate({
+    (await localMutate({
       table: 'transfer_events',
       operation: 'INSERT',
       data: {
@@ -441,7 +473,7 @@ export class TransferReceivingService {
         performed_by: receivedBy,
         notes: `Received ${totalAcceptedThisReceipt} accepted, ${totalDamagedThisReceipt} damaged. Status: ${nextStatus}`,
       },
-    });
+    }));
 
     return { transfer: updatedTransfer as any, receipt: receipt as any };
   }

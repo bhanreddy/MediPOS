@@ -1,5 +1,5 @@
 // inventoryAlertEngine.ts — Deterministic Inventory Alert Generator & Lifecycle Manager
-import { localDb } from '../../local-db';
+import { businessDb as localDb } from '../../lib/businessDb';
 import { v4 as uuidv4 } from 'uuid';
 import { AlertType, AlertSeverity, AlertStatus } from '../../domain/inventoryTypes';
 
@@ -21,7 +21,7 @@ export class InventoryAlertEngine {
   /**
    * Create or update a deduplicated inventory alert
    */
-  static createOrUpdateAlert(params: CreateAlertParams): any {
+  static async createOrUpdateAlert(params: CreateAlertParams): Promise<any> {
     const {
       organizationId,
       storeId = null,
@@ -36,28 +36,28 @@ export class InventoryAlertEngine {
       dedupKey = `${organizationId}_${storeId || 'all'}_${medicineId || 'all'}_${batchId || 'all'}_${alertType}`,
     } = params;
 
-    const existing: any = localDb
+    const existing: any = (await localDb
       .prepare('SELECT * FROM inventory_alerts WHERE dedup_key = ?')
-      .get(dedupKey);
+      .get(dedupKey));
 
     const now = new Date().toISOString();
 
     if (existing) {
       if (existing.status === 'RESOLVED' || existing.status === 'DISMISSED') {
-        localDb
+        (await localDb
           .prepare(
             `UPDATE inventory_alerts 
              SET status = 'OPEN', severity = ?, title = ?, message = ?,
                  metadata = ?, updated_at = ?, _updated_at = ?
              WHERE id = ?`
           )
-          .run(severity, title, message, JSON.stringify(metadata), now, now, existing.id);
+          .run(severity, title, message, JSON.stringify(metadata), now, now, existing.id));
       }
-      return localDb.prepare('SELECT * FROM inventory_alerts WHERE id = ?').get(existing.id);
+      return (await localDb.prepare('SELECT * FROM inventory_alerts WHERE id = ?').get(existing.id));
     }
 
     const id = uuidv4();
-    localDb
+    (await localDb
       .prepare(
         `INSERT INTO inventory_alerts (
           id, _local_id, organization_id, store_id, warehouse_id, medicine_id, batch_id,
@@ -82,42 +82,42 @@ export class InventoryAlertEngine {
         now,
         now,
         now
-      );
+      ));
 
-    return localDb.prepare('SELECT * FROM inventory_alerts WHERE id = ?').get(id);
+    return (await localDb.prepare('SELECT * FROM inventory_alerts WHERE id = ?').get(id));
   }
 
   /**
    * Acknowledge or Resolve an alert
    */
-  static updateAlertStatus(params: {
+  static async updateAlertStatus(params: {
     alertId: string;
     status: AlertStatus;
     acknowledgedBy?: string;
-  }): any {
+  }): Promise<any> {
     const { alertId, status, acknowledgedBy = 'USER' } = params;
     const now = new Date().toISOString();
 
-    localDb
+    (await localDb
       .prepare(
         `UPDATE inventory_alerts 
          SET status = ?, acknowledged_by = ?, acknowledged_at = ?,
              updated_at = ?, _updated_at = ?
          WHERE id = ? OR _local_id = ?`
       )
-      .run(status, acknowledgedBy, now, now, now, alertId, alertId);
+      .run(status, acknowledgedBy, now, now, now, alertId, alertId));
 
-    return localDb.prepare('SELECT * FROM inventory_alerts WHERE id = ?').get(alertId);
+    return (await localDb.prepare('SELECT * FROM inventory_alerts WHERE id = ?').get(alertId));
   }
 
   /**
    * List active alerts
    */
-  static listAlerts(params: {
+  static async listAlerts(params: {
     organizationId: string;
     storeId?: string | null;
     status?: AlertStatus;
-  }): any[] {
+  }): Promise<any[]> {
     const { organizationId, storeId = null, status = 'OPEN' } = params;
 
     let query = `
@@ -135,6 +135,6 @@ export class InventoryAlertEngine {
 
     query += ` ORDER BY CASE ia.severity WHEN 'CRITICAL' THEN 1 WHEN 'WARNING' THEN 2 ELSE 3 END, ia.created_at DESC`;
 
-    return localDb.prepare(query).all(...queryParams);
+    return (await localDb.prepare(query).all(...queryParams));
   }
 }

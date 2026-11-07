@@ -1,4 +1,4 @@
-import { localDb } from '../../local-db';
+import { businessDb as localDb } from '../../lib/businessDb';
 import { localMutate } from '../../lib/localMutate';
 import { DispensingEvent, RefillEligibility } from '../../domain/prescriptionTypes';
 import { PrescriptionService } from './prescriptionService';
@@ -14,14 +14,14 @@ export interface DispensingValidationResult {
 }
 
 export class DispensingEngine {
-  static validateDispensing(params: {
+  static async validateDispensing(params: {
     prescriptionId: string;
     prescriptionItemId: string;
     requestedQuantity: number;
-  }): DispensingValidationResult {
+  }): Promise<DispensingValidationResult> {
     const { prescriptionId, prescriptionItemId, requestedQuantity } = params;
 
-    const rx = PrescriptionService.getPrescriptionById(prescriptionId);
+    const rx = (await PrescriptionService.getPrescriptionById(prescriptionId));
     if (!rx) {
       return {
         allowed: false,
@@ -55,9 +55,9 @@ export class DispensingEngine {
       };
     }
 
-    const itemRow: any = localDb
+    const itemRow: any = (await localDb
       .prepare('SELECT * FROM prescription_items WHERE (id = ? OR _local_id = ?) AND prescription_id = ? AND _deleted = 0')
-      .get(prescriptionItemId, prescriptionItemId, rx.id || rx._local_id);
+      .get(prescriptionItemId, prescriptionItemId, rx.id || rx._local_id));
 
     if (!itemRow) {
       return {
@@ -109,7 +109,7 @@ export class DispensingEngine {
     };
   }
 
-  static recordDispensing(params: {
+  static async recordDispensing(params: {
     organizationId: string;
     storeId: string;
     terminalId?: string | null;
@@ -122,7 +122,7 @@ export class DispensingEngine {
     quantityDispensed: number;
     baseUnitQuantity?: number;
     dispensedBy: string;
-  }): DispensingEvent {
+  }): Promise<DispensingEvent> {
     const {
       organizationId,
       storeId,
@@ -139,19 +139,19 @@ export class DispensingEngine {
     } = params;
 
     // Strict validation check
-    const validation = this.validateDispensing({
+    const validation = (await this.validateDispensing({
       prescriptionId,
       prescriptionItemId,
       requestedQuantity: quantityDispensed,
-    });
+    }));
 
     if (!validation.allowed) {
       throw new Error(validation.errorMessage || 'Invalid dispensing request');
     }
 
-    const itemRow: any = localDb
+    const itemRow: any = (await localDb
       .prepare('SELECT * FROM prescription_items WHERE id = ? OR _local_id = ?')
-      .get(prescriptionItemId, prescriptionItemId);
+      .get(prescriptionItemId, prescriptionItemId));
 
     const iId = itemRow.id || itemRow._local_id;
     const newDispensedQty = Number(itemRow.dispensed_quantity || 0) + quantityDispensed;
@@ -160,7 +160,7 @@ export class DispensingEngine {
     const newRepeatsUsed = Math.min(repeatsAuth, Math.floor(newDispensedQty / prescribedQty));
 
     // Update prescription_items.dispensed_quantity and repeats_used
-    localMutate({
+    (await localMutate({
       table: 'prescription_items',
       operation: 'UPDATE',
       data: {
@@ -169,11 +169,11 @@ export class DispensingEngine {
         dispensed_quantity: newDispensedQty,
         repeats_used: newRepeatsUsed,
       },
-    });
+    }));
 
     // Create dispensing_event
     const eventId = uuidv4();
-    const eventRecord = localMutate({
+    const eventRecord = (await localMutate({
       table: 'dispensing_events',
       operation: 'INSERT',
       data: {
@@ -194,10 +194,10 @@ export class DispensingEngine {
         dispensed_at: new Date().toISOString(),
         created_at: new Date().toISOString(),
       },
-    }) as DispensingEvent;
+    })) as DispensingEvent;
 
     // Check if ALL items in prescription are fully dispensed
-    const rx = PrescriptionService.getPrescriptionById(prescriptionId)!;
+    const rx = (await PrescriptionService.getPrescriptionById(prescriptionId))!;
     const pId = rx.id || rx._local_id!;
     let allFullyDispensed = true;
 
@@ -210,7 +210,7 @@ export class DispensingEngine {
     });
 
     const newRxStatus = allFullyDispensed ? 'DISPENSED' : 'PARTIALLY_DISPENSED';
-    localMutate({
+    (await localMutate({
       table: 'prescriptions',
       operation: 'UPDATE',
       data: {
@@ -218,19 +218,19 @@ export class DispensingEngine {
         _local_id: pId,
         status: newRxStatus,
       },
-    });
+    }));
 
     return eventRecord;
   }
 
-  static getRefillEligibility(prescriptionId: string, prescriptionItemId: string): {
+  static async getRefillEligibility(prescriptionId: string, prescriptionItemId: string): Promise<{
     status: RefillEligibility;
     repeatsAuthorized: number;
     repeatsUsed: number;
     remainingRepeats: number;
     validUntil?: string | null;
-  } {
-    const rx = PrescriptionService.getPrescriptionById(prescriptionId);
+  }> {
+    const rx = (await PrescriptionService.getPrescriptionById(prescriptionId));
     if (!rx) {
       return { status: 'NOT_ELIGIBLE', repeatsAuthorized: 0, repeatsUsed: 0, remainingRepeats: 0 };
     }
@@ -239,9 +239,9 @@ export class DispensingEngine {
       return { status: 'EXPIRED', repeatsAuthorized: 0, repeatsUsed: 0, remainingRepeats: 0 };
     }
 
-    const itemRow: any = localDb
+    const itemRow: any = (await localDb
       .prepare('SELECT * FROM prescription_items WHERE (id = ? OR _local_id = ?) AND _deleted = 0')
-      .get(prescriptionItemId, prescriptionItemId);
+      .get(prescriptionItemId, prescriptionItemId));
 
     if (!itemRow) {
       return { status: 'NOT_ELIGIBLE', repeatsAuthorized: 0, repeatsUsed: 0, remainingRepeats: 0 };
@@ -273,10 +273,10 @@ export class DispensingEngine {
     };
   }
 
-  static getDispensingHistory(prescriptionId: string): DispensingEvent[] {
-    const rows: any[] = localDb
+  static async getDispensingHistory(prescriptionId: string): Promise<DispensingEvent[]> {
+    const rows: any[] = (await localDb
       .prepare('SELECT * FROM dispensing_events WHERE prescription_id = ? AND _deleted = 0 ORDER BY dispensed_at DESC')
-      .all(prescriptionId);
+      .all(prescriptionId));
     return rows as DispensingEvent[];
   }
 }

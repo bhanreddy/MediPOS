@@ -1,3 +1,7 @@
+import { AppError } from '../lib/appError';
+import { requireRole } from '../middleware/rbac';
+import { resolveCloudStoreContext, selectedCloudStore } from '../services/cloudStoreContext';
+import { csvForRows, operationalReport, statutoryRegister } from '../services/pharmacyReports';
 import {
   localMutate,
   queryAll,
@@ -9,7 +13,7 @@ import { Router } from "express";
 import { Money } from "../lib/money";
 import { requireAuth } from "../middleware/auth";
 
-import { buildGstr1Payload, SaleRowForGstr1 } from "../services/gstr1Builder";
+import { gstInvoiceExport } from "../services/gstInvoiceExport";
 import { computeCogs } from "../lib/cogsQuery";
 import {
   buildAccountingSummary,
@@ -22,6 +26,10 @@ export const reportsRouter = Router();
 reportsRouter.get("/dashboard", requireAuth, async (req, res, next) => {
   try {
     const clinicId = req.user!.clinic_id!;
+    const branch = selectedCloudStore();
+    const branchSales = branch ? 'AND s.store_id = ?' : '';
+    const branchStock = branch ? 'JOIN branch_stock_snapshot p ON p.batch_id=mb.id AND p.store_id=?' : '';
+    const units = branch ? 'p.available' : 'mb.quantity_remaining';
     const in30 = new Date();
     in30.setDate(in30.getDate() + 30);
     const in30Date = in30.toISOString().split("T")[0];
@@ -56,7 +64,7 @@ reportsRouter.get("/dashboard", requireAuth, async (req, res, next) => {
            COALESCE(SUM(CASE WHEN s.is_return THEN -s.net_amount ELSE s.net_amount END), 0) AS revenue,
            COUNT(s.id) FILTER (WHERE NOT COALESCE(s.is_return, false))::int AS bills
          FROM days
-         LEFT JOIN sales s ON s.clinic_id = ?
+         LEFT JOIN sales s ON s.clinic_id = ? ${branchSales}
            AND s.deleted_at IS NULL
            AND s.created_at >= ((SELECT today - 6 FROM win)::timestamp AT TIME ZONE (SELECT tz FROM win))
            AND (s.created_at AT TIME ZONE (SELECT tz FROM win))::date = days.day
@@ -65,19 +73,19 @@ reportsRouter.get("/dashboard", requireAuth, async (req, res, next) => {
        SELECT
          (SELECT today::text FROM win) AS today,
          (SELECT COUNT(*)::int FROM medicines m
-          CROSS JOIN LATERAL (
-            SELECT COALESCE(SUM(mb.quantity_remaining), 0) AS stock
-            FROM medicine_batches mb
-            WHERE mb.clinic_id = ? AND mb.medicine_id = m.id
-              AND mb.expiry_date >= (SELECT today FROM win) AND mb.deleted_at IS NULL
-              AND COALESCE(mb.is_disposed, false) = false
-          ) batch_stock
+          LEFT JOIN (
+            SELECT mb.medicine_id, SUM(${units}) AS stock
+            FROM medicine_batches mb ${branchStock}
+            WHERE mb.clinic_id = ? AND mb.expiry_date >= (SELECT today FROM win)
+              AND mb.deleted_at IS NULL AND mb.is_disposed IS NOT TRUE
+            GROUP BY mb.medicine_id
+          ) batch_stock ON batch_stock.medicine_id=m.id
           WHERE m.clinic_id = ? AND m.deleted_at IS NULL AND m.is_active = true
-            AND batch_stock.stock <= m.low_stock_threshold
+            AND COALESCE(batch_stock.stock,0) <= m.low_stock_threshold
          ) AS low_stock_count,
-         (SELECT COUNT(*)::int FROM medicine_batches
-          WHERE clinic_id = ? AND deleted_at IS NULL AND quantity_remaining > 0 AND expiry_date <= ?
-            AND COALESCE(is_disposed, false) = false
+         (SELECT COUNT(*)::int FROM medicine_batches mb ${branchStock}
+          WHERE mb.clinic_id = ? AND mb.deleted_at IS NULL AND ${branch ? 'p.on_hand' : units} > 0 AND mb.expiry_date <= ?
+            AND COALESCE(mb.is_disposed, false) = false
          ) AS expiry_count_30d,
          (SELECT COALESCE(SUM(outstanding_balance), 0) FROM customers
           WHERE clinic_id = ? AND deleted_at IS NULL) AS outstanding_receivable,
@@ -96,7 +104,7 @@ reportsRouter.get("/dashboard", requireAuth, async (req, res, next) => {
                    COALESCE(s.is_return, false) AS is_return, c.name AS customer_name
             FROM sales s
             LEFT JOIN customers c ON c.id::text = s.customer_id::text
-            WHERE s.clinic_id = ? AND s.deleted_at IS NULL AND COALESCE(s.is_return, false) = false
+            WHERE s.clinic_id = ? ${branchSales} AND s.deleted_at IS NULL AND COALESCE(s.is_return, false) = false
             ORDER BY s.created_at DESC
             LIMIT 10
           ) recent
@@ -104,7 +112,8 @@ reportsRouter.get("/dashboard", requireAuth, async (req, res, next) => {
          (SELECT COALESCE(jsonb_agg(jsonb_build_object(
             'date', counted.day::text, 'revenue', counted.revenue, 'bills', counted.bills
           ) ORDER BY counted.day), '[]'::jsonb) FROM counted) AS daily`,
-      [clinicId, clinicId, clinicId, clinicId, clinicId, in30Date, clinicId, clinicId, clinicId, clinicId],
+      [clinicId, clinicId, ...(branch ? [branch, branch] : []), clinicId, clinicId,
+        ...(branch ? [branch] : []), clinicId, in30Date, clinicId, clinicId, clinicId, clinicId, ...(branch ? [branch] : [])],
     );
 
     const low_stock_count = Number(snapshot?.low_stock_count ?? 0);
@@ -319,55 +328,54 @@ reportsRouter.get("/gst-purchases", requireAuth, async (req, res, next) => {
   }
 });
 
-// GET /api/reports/schedule-h1
-reportsRouter.get("/schedule-h1", requireAuth, async (req, res, next) => {
+const registerColumns = [
+  'classification', 'invoice_number', 'sale_date', 'patient_name', 'patient_address', 'prescriber_name',
+  'prescriber_address', 'prescriber_registration', 'prescription_number', 'written_date', 'pharmacist_name',
+  'pharmacist_registration', 'pharmacist_authority', 'prescription_register', 'h1_register',
+  'x_register_page', 'x_duplicate_reference', 'schedule_x_licence', 'medicine_name', 'manufacturer',
+  'batch_number', 'expiry_date', 'prescribed_dose', 'quantity', 'retain_at_least_until',
+  'inward_quantity', 'supplier_name', 'supplier_address', 'supplier_licence', 'purchase_invoice', 'purchase_date',
+];
+
+function registerHandler(register: 'prescription' | 'h1' | 'x'): import('express').RequestHandler {
+  return async (req, res, next) => {
+    try {
+      const clinicId = req.user!.clinic_id!;
+      const requested = typeof req.query.store_id === 'string' ? req.query.store_id : undefined;
+      const { storeId } = await resolveCloudStoreContext(clinicId, { store_id: requested });
+      const data = storeId ? await statutoryRegister(clinicId, storeId, register, req.query) : [];
+      if (req.query.format === 'csv') {
+        res.attachment(`pharmacy-${register}-register.csv`).type('text/csv').send(csvForRows(data, registerColumns));
+      } else {
+        res.json({ data, columns: registerColumns });
+      }
+    } catch (error) { next(error); }
+  };
+}
+
+reportsRouter.get('/prescription-register', requireAuth, requireRole('OWNER', 'PHARMACIST'), registerHandler('prescription'));
+reportsRouter.get('/schedule-h1', requireAuth, requireRole('OWNER', 'PHARMACIST'), registerHandler('h1'));
+reportsRouter.get('/schedule-x', requireAuth, requireRole('OWNER', 'PHARMACIST'), registerHandler('x'));
+reportsRouter.get('/register/:kind', requireAuth, requireRole('OWNER', 'PHARMACIST'), (req, res, next) => {
+  const routes = { 'prescription-register': 'prescription', 'schedule-h1': 'h1', 'schedule-x': 'x' } as const;
+  const kind = req.params.kind as keyof typeof routes;
+  if (!Object.hasOwn(routes, kind)) return next(new AppError(404, 'Unknown pharmacy register.'));
+  return registerHandler(routes[kind])(req, res, next);
+});
+
+reportsRouter.get('/operations', requireAuth, requireRole('OWNER'), async (req, res, next) => {
   try {
-    const { from, to } = req.query;
     const clinicId = req.user!.clinic_id!;
-    const conditions = [
-      "si._deleted=0",
-      "s._deleted=0",
-      "m.is_schedule_h1=true",
-      "s.clinic_id=?",
-    ];
-    const values: any[] = [clinicId];
-
-    if (from) {
-      conditions.push("s.created_at>=?");
-      values.push(from);
+    const requested = typeof req.query.store_id === 'string' ? req.query.store_id : undefined;
+    const storeId = requested ? (await resolveCloudStoreContext(clinicId, { store_id: requested })).storeId : null;
+    const data = await operationalReport(clinicId, storeId, req.query);
+    const columns = Object.keys(data[0] ?? {});
+    if (req.query.format === 'csv') {
+      res.attachment('operations-report.csv').type('text/csv').send(csvForRows(data, columns));
+    } else {
+      res.json({ data, columns });
     }
-    if (to) {
-      conditions.push("s.created_at<=?");
-      values.push(to);
-    }
-
-    const rows = await queryRaw<Record<string, any>>(
-      `SELECT si.quantity, si.total, s.created_at as sale_date, s.invoice_number,
-              m.name as medicine_name, c.name as customer_name, mb.batch_number
-       FROM sale_items si
-       JOIN sales s ON s.id = si.sale_id
-       JOIN medicines m ON m.id = si.medicine_id
-       LEFT JOIN medicine_batches mb ON mb.id = si.batch_id
-       LEFT JOIN customers c ON c.id = s.customer_id
-       WHERE ${conditions.join(" AND ")}
-       ORDER BY s.created_at`,
-      values,
-    );
-
-    const data = rows.map((r) => ({
-      date: r.sale_date,
-      invoice_number: r.invoice_number,
-      customer_name: r.customer_name || "Walk-in",
-      medicine_name: r.medicine_name,
-      batch: r.batch_number ?? "",
-      qty: r.quantity,
-      amount: r.total,
-    }));
-
-    res.json({ data });
-  } catch (err) {
-    next(err);
-  }
+  } catch (error) { next(error); }
 });
 
 // GET /api/reports/product-wise
@@ -622,7 +630,7 @@ reportsRouter.get("/slow-moving", requireAuth, async (req, res, next) => {
 });
 
 // GET /api/reports/gstr1-export?month=1&year=2025
-reportsRouter.get("/gstr1-export", requireAuth, async (req, res, next) => {
+reportsRouter.get("/gstr1-export", requireAuth, requireRole("OWNER"), async (req, res, next) => {
   try {
     const month = parseInt(req.query.month as string, 10);
     const year = parseInt(req.query.year as string, 10);
@@ -639,50 +647,10 @@ reportsRouter.get("/gstr1-export", requireAuth, async (req, res, next) => {
         .json({ error: { message: "Valid month (1-12) and year required" } });
     }
 
-    const start = new Date(Date.UTC(year, month - 1, 1, 0, 0, 0)).toISOString();
-    const end = new Date(
-      Date.UTC(year, month, 0, 23, 59, 59, 999),
-    ).toISOString();
     const clinicId = req.user!.clinic_id!;
-
-    const clinic = (await queryOne("clinics", "id=?", [clinicId])) as any;
-
-    const salesRaw = await queryRaw<Record<string, any>>(
-      `SELECT s.id, s.invoice_number, s.created_at as sale_date, s.net_amount, c.gstin as customer_gstin
-       FROM sales s
-       LEFT JOIN customers c ON c.id = s.customer_id
-       WHERE s._deleted=0 AND s.is_return=false AND s.clinic_id=? AND s.created_at>=? AND s.created_at<=?`,
-      [clinicId, start, end],
-    );
-
-    const sales: SaleRowForGstr1[] = await Promise.all(
-      salesRaw.map(async (s) => {
-        const items = await queryRaw<Record<string, any>>(
-          `SELECT si.total, si.gst_rate, si.quantity, m.hsn_code, m.name as medicine_name
-         FROM sale_items si
-         LEFT JOIN medicines m ON m.id = si.medicine_id
-         WHERE si._deleted=0 AND si.sale_id=?`,
-          [s.id],
-        );
-
-        return {
-          invoice_number: s.invoice_number,
-          sale_date: s.sale_date,
-          net_amount: Number(s.net_amount),
-          customer_gstin: s.customer_gstin || null,
-          items: items.map((it) => ({
-            total: Number(it.total),
-            gst_rate: Number(it.gst_rate),
-            quantity: it.quantity,
-            hsn_code: it.hsn_code || null,
-            medicine_name: it.medicine_name || "",
-          })),
-        };
-      }),
-    );
-
-    const payload = buildGstr1Payload(clinic?.gstin || "", month, year, sales);
-    res.json({ data: payload });
+    const requested = typeof req.query.store_id === 'string' ? req.query.store_id : undefined;
+    const { storeId } = await resolveCloudStoreContext(clinicId, { store_id: requested });
+    res.json(await gstInvoiceExport(clinicId, storeId, month, year));
   } catch (err) {
     next(err);
   }

@@ -1,6 +1,6 @@
 // warehouseOperationsService.ts — Warehouse Bins, Pick Sequencing & Operational Queues Engine
 import { AppError } from '../../lib/appError';
-import { localDb } from '../../local-db';
+import { businessDb as localDb } from '../../lib/businessDb';
 import { localMutate } from '../../lib/localMutate';
 import { v4 as uuidv4 } from 'uuid';
 import { WarehouseBin } from '../../domain/transferTypes';
@@ -9,8 +9,8 @@ export class WarehouseOperationsService {
   /**
    * List all bins for a warehouse
    */
-  static listBins(organizationId: string, warehouseId: string): WarehouseBin[] {
-    const rows: any[] = localDb
+  static async listBins(organizationId: string, warehouseId: string): Promise<WarehouseBin[]> {
+    const rows: any[] = (await localDb
       .prepare(
         `SELECT * FROM warehouse_bins
          WHERE (organization_id = ?)
@@ -18,7 +18,7 @@ export class WarehouseOperationsService {
            AND _deleted = 0
          ORDER BY pick_sequence ASC, bin_code ASC`
       )
-      .all(organizationId, warehouseId, warehouseId);
+      .all(organizationId, warehouseId, warehouseId));
 
     return rows.map((r) => ({
       ...r,
@@ -30,7 +30,7 @@ export class WarehouseOperationsService {
   /**
    * Create or configure a warehouse bin
    */
-  static createBin(params: {
+  static async createBin(params: {
     organizationId: string;
     warehouseId: string;
     binCode: string;
@@ -40,7 +40,7 @@ export class WarehouseOperationsService {
     shelf?: string;
     binType?: 'STORAGE' | 'STAGING' | 'PICKING' | 'PACKING' | 'COLD_ROOM' | 'QUARANTINE' | 'RECALL' | 'DAMAGE';
     pickSequence?: number;
-  }): WarehouseBin {
+  }): Promise<WarehouseBin> {
     const {
       organizationId,
       warehouseId,
@@ -56,7 +56,7 @@ export class WarehouseOperationsService {
     const binId = uuidv4();
     const nowIso = new Date().toISOString();
 
-    const bin = localMutate({
+    const bin = (await localMutate({
       table: 'warehouse_bins',
       operation: 'INSERT',
       data: {
@@ -75,7 +75,7 @@ export class WarehouseOperationsService {
         created_at: nowIso,
         updated_at: nowIso,
       },
-    });
+    }));
 
     return bin as any;
   }
@@ -83,27 +83,27 @@ export class WarehouseOperationsService {
   /**
    * Aggregate operational summary for a warehouse
    */
-  static getWarehouseDashboard(organizationId: string, warehouseId: string): any {
-    const wh: any = localDb
+  static async getWarehouseDashboard(organizationId: string, warehouseId: string): Promise<any> {
+    const wh: any = (await localDb
       .prepare(
         `SELECT * FROM warehouses WHERE (id = ? OR _local_id = ?) AND (organization_id = ?)`
       )
-      .get(warehouseId, warehouseId, organizationId);
+      .get(warehouseId, warehouseId, organizationId));
 
     if (!wh) throw new AppError(404, 'Warehouse not found');
 
     // Inbound Transfers
-    const inboundTransfers: any[] = localDb
+    const inboundTransfers: any[] = (await localDb
       .prepare(
         `SELECT * FROM stock_transfers
          WHERE (destination_location_id = ? OR destination_location_id = ?)
            AND status IN ('DISPATCHED', 'IN_TRANSIT', 'PARTIALLY_RECEIVED')
            AND _deleted = 0`
       )
-      .all(wh.id, wh.id);
+      .all(wh.id, wh.id));
 
     // Pick Queue
-    const pickQueue: any[] = localDb
+    const pickQueue: any[] = (await localDb
       .prepare(
         `SELECT * FROM stock_transfers
          WHERE (source_location_id = ? OR source_location_id = ?)
@@ -111,40 +111,40 @@ export class WarehouseOperationsService {
            AND _deleted = 0
          ORDER BY CASE priority WHEN 'CRITICAL' THEN 1 WHEN 'URGENT' THEN 2 WHEN 'HIGH' THEN 3 ELSE 4 END`
       )
-      .all(wh.id, wh.id);
+      .all(wh.id, wh.id));
 
     // Pack Queue
-    const packQueue: any[] = localDb
+    const packQueue: any[] = (await localDb
       .prepare(
         `SELECT * FROM stock_transfers
          WHERE (source_location_id = ? OR source_location_id = ?)
            AND status = 'PICKED'
            AND _deleted = 0`
       )
-      .all(wh.id, wh.id);
+      .all(wh.id, wh.id));
 
     // Dispatch Queue
-    const dispatchQueue: any[] = localDb
+    const dispatchQueue: any[] = (await localDb
       .prepare(
         `SELECT * FROM stock_transfers
          WHERE (source_location_id = ? OR source_location_id = ?)
            AND status = 'PACKED'
            AND _deleted = 0`
       )
-      .all(wh.id, wh.id);
+      .all(wh.id, wh.id));
 
     // In-Transit Transfers
-    const inTransitTransfers: any[] = localDb
+    const inTransitTransfers: any[] = (await localDb
       .prepare(
         `SELECT * FROM stock_transfers
          WHERE (source_location_id = ? OR source_location_id = ? OR destination_location_id = ? OR destination_location_id = ?)
            AND status IN ('DISPATCHED', 'IN_TRANSIT')
            AND _deleted = 0`
       )
-      .all(wh.id, wh.id, wh.id, wh.id);
+      .all(wh.id, wh.id, wh.id, wh.id));
 
     // Quarantine & Recalled Stock
-    const quarantineSummary: any = localDb
+    const quarantineSummary: any = (await localDb
       .prepare(
         `SELECT COALESCE(SUM(quantity_quarantined), 0) as total_quarantined,
                 COALESCE(SUM(quantity_recalled), 0) as total_recalled,
@@ -152,7 +152,7 @@ export class WarehouseOperationsService {
          FROM inventory_positions
          WHERE (warehouse_id = ? OR warehouse_id = ?) AND location_type = 'WAREHOUSE'`
       )
-      .get(wh.id, wh.id);
+      .get(wh.id, wh.id));
 
     return {
       warehouseId: wh.id,

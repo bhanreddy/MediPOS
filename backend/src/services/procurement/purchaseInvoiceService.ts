@@ -1,5 +1,5 @@
 // purchaseInvoiceService.ts — Enterprise Purchase Invoice, OCR Draft, 3-Way Match Posting & Liability Creation Engine
-import { localDb } from '../../local-db';
+import { businessDb as localDb } from '../../lib/businessDb';
 import { localMutate } from '../../lib/localMutate';
 import { Money } from '../../lib/money';
 import { v4 as uuidv4 } from 'uuid';
@@ -45,7 +45,7 @@ export class PurchaseInvoiceService {
   /**
    * Create a draft Purchase Invoice and run initial Three-Way Match evaluation
    */
-  static createInvoice(params: CreatePurchaseInvoiceParams): PurchaseInvoice {
+  static async createInvoice(params: CreatePurchaseInvoiceParams): Promise<PurchaseInvoice> {
     const {
       organizationId,
       storeId = null,
@@ -69,7 +69,7 @@ export class PurchaseInvoiceService {
     }
 
     // Duplicate Supplier Invoice Check (organization + supplier + invoice_number)
-    const existing: any = localDb
+    const existing: any = (await localDb
       .prepare(
         `SELECT id, invoice_number, status FROM purchase_invoices
          WHERE (organization_id = ?)
@@ -77,7 +77,7 @@ export class PurchaseInvoiceService {
            AND invoice_number = ?
            AND _deleted = 0 LIMIT 1`
       )
-      .get(organizationId, supplierId, supplierId, invoiceNumber);
+      .get(organizationId, supplierId, supplierId, invoiceNumber));
 
     if (existing) {
       throw new Error(`Duplicate Supplier Invoice: Invoice #${invoiceNumber} already exists for this supplier (Status: ${existing.status})`);
@@ -104,7 +104,7 @@ export class PurchaseInvoiceService {
       discountPaise += lineDiscAmtPaise;
       gstPaise += lineGstPaise;
 
-      const itemRecord = localMutate({
+      const itemRecord = (await localMutate({
         table: 'purchase_invoice_items',
         operation: 'INSERT',
         data: {
@@ -125,7 +125,7 @@ export class PurchaseInvoiceService {
           match_status: 'MATCHED',
           variance_notes: it.varianceNotes || null,
         },
-      });
+      }));
 
       invItemRecords.push({
         ...itemRecord,
@@ -158,15 +158,15 @@ export class PurchaseInvoiceService {
     }
 
     // Run Initial Three-Way Match Engine
-    const matchResult = ThreeWayMatchingService.evaluateThreeWayMatch({
+    const matchResult = (await ThreeWayMatchingService.evaluateThreeWayMatch({
       organizationId,
       invoiceId,
       poId,
       grnId,
       invoiceLines: invItemRecords,
-    });
+    }));
 
-    const invoiceHeader = localMutate({
+    const invoiceHeader = (await localMutate({
       table: 'purchase_invoices',
       operation: 'INSERT',
       data: {
@@ -197,9 +197,9 @@ export class PurchaseInvoiceService {
         ocr_extracted_json: ocrExtractedJson ? JSON.stringify(ocrExtractedJson) : null,
         created_by: createdBy,
       },
-    });
+    }));
 
-    return this.getInvoiceById(invoiceId, organizationId)!;
+    return (await this.getInvoiceById(invoiceId, organizationId))!;
   }
 
   /**
@@ -210,13 +210,13 @@ export class PurchaseInvoiceService {
    * - Records supplier rate observation in price history
    * - CRITICAL: Does NOT increment physical stock (stock was added on GRN posting)
    */
-  static postInvoice(params: {
+  static async postInvoice(params: {
     invoiceId: string;
     organizationId: string;
     postedBy: string;
-  }): PurchaseInvoice {
+  }): Promise<PurchaseInvoice> {
     const { invoiceId, organizationId, postedBy } = params;
-    const invoice = this.getInvoiceById(invoiceId, organizationId);
+    const invoice = (await this.getInvoiceById(invoiceId, organizationId));
     if (!invoice) throw new Error('Purchase Invoice not found');
 
     if (invoice.status === 'POSTED') {
@@ -229,7 +229,7 @@ export class PurchaseInvoiceService {
 
     // Require 3-way match or exception approval before posting
     if (invoice.match_status !== 'MATCHED') {
-      const matchRow: any = localDb.prepare('SELECT * FROM purchase_match_results WHERE invoice_id = ?').get(invoice.id);
+      const matchRow: any = (await localDb.prepare('SELECT * FROM purchase_match_results WHERE invoice_id = ?').get(invoice.id));
       if (!matchRow || matchRow.is_exception) {
         throw new Error(`Cannot post invoice with unmatched variance: ${invoice.match_status}. Supervisor exception approval required.`);
       }
@@ -238,7 +238,7 @@ export class PurchaseInvoiceService {
     const nowIso = new Date().toISOString();
 
     // 1. Create Supplier Payable Ledger Entry (Increases Liability)
-    SupplierPayableService.recordLedgerEntry({
+    (await SupplierPayableService.recordLedgerEntry({
       organizationId,
       storeId: invoice.store_id || null,
       supplierId: invoice.supplier_id,
@@ -250,11 +250,11 @@ export class PurchaseInvoiceService {
       creditPaise: invoice.total_paise,
       notes: `Purchase Invoice #${invoice.invoice_number} posted (Due: ${invoice.due_date || 'N/A'})`,
       performedBy: postedBy,
-    });
+    }));
 
     // 2. Record Price Observations in History
     for (const it of invoice.items || []) {
-      SupplierCatalogService.recordPriceHistory({
+      (await SupplierCatalogService.recordPriceHistory({
         organizationId,
         supplierId: invoice.supplier_id,
         medicineId: it.medicine_id,
@@ -263,11 +263,11 @@ export class PurchaseInvoiceService {
         sourceType: 'PURCHASE_INVOICE',
         referenceId: invoice.id,
         observedAt: new Date(invoice.invoice_date),
-      });
+      }));
     }
 
     // 3. Mark Invoice as POSTED
-    localMutate({
+    (await localMutate({
       table: 'purchase_invoices',
       operation: 'UPDATE',
       data: {
@@ -276,38 +276,38 @@ export class PurchaseInvoiceService {
         posted_by: postedBy,
         posted_at: nowIso,
       },
-    });
+    }));
 
-    return this.getInvoiceById(invoiceId, organizationId)!;
+    return (await this.getInvoiceById(invoiceId, organizationId))!;
   }
 
   /**
    * Fetch invoice with line items, match results, and supplier metadata
    */
-  static getInvoiceById(id: string, organizationId: string): PurchaseInvoice | null {
-    const row: any = localDb
+  static async getInvoiceById(id: string, organizationId: string): Promise<PurchaseInvoice | null> {
+    const row: any = (await localDb
       .prepare(
         `SELECT pinv.*, s.name as supplier_name
          FROM purchase_invoices pinv
          LEFT JOIN suppliers s ON s.id = pinv.supplier_id OR s._local_id = pinv.supplier_id
          WHERE (pinv.id = ? OR pinv._local_id = ?) AND (pinv.organization_id = ?) AND pinv._deleted = 0`
       )
-      .get(id, id, organizationId);
+      .get(id, id, organizationId));
 
     if (!row) return null;
 
-    const items: any[] = localDb
+    const items: any[] = (await localDb
       .prepare(
         `SELECT pii.*, m.name as medicine_name
          FROM purchase_invoice_items pii
          LEFT JOIN medicines m ON m.id = pii.medicine_id OR m._local_id = pii.medicine_id
          WHERE (pii.invoice_id = ? OR pii.invoice_id = ?) AND pii._deleted = 0`
       )
-      .all(row.id, row._local_id || row.id);
+      .all(row.id, row._local_id || row.id));
 
-    const matchResult: any = localDb
+    const matchResult: any = (await localDb
       .prepare(`SELECT * FROM purchase_match_results WHERE invoice_id = ? OR invoice_id = ? ORDER BY created_at DESC LIMIT 1`)
-      .get(row.id, row._local_id || row.id);
+      .get(row.id, row._local_id || row.id));
 
     return {
       ...row,
@@ -319,7 +319,7 @@ export class PurchaseInvoiceService {
   /**
    * List purchase invoices with filters
    */
-  static listInvoices(params: {
+  static async listInvoices(params: {
     organizationId: string;
     storeId?: string | null;
     supplierId?: string | null;
@@ -327,7 +327,7 @@ export class PurchaseInvoiceService {
     paymentStatus?: string;
     limit?: number;
     offset?: number;
-  }): { data: PurchaseInvoice[]; total: number } {
+  }): Promise<{ data: PurchaseInvoice[]; total: number }> {
     const { organizationId, storeId, supplierId, status, paymentStatus, limit = 50, offset = 0 } = params;
 
     let query = `
@@ -355,14 +355,14 @@ export class PurchaseInvoiceService {
       values.push(paymentStatus);
     }
 
-    const countRow: any = localDb.prepare(`SELECT COUNT(*) as total FROM (${query})`).get(...values);
+    const countRow: any = (await localDb.prepare(`SELECT COUNT(*) as total FROM (${query})`).get(...values));
     const total = Number(countRow?.total || 0);
 
     query += ` ORDER BY pinv.invoice_date DESC, pinv.created_at DESC LIMIT ? OFFSET ?`;
     values.push(limit, offset);
 
-    const rows: any[] = localDb.prepare(query).all(...values);
-    const data = rows.map(r => this.getInvoiceById(r.id, organizationId)!);
+    const rows: any[] = (await localDb.prepare(query).all(...values));
+    const data = (await Promise.all(rows.map(async r => (await this.getInvoiceById(r.id, organizationId))!)));
 
     return { data, total };
   }

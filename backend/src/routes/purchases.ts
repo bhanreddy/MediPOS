@@ -1,6 +1,7 @@
-import { resolveCloudStoreContext } from '../services/cloudStoreContext';
+import { allocateSupplierReturnCredits, recordSupplierCloudPayment, supplierInvoiceBalance } from '../services/supplierCloudPayments';
+import { assertSaleStore, resolveCloudStoreContext, selectedCloudStore, visibleCloudStoreIds } from '../services/cloudStoreContext';
 import { transactionalRoute } from '../lib/transactionalRoute';
-import { beforePostgresCommit, localMutate, queryAll, queryOne, queryRaw, queryCount } from '../lib/postgresDb';
+import { localMutate, queryAll, queryOne, queryRaw, queryCount } from '../lib/postgresDb';
 import { Router } from 'express';
 import { z } from 'zod';
 import { AppError } from '../lib/appError';
@@ -16,6 +17,7 @@ import { findInvoiceImport, importedReceiptCost, normalizeSupplierInvoice } from
 import multer from 'multer';
 import Anthropic from '@anthropic-ai/sdk';
 import { parse as parseCsv } from 'csv-parse/sync';
+import { randomUUID } from 'node:crypto';
 
 export const purchasesRouter = Router();
 const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 10 * 1024 * 1024, files: 1, fields: 25 } });
@@ -35,6 +37,12 @@ purchasesRouter.get('/', requireAuth, async (req, res, next) => {
     const values: any[] = [clinicId];
 
     if (supplier_id) { conditions.push('p.supplier_id::text = ?'); values.push(supplier_id); }
+    const branch = selectedCloudStore();
+    if (branch) { conditions.push('p.store_id=?'); values.push(branch); }
+    else {
+      const storeIds = await visibleCloudStoreIds(clinicId);
+      if (storeIds) { conditions.push('p.store_id = ANY(?::uuid[])'); values.push(storeIds); }
+    }
     if (status) { conditions.push('p.payment_status = ?'); values.push(status); }
     if (from) { conditions.push('p.created_at >= ?'); values.push(from); }
     if (to) { conditions.push('p.created_at <= ?'); values.push(to); }
@@ -191,14 +199,14 @@ purchasesRouter.post('/', requireAuth, requireRole('OWNER'), transactionalRoute(
       const resolvedMedicineId = (med as any).id;
 
       // Evaluate procurement supplier scheme for effective unit cost & free stock
-      const schemeResult = parsed.invoice_import ? importedReceiptCost(item) : SupplierSchemeEngine.evaluateInwardScheme({
+      const schemeResult = parsed.invoice_import ? importedReceiptCost(item) : (await SupplierSchemeEngine.evaluateInwardScheme({
         organizationId: organizationId || clinicId,
         supplierId,
         medicineId: resolvedMedicineId,
         billedQuantity: item.quantity,
         purchasePrice: item.purchase_price,
         requestedDiscountPct: item.discount,
-      });
+      }));
 
       const effectiveReceivedQuantity = schemeResult.totalReceivedQuantity;
       const effectiveUnitCost = schemeResult.effectiveUnitCost;
@@ -284,28 +292,7 @@ purchasesRouter.post('/', requireAuth, requireRole('OWNER'), transactionalRoute(
         batchIdForLedger = newBatch.id;
       }
 
-      // Adjust Enterprise Inventory Position
-      beforePostgresCommit(() => { if (storeId && organizationId) {
-        try {
-          InventoryPositionService.adjustStock({
-            organizationId,
-            medicineId: resolvedMedicineId,
-            batchId: batchIdForLedger,
-            locationType: 'STORE',
-            storeId,
-            quantityDelta: effectiveReceivedQuantity,
-          });
-        } catch {
-          InventoryPositionService.getOrCreatePosition({
-            organizationId,
-            medicineId: resolvedMedicineId,
-            batchId: batchIdForLedger,
-            locationType: 'STORE',
-            storeId,
-            initialStock: newQuantityRemaining,
-          });
-        }
-      } });
+      if(storeId&&organizationId) await InventoryPositionService.setCanonicalStock({organizationId,medicineId:resolvedMedicineId,batchId:batchIdForLedger,locationType:'STORE',storeId,quantity:newQuantityRemaining});
 
       // Record Immutable Stock Ledger Movement
       await localMutate({
@@ -329,18 +316,14 @@ purchasesRouter.post('/', requireAuth, requireRole('OWNER'), transactionalRoute(
       });
     }
 
-    // Update Supplier Outstanding Payable Balance
+    // Record the invoice liability and derive the cached total from invoices.
     if (supplierId && supplierObj) {
-      const currentOutstanding = Number(supplierObj.outstanding_balance || 0);
-      const newOutstanding = Money.add(currentOutstanding, grand_total);
-      await localMutate({
-        table: 'suppliers',
-        operation: 'UPDATE',
-        data: {
-          _local_id: supplierObj._local_id || supplierObj.id,
-          outstanding_balance: newOutstanding,
-        }
-      });
+      await allocateSupplierReturnCredits(supplierId,clinicId);
+      const outstanding=await supplierInvoiceBalance(supplierId,clinicId);
+      await localMutate({table:'suppliers',operation:'UPDATE',data:{_local_id:supplierObj._local_id||supplierObj.id,outstanding_balance:outstanding}});
+      await localMutate({table:'supplier_payable_ledger',operation:'INSERT',data:{id:randomUUID(),clinic_id:clinicId,organization_id:organizationId,
+        store_id:storeId,supplier_id:supplierId,transaction_type:'PURCHASE_INVOICE',reference_id:purchase.id,reference_number:parsed.invoice_number||null,
+        purchase_id:purchase.id,debit_paise:0,credit_paise:Money.toPaise(grand_total),balance_after_paise:Money.toPaise(outstanding),performed_by:req.user!.id}});
     }
 
     if (parsed.reorder_order_id) await queryRaw(`INSERT INTO reorder_receipts
@@ -394,27 +377,35 @@ purchasesRouter.put('/:id', requireAuth, requireRole('OWNER'), async (req, res, 
 });
 
 // PATCH /api/purchases/:id/payment
-purchasesRouter.patch('/:id/payment', requireAuth, requireRole('OWNER'), async (req, res, next) => {
+purchasesRouter.patch('/:id/payment', requireAuth, requireRole('OWNER'), transactionalRoute(async (req, res, next) => {
   try {
-    const clinicId = req.user!.clinic_id!;
-    const existing = await queryOne('purchases', '(_local_id=? OR id=?) AND clinic_id=?', [req.params.id, req.params.id, clinicId]);
-    if (!existing) {
-      return res.status(404).json({ error: 'Purchase not found' });
-    }
-    const localId = (existing as any)._local_id || (existing as any).id;
+    const clinicId=req.user!.clinic_id!;
+    const parsed=updatePaymentSchema.parse(req.body);
+    const existing=await queryOne('purchases','(id::text=? OR _local_id=?) AND clinic_id=?',[req.params.id,req.params.id,clinicId]);
+    if(!existing || !existing.supplier_id)throw new AppError(404,'Supplier purchase invoice not found');
+    const result=await recordSupplierCloudPayment({clinicId,userId:req.user!.id,supplierId:existing.supplier_id,purchaseId:existing.id,
+      targetPaidAmount:parsed.paid_amount,mode:req.body.payment_mode||'bank_transfer',note:req.body.note,
+      requestId:String(req.get('Idempotency-Key')||req.body._local_id||`purchase:${existing.id}:paid:${Money.toPaise(parsed.paid_amount)}`)});
+    const data=await queryOne('purchases','id=? AND clinic_id=?',[existing.id,clinicId]);
+    res.json({data,payment:result.payment,allocations:result.allocations,replayed:result.replayed});
+  }catch(error){next(error);}
+}));
 
-    const parsed = updatePaymentSchema.parse(req.body);
-
-    const data = await localMutate({
-      table: 'purchases',
-      operation: 'UPDATE',
-      data: { paid_amount: parsed.paid_amount, payment_status: parsed.payment_status, _local_id: localId }
-    });
-
-    res.json({ data });
-  } catch (err) {
-    next(err);
-  }
+// No storage credential or publicly usable object URL is sent to clients.
+purchasesRouter.get('/bill-image', requireAuth, async (req, res, next) => {
+  try {
+    const key = typeof req.query.key === 'string' ? req.query.key : '';
+    const clinicId = req.user?.clinic_id;
+    if (!clinicId || !key.startsWith(`${clinicId}/`) ||
+        !/^[a-zA-Z0-9_-]+\/[a-zA-Z0-9_-]+\.(jpg|jpeg|png|webp|pdf)$/.test(key))
+      throw new AppError(404, 'Purchase document not found');
+    const { data, error } = await supabaseAdmin.storage.from('purchase-bills').download(key);
+    if (error || !data) throw new AppError(404, 'Purchase document not found');
+    res.setHeader('Cache-Control', 'private, no-store');
+    res.setHeader('Content-Disposition', 'attachment');
+    res.setHeader('X-Content-Type-Options', 'nosniff');
+    res.type(data.type || 'application/octet-stream').send(Buffer.from(await data.arrayBuffer()));
+  } catch (error) { next(error); }
 });
 
 // POST /api/purchases/bill-scan (requires network — Anthropic AI)
@@ -426,7 +417,7 @@ purchasesRouter.post('/bill-scan', requireAuth, async (req, res, next) => {
     }
 
     const buffer = Buffer.from(imageBase64, 'base64');
-    const filename = `${new Date().getTime()}.jpg`;
+    const filename = `${randomUUID()}.jpg`;
     
     // Upload image
     const { data: uploadData, error: uploadError } = await supabaseAdmin.storage
@@ -435,7 +426,8 @@ purchasesRouter.post('/bill-scan', requireAuth, async (req, res, next) => {
 
     if (uploadError) throw uploadError;
 
-    const bill_image_url = `${process.env.SUPABASE_URL}/storage/v1/object/public/purchase-bills/${req.user!.clinic_id!}/${filename}`;
+    const key = `${req.user!.clinic_id!}/${filename}`;
+    const bill_image_url = `${req.protocol}://${req.get('host')}/api/purchases/bill-image?key=${encodeURIComponent(key)}`;
 
     const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
 
@@ -620,7 +612,9 @@ purchasesRouter.get('/purchase-returns', requireAuth, async (req, res, next) => 
 purchasesRouter.post('/purchase-returns', requireAuth, requireRole('OWNER'), transactionalRoute(async (req, res, next) => {
   try {
     const { supplier_id, reference_note, lines } = z.object({ supplier_id: z.string().uuid(), reference_note: z.string().max(2000).optional(), lines: z.array(z.object({ batchId: z.string().uuid(), quantity: z.number().int().positive() })).min(1).max(500) }).parse(req.body);
-    if (!(await queryOne('suppliers', 'id = ? AND clinic_id = ?', [supplier_id, req.user!.clinic_id!]))) throw new AppError(404, 'Supplier not found');
+    const clinicId = req.user!.clinic_id!;
+    const [supplier] = await queryRaw('SELECT * FROM suppliers WHERE id=? AND clinic_id=? AND deleted_at IS NULL FOR UPDATE',[supplier_id,clinicId]);
+    if (!supplier) throw new AppError(404, 'Supplier not found');
     if (!lines || !lines.length) {
       return res.status(400).json({ error: 'Return requires at least one line' });
     }
@@ -644,9 +638,7 @@ purchasesRouter.post('/purchase-returns', requireAuth, requireRole('OWNER'), tra
 
     const returnId = returnHeader.id;
     const returnLocalId = returnHeader._local_id;
-    const clinicId = req.user!.clinic_id!;
-
-    for (const ln of lines) {
+    for (const ln of [...lines].sort((a,b)=>a.batchId.localeCompare(b.batchId))) {
       const [batch] = await queryRaw('SELECT * FROM medicine_batches WHERE (id = ? OR _local_id = ?) AND clinic_id = ? AND deleted_at IS NULL FOR UPDATE', [ln.batchId, ln.batchId, clinicId]);
       if (batch?.supplier_id && batch.supplier_id !== supplier_id) throw new AppError(400, 'Batch belongs to another supplier');
       if (!batch) {
@@ -656,6 +648,15 @@ purchasesRouter.post('/purchase-returns', requireAuth, requireRole('OWNER'), tra
       const onHand = Number((batch as any).quantity_remaining ?? 0);
       if (onHand < ln.quantity) {
         throw new AppError(409, `Insufficient stock to return for batch ${(batch as any).batch_number}`);
+      }
+      const batchStoreId = batch.store_id || null;
+      const batchOrgId = batch.organization_id || null;
+      if (batchStoreId && batchOrgId) {
+        await resolveCloudStoreContext(clinicId,{store_id:batchStoreId});
+        const location = {organizationId:batchOrgId,medicineId:batch.medicine_id,batchId:batch.id,locationType:'STORE' as const,storeId:batchStoreId};
+        const position = await InventoryPositionService.getOrCreatePosition(location);
+        if (position.quantity_available < ln.quantity) throw new AppError(409, `Insufficient available stock at this store for batch ${batch.batch_number}`);
+        await InventoryPositionService.adjustStock({...location,quantityDelta:-ln.quantity});
       }
 
       const rate = Number((batch as any).purchase_price ?? 0);
@@ -671,24 +672,6 @@ purchasesRouter.post('/purchase-returns', requireAuth, requireRole('OWNER'), tra
           quantity_remaining: onHand - ln.quantity
         }
       });
-
-      // Adjust Enterprise Inventory Position
-      const batchStoreId = (batch as any).store_id || null;
-      const batchOrgId = (batch as any).organization_id || null;
-      beforePostgresCommit(() => { if (batchStoreId && batchOrgId) {
-        try {
-          InventoryPositionService.adjustStock({
-            organizationId: batchOrgId,
-            medicineId: (batch as any).medicine_id,
-            batchId: (batch as any).id || (batch as any)._local_id,
-            locationType: 'STORE',
-            storeId: batchStoreId,
-            quantityDelta: -ln.quantity,
-          });
-        } catch {
-          // ignore if position not initialized
-        }
-      } });
 
       // Insert Immutable Stock Ledger Movement
       await localMutate({
@@ -735,18 +718,15 @@ purchasesRouter.post('/purchase-returns', requireAuth, requireRole('OWNER'), tra
       }
     });
 
-    // Decrement supplier outstanding balance
-    const supplier = await queryOne('suppliers', '(_local_id = ? OR id = ?) AND clinic_id = ?', [supplier_id, supplier_id, clinicId]);
-    if (supplier) {
-      const currentOutstanding = Number((supplier as any).outstanding_balance ?? 0);
-      await localMutate({
-        table: 'suppliers',
-        operation: 'UPDATE',
-        data: {
-          _local_id: (supplier as any)._local_id,
-          outstanding_balance: Math.max(0, currentOutstanding - roundedTotal)
-        }
-      });
+    // A supplier return is a credit, even if the original invoice is paid.
+    if(roundedTotal>0){
+      const creditPaise=Money.toPaise(roundedTotal);
+      await queryRaw('INSERT INTO supplier_return_credits(clinic_id,supplier_id,purchase_return_id,amount_paise,unallocated_paise) VALUES(?,?,?,?,?)',[clinicId,supplier_id,returnId,creditPaise,creditPaise]);
+      await allocateSupplierReturnCredits(supplier_id,clinicId);
+      const outstanding=await supplierInvoiceBalance(supplier_id,clinicId);
+      await localMutate({table:'suppliers',operation:'UPDATE',data:{_local_id:supplier._local_id||supplier.id,outstanding_balance:outstanding}});
+      await localMutate({table:'supplier_payable_ledger',operation:'INSERT',data:{id:randomUUID(),clinic_id:clinicId,organization_id:supplier.organization_id||null,supplier_id,
+        transaction_type:'DEBIT_NOTE',reference_id:returnId,debit_paise:creditPaise,credit_paise:0,balance_after_paise:Money.toPaise(outstanding),notes:reference_note||'Purchase return to supplier',performed_by:req.user!.id}});
     }
 
     res.status(201).json({ data: { ...returnHeader, total_value: roundedTotal } });
@@ -760,6 +740,7 @@ purchasesRouter.get('/:id', requireAuth, async (req, res, next) => {
     const clinicId = req.user!.clinic_id!;
     const purchase = await queryOne('purchases', '(_local_id=? OR id=?) AND clinic_id=?', [req.params.id, req.params.id, clinicId]);
     if (!purchase) return res.status(404).json({ error: 'Purchase not found' });
+    await assertSaleStore(clinicId, purchase.store_id);
 
     const purchaseId = (purchase as any).id;
     const purchaseItems = await queryAll('purchase_items', 'purchase_id=?', [purchaseId]);
@@ -791,7 +772,9 @@ purchasesRouter.get('/:id', requireAuth, async (req, res, next) => {
       }
     }
 
-    res.json({ data: { ...purchase, purchase_items: purchaseItems } });
+    const payment_history=await queryRaw(`SELECT p.id,p.payment_number,p.payment_date,p.payment_mode,p.reference_number,p.notes,a.allocated_amount_paise
+      FROM supplier_payment_allocations a JOIN supplier_payments p ON p.id=a.payment_id WHERE a.purchase_id=? AND p.clinic_id=? ORDER BY p.created_at DESC`,[purchase.id,clinicId]);
+    res.json({ data: { ...purchase, purchase_items: purchaseItems, payment_history, outstanding_amount:Math.max(0,Money.subtract(Money.subtract(purchase.net_amount,purchase.paid_amount||0),Number(purchase.supplier_credit_paise||0)/100)) } });
   } catch (err) {
     next(err);
   }

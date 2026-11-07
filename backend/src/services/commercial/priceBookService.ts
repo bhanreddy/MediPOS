@@ -1,4 +1,6 @@
-import { localDb } from '../../local-db';
+import { AppError } from '../../lib/appError';
+import { tenantRecord } from '../../lib/tenantRecords';
+import { businessDb as localDb } from '../../lib/businessDb';
 import { localMutate } from '../../lib/localMutate';
 import { Money } from '../../lib/money';
 import { v4 as uuidv4 } from 'uuid';
@@ -26,7 +28,7 @@ export class PriceBookService {
   /**
    * Resolves the authoritative base price hierarchy for a product in a given store/org/customer context.
    */
-  static resolveHierarchy(params: ResolvePriceParams): ResolvedPriceHierarchy {
+  static async resolveHierarchy(params: ResolvePriceParams): Promise<ResolvedPriceHierarchy> {
     const {
       organizationId,
       storeId,
@@ -42,24 +44,21 @@ export class PriceBookService {
     const asOfIso = asOfDate.toISOString();
 
     // 1. Fetch medicine and batch defaults as absolute baseline
-    const medRow: any = localDb
-      .prepare('SELECT * FROM medicines WHERE (id = ? OR _local_id = ?) AND _deleted = 0')
-      .get(medicineId, medicineId);
+    const medRow = (await tenantRecord('medicines', medicineId, organizationId));
 
     let batchRow: any = null;
     if (batchId) {
-      batchRow = localDb
-        .prepare('SELECT * FROM medicine_batches WHERE (id = ? OR _local_id = ?) AND _deleted = 0')
-        .get(batchId, batchId);
+      batchRow = (await tenantRecord('medicine_batches', batchId, organizationId));
+      if (![medRow.id, medRow._local_id].includes(batchRow.medicine_id)) throw new AppError(404, 'Batch not found', 'BATCH_NOT_FOUND');
     } else {
-      batchRow = localDb
+      batchRow = (await localDb
         .prepare(
-          `SELECT * FROM medicine_batches 
-           WHERE (medicine_id = ? OR medicine_id = ?) AND (store_id = ? OR store_id IS NULL) 
+          `SELECT * FROM medicine_batches
+           WHERE organization_id = ? AND (medicine_id = ? OR medicine_id = ?) AND (store_id = ? OR store_id IS NULL)
              AND quantity_remaining > 0 AND _deleted = 0
            ORDER BY expiry_date ASC LIMIT 1`
         )
-        .get(medicineId, medicineId, storeId || null);
+        .get(organizationId, medicineId, medicineId, storeId || null));
     }
 
     const defaultMrp = Number(batchRow?.mrp ?? medRow?.mrp ?? 0);
@@ -88,7 +87,7 @@ export class PriceBookService {
 
     // 2a. Store Scoped Price Books
     if (storeId) {
-      const storePbs: any[] = localDb
+      const storePbs: any[] = (await localDb
         .prepare(
           `SELECT pb.*, pbs.scope_type, (pb.priority + 400) as resolvedPriority
            FROM price_books pb
@@ -99,13 +98,13 @@ export class PriceBookService {
              AND (pb.start_at IS NULL OR pb.start_at <= ?)
              AND (pb.end_at IS NULL OR pb.end_at >= ?)`
         )
-        .all(organizationId, storeId, storeId, asOfIso, asOfIso);
+        .all(organizationId, storeId, storeId, asOfIso, asOfIso));
       candidatePriceBooks.push(...storePbs);
     }
 
     // 2b. Region Scoped Price Books
     if (regionId) {
-      const regionPbs: any[] = localDb
+      const regionPbs: any[] = (await localDb
         .prepare(
           `SELECT pb.*, pbs.scope_type, (pb.priority + 300) as resolvedPriority
            FROM price_books pb
@@ -116,12 +115,12 @@ export class PriceBookService {
              AND (pb.start_at IS NULL OR pb.start_at <= ?)
              AND (pb.end_at IS NULL OR pb.end_at >= ?)`
         )
-        .all(organizationId, regionId, regionId, asOfIso, asOfIso);
+        .all(organizationId, regionId, regionId, asOfIso, asOfIso));
       candidatePriceBooks.push(...regionPbs);
     }
 
     // 2c. Organization Scoped Price Books
-    const orgPbs: any[] = localDb
+    const orgPbs: any[] = (await localDb
       .prepare(
         `SELECT pb.*, 'ORGANIZATION' as scope_type, (pb.priority + 200) as resolvedPriority
          FROM price_books pb
@@ -131,12 +130,12 @@ export class PriceBookService {
            AND (pb.start_at IS NULL OR pb.start_at <= ?)
            AND (pb.end_at IS NULL OR pb.end_at >= ?)`
       )
-      .all(organizationId, asOfIso, asOfIso);
+      .all(organizationId, asOfIso, asOfIso));
     candidatePriceBooks.push(...orgPbs);
 
     // 2d. Customer Group Price Books
     if (customerGroupId) {
-      const cgPbs: any[] = localDb
+      const cgPbs: any[] = (await localDb
         .prepare(
           `SELECT pb.*, 'CUSTOMER_GROUP' as scope_type, (pb.priority + 100) as resolvedPriority
            FROM price_books pb
@@ -147,7 +146,7 @@ export class PriceBookService {
              AND (pb.start_at IS NULL OR pb.start_at <= ?)
              AND (pb.end_at IS NULL OR pb.end_at >= ?)`
         )
-        .all(organizationId, customerGroupId, customerGroupId, asOfIso, asOfIso);
+        .all(organizationId, customerGroupId, customerGroupId, asOfIso, asOfIso));
       candidatePriceBooks.push(...cgPbs);
     }
 
@@ -157,7 +156,7 @@ export class PriceBookService {
     // 3. For each candidate price book, check if item override exists
     for (const pb of candidatePriceBooks) {
       const pbId = pb.id || pb._local_id;
-      const itemRow: any = localDb
+      const itemRow: any = (await localDb
         .prepare(
           `SELECT * FROM price_book_items
            WHERE (price_book_id = ? OR price_book_id = ?)
@@ -167,7 +166,7 @@ export class PriceBookService {
              AND (end_at IS NULL OR end_at >= ?)
            LIMIT 1`
         )
-        .get(pbId, pbId, medicineId, medicineId, asOfIso, asOfIso);
+        .get(pbId, pbId, medicineId, medicineId, asOfIso, asOfIso));
 
       if (itemRow) {
         const factor = (itemRow.unit_type === unitType) ? 1.0 : conversionFactor;
@@ -201,15 +200,15 @@ export class PriceBookService {
   /**
    * Helper: Seeds a default retail price book for an organization if missing
    */
-  static ensureDefaultRetailPriceBook(organizationId: string): PriceBook {
-    const existing: any = localDb
+  static async ensureDefaultRetailPriceBook(organizationId: string): Promise<PriceBook> {
+    const existing: any = (await localDb
       .prepare('SELECT * FROM price_books WHERE organization_id = ? AND is_default = 1 AND _deleted = 0')
-      .get(organizationId);
+      .get(organizationId));
 
     if (existing) return existing;
 
     const id = uuidv4();
-    const pb = localMutate({
+    const pb = (await localMutate({
       table: 'price_books',
       operation: 'INSERT',
       data: {
@@ -225,7 +224,7 @@ export class PriceBookService {
         scope: 'ORGANIZATION',
         is_default: 1,
       },
-    });
+    }));
 
     return pb as PriceBook;
   }
@@ -233,21 +232,21 @@ export class PriceBookService {
   /**
    * Price Book CRUD
    */
-  static listPriceBooks(organizationId: string): PriceBook[] {
-    return localDb
+  static async listPriceBooks(organizationId: string): Promise<PriceBook[]> {
+    return (await localDb
       .prepare(
-        `SELECT pb.*, 
+        `SELECT pb.*,
           (SELECT COUNT(*) FROM price_book_items WHERE price_book_id = pb.id OR price_book_id = pb._local_id) as item_count
-         FROM price_books pb 
+         FROM price_books pb
          WHERE (pb.organization_id = ?) AND pb._deleted = 0
          ORDER BY pb.priority DESC, pb.created_at DESC`
       )
-      .all(organizationId) as PriceBook[];
+      .all(organizationId)) as PriceBook[];
   }
 
-  static createPriceBook(data: Partial<PriceBook> & { scopes?: PriceBookScope[] }): PriceBook {
+  static async createPriceBook(data: Partial<PriceBook> & { scopes?: PriceBookScope[] }): Promise<PriceBook> {
     const id = data.id || uuidv4();
-    const pb = localMutate({
+    const pb = (await localMutate({
       table: 'price_books',
       operation: 'INSERT',
       data: {
@@ -265,12 +264,12 @@ export class PriceBookService {
         start_at: data.start_at || null,
         end_at: data.end_at || null,
       },
-    });
+    }));
 
     if (Array.isArray(data.scopes) && data.scopes.length > 0) {
       for (const s of data.scopes) {
         const sId = uuidv4();
-        localMutate({
+        (await localMutate({
           table: 'price_book_scopes',
           operation: 'INSERT',
           data: {
@@ -281,24 +280,24 @@ export class PriceBookService {
             scope_type: s.scope_type,
             scope_id: s.scope_id,
           },
-        });
+        }));
       }
     }
 
     return pb as PriceBook;
   }
 
-  static setPriceBookItem(data: Partial<PriceBookItem>): PriceBookItem {
+  static async setPriceBookItem(data: Partial<PriceBookItem>): Promise<PriceBookItem> {
     const id = data.id || uuidv4();
-    const existing: any = localDb
+    const existing: any = (await localDb
       .prepare(
-        `SELECT * FROM price_book_items 
+        `SELECT * FROM price_book_items
          WHERE (price_book_id = ? OR price_book_id = ?) AND (medicine_id = ? OR medicine_id = ?) AND _deleted = 0`
       )
-      .get(data.price_book_id, data.price_book_id, data.medicine_id, data.medicine_id);
+      .get(data.price_book_id, data.price_book_id, data.medicine_id, data.medicine_id));
 
     if (existing) {
-      const updated = localMutate({
+      const updated = (await localMutate({
         table: 'price_book_items',
         operation: 'UPDATE',
         data: {
@@ -311,11 +310,11 @@ export class PriceBookService {
           start_at: data.start_at || existing.start_at,
           end_at: data.end_at || existing.end_at,
         },
-      });
+      }));
       return updated as PriceBookItem;
     }
 
-    const created = localMutate({
+    const created = (await localMutate({
       table: 'price_book_items',
       operation: 'INSERT',
       data: {
@@ -334,13 +333,13 @@ export class PriceBookService {
         end_at: data.end_at || null,
         is_active: data.is_active !== undefined ? (data.is_active ? 1 : 0) : 1,
       },
-    });
+    }));
     return created as PriceBookItem;
   }
 
-  static setPriceBookScope(data: Partial<PriceBookScope>): PriceBookScope {
+  static async setPriceBookScope(data: Partial<PriceBookScope>): Promise<PriceBookScope> {
     const id = data.id || uuidv4();
-    const created = localMutate({
+    const created = (await localMutate({
       table: 'price_book_scopes',
       operation: 'INSERT',
       data: {
@@ -351,7 +350,7 @@ export class PriceBookService {
         scope_type: data.scope_type || 'ORGANIZATION',
         scope_id: data.scope_id || null,
       },
-    });
+    }));
     return created as PriceBookScope;
   }
 }

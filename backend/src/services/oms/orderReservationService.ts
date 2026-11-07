@@ -1,5 +1,5 @@
 // orderReservationService.ts — Concurrency-Safe Order Stock Reservation Engine
-import { localDb } from '../../local-db';
+import { businessDb as localDb } from '../../lib/businessDb';
 import { localMutate } from '../../lib/localMutate';
 import { v4 as uuidv4 } from 'uuid';
 import { InventoryReservationService } from '../inventory/inventoryReservationService';
@@ -24,7 +24,7 @@ export class OrderReservationService {
   /**
    * Reserve stock across FEFO batches for an order's items at a specific store
    */
-  static reserveOrderStock(params: {
+  static async reserveOrderStock(params: {
     orderId: string;
     organizationId: string;
     storeId: string;
@@ -35,7 +35,7 @@ export class OrderReservationService {
     }>;
     holdDurationMinutes?: number;
     createdBy?: string;
-  }): OrderItemAllocation[] {
+  }): Promise<OrderItemAllocation[]> {
     const {
       orderId,
       organizationId,
@@ -48,17 +48,17 @@ export class OrderReservationService {
     const allocations: OrderItemAllocation[] = [];
 
     // Run inside an atomic transaction to ensure all or nothing reservation
-    const reserveTx = localDb.transaction(() => {
+    const reserveTx = localDb.transaction(async () => {
       for (const item of items) {
         let remainingToReserve = item.baseQuantity;
 
         // Query available non-expired sellable batches for this medicine in FEFO order
-        const avail = InventoryAvailabilityService.getAvailability({
+        const avail = (await InventoryAvailabilityService.getAvailability({
           organizationId,
           medicineId: item.medicineId,
           locationType: 'STORE',
           storeId,
-        });
+        }));
 
         if (avail.totalAvailable < remainingToReserve) {
           throw new AppError(
@@ -76,7 +76,7 @@ export class OrderReservationService {
           if (allocQty <= 0) continue;
 
           // Create authoritative reservation in Task 5 engine
-          const res = InventoryReservationService.createReservation({
+          const res = (await InventoryReservationService.createReservation({
             organizationId,
             locationType: 'STORE',
             storeId,
@@ -87,7 +87,7 @@ export class OrderReservationService {
             sourceId: orderId,
             durationMinutes: holdDurationMinutes,
             createdBy,
-          });
+          }));
 
           allocations.push({
             orderItemId: item.orderItemId,
@@ -112,48 +112,48 @@ export class OrderReservationService {
       }
     });
 
-    reserveTx();
+    (await reserveTx());
     return allocations;
   }
 
   /**
    * Get all reservations associated with an order
    */
-  static getOrderReservations(orderId: string): any[] {
-    return localDb
+  static async getOrderReservations(orderId: string): Promise<any[]> {
+    return (await localDb
       .prepare(`SELECT * FROM inventory_reservations WHERE source_id = ?`)
-      .all(orderId);
+      .all(orderId));
   }
 
   /**
    * Release all active reservations associated with an order
    */
-  static releaseOrderReservations(orderId: string, organizationId: string): void {
-    const rows: any[] = localDb
+  static async releaseOrderReservations(orderId: string, organizationId: string): Promise<void> {
+    const rows: any[] = (await localDb
       .prepare(
         `SELECT id FROM inventory_reservations 
          WHERE source_id = ? AND organization_id = ? AND status = 'ACTIVE'`
       )
-      .all(orderId, organizationId);
+      .all(orderId, organizationId));
 
     for (const r of rows) {
-      InventoryReservationService.releaseReservation(r.id);
+      (await InventoryReservationService.releaseReservation(r.id));
     }
   }
 
   /**
    * Consume all active reservations associated with an order (called during final sale completion)
    */
-  static consumeOrderReservations(orderId: string, organizationId: string): void {
-    const rows: any[] = localDb
+  static async consumeOrderReservations(orderId: string, organizationId: string): Promise<void> {
+    const rows: any[] = (await localDb
       .prepare(
         `SELECT id FROM inventory_reservations 
          WHERE source_id = ? AND organization_id = ? AND status = 'ACTIVE'`
       )
-      .all(orderId, organizationId);
+      .all(orderId, organizationId));
 
     for (const r of rows) {
-      InventoryReservationService.consumeReservation(r.id);
+      (await InventoryReservationService.consumeReservation(r.id));
     }
   }
 }

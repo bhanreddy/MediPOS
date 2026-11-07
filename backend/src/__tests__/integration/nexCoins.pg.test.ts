@@ -22,21 +22,21 @@ import { errorHandler } from '../../middleware/errorHandler';
  const medicine=randomUUID(),batch=randomUUID();
  const ctx=(customerId:string)=>({clinicId:clinic,customerId,actorId:actor});
  async function customer(){const id=randomUUID();await sql`INSERT INTO customers(id,_local_id,clinic_id,name,phone) VALUES(${id},${id},${clinic},'Nex Coins QA','9000000000')`;return id;}
- const body=(id:string,total=50,wallet=0,quantity=1)=>({customer_id:id,_local_id:randomUUID(),payment_mode:'cash',paid_amount:total-wallet/100,wallet_amount_paise:wallet,price_includes_tax:true,items:[{medicine_id:medicine,batch_id:batch,quantity,mrp:total/quantity,gst_rate:0}]});
- const buy=(id:string,total=50,wallet=0,quantity=1)=>request(app).post('/sales').send(body(id,total,wallet,quantity));
+ const body=async(id:string,total=50,wallet=0,quantity=1)=>{await sql`UPDATE medicine_batches SET mrp=${total/quantity} WHERE id=${batch}`;return {customer_id:id,_local_id:randomUUID(),payment_mode:'cash',paid_amount:total-wallet/100,wallet_amount_paise:wallet,price_includes_tax:true,items:[{medicine_id:medicine,batch_id:batch,quantity,mrp:total/quantity,gst_rate:0}]};};
+ const buy=async(id:string,total=50,wallet=0,quantity=1)=>request(app).post('/sales').send(await body(id,total,wallet,quantity));
  const refund=(sale:any,quantity=1)=>request(app).post('/sales/returns').send({original_sale_id:sale.id,_local_id:randomUUID(),items:[{sale_item_id:sale.sale_items[0].id,quantity}]});
- async function rules(changes:Partial<CoinPolicy>={}){const current=await getCoinPolicy(clinic);return setCoinPolicy(clinic,actor,{...DEFAULT_COIN_POLICY,...changes,version:current.version,reason:'QA earning policy'});}
+ async function rules(changes:Partial<CoinPolicy>={}){const current=await getCoinPolicy(clinic);return (await setCoinPolicy(clinic,actor,{...DEFAULT_COIN_POLICY,...changes,version:current.version,reason:'QA earning policy'}));}
  beforeAll(async()=>{
   await sql`INSERT INTO clinics(id,_local_id,name,slug) VALUES(${clinic},${clinic},'Nex Coins QA',${clinic})`;
   await sql`INSERT INTO users(id,email,full_name,role) VALUES(${actor},${actor+'@example.invalid'},'Nex Coins owner','OWNER')`;
-  await sql`INSERT INTO medicines(id,_local_id,clinic_id,name,generic_name) VALUES(${medicine},${medicine},${clinic},'Nex test item','QA')`;
+  await sql`INSERT INTO medicines(id,_local_id,clinic_id,name,generic_name,gst_rate) VALUES(${medicine},${medicine},${clinic},'Nex test item','QA',0)`;
   await sql`INSERT INTO medicine_batches(id,_local_id,clinic_id,medicine_id,batch_number,expiry_date,mrp,purchase_price,quantity_in,quantity_remaining) VALUES(${batch},${batch},${clinic},${medicine},'QA-NEX','2099-12-31',20,10,1000,1000)`;
  });
  beforeEach(async()=>{role='OWNER';await rules();});
  afterAll(async()=>{await sql.end()});
  test('a 10-coin balance becomes 15 after a ₹50 paid sale at 10%, exactly once',async()=>{
   const id=await customer();const first=await buy(id,100);expect(first.status).toBe(201);expect(Number(first.body.data.nex_coins_earned_paise)).toBe(1000);
-  const requestBody=body(id,50),sale=await request(app).post('/sales').send(requestBody);expect(sale.status).toBe(201);expect(Number(sale.body.data.nex_coins_earned_paise)).toBe(500);
+  const requestBody=await body(id,50),sale=await request(app).post('/sales').send(requestBody);expect(sale.status).toBe(201);expect(Number(sale.body.data.nex_coins_earned_paise)).toBe(500);
   const state=await WalletService.get(ctx(id));expect(state.balance_paise).toBe(1500);expect(state.entries[0].kind).toBe('EARN');
   expect(Date.parse(state.lots[0].expires_at)-Date.parse(state.lots[0].issued_at)).toBe(90*86400000);
   expect((await request(app).post('/sales').send(requestBody)).status).toBe(200);expect((await WalletService.get(ctx(id))).balance_paise).toBe(1500);
@@ -80,10 +80,10 @@ import { errorHandler } from '../../middleware/errorHandler';
   expect((await refund(sale.body.data,9)).status).toBe(200);expect((await WalletService.get(ctx(id))).balance_paise).toBe(0);
  });
  test('credit bills earn only when the invoice becomes fully paid',async()=>{
-  const id=await customer();const sale=await request(app).post('/sales').send({...body(id,50),payment_mode:'credit',paid_amount:0});expect(sale.status).toBe(201);expect((await WalletService.get(ctx(id))).balance_paise).toBe(0);
-  await withPostgresTransaction(()=>settleCloudBalance({clinicId:clinic,userId:actor,kind:'customer',partyId:id,amount:25,mode:'cash'}));
+  const id=await customer();const sale=await request(app).post('/sales').send({...(await body(id,50)),payment_mode:'credit',paid_amount:0});expect(sale.status).toBe(201);expect((await WalletService.get(ctx(id))).balance_paise).toBe(0);
+  await withPostgresTransaction(async ()=>(await settleCloudBalance({clinicId:clinic,userId:actor,kind:'customer',partyId:id,amount:25,mode:'cash'})));
   expect((await WalletService.get(ctx(id))).balance_paise).toBe(0);
-  await withPostgresTransaction(()=>settleCloudBalance({clinicId:clinic,userId:actor,kind:'customer',partyId:id,amount:25,mode:'cash'}));
+  await withPostgresTransaction(async ()=>(await settleCloudBalance({clinicId:clinic,userId:actor,kind:'customer',partyId:id,amount:25,mode:'cash'})));
   expect((await WalletService.get(ctx(id))).balance_paise).toBe(500);
  });
  test('policy edits are append-only and never change earlier award deadlines',async()=>{
@@ -95,11 +95,11 @@ import { errorHandler } from '../../middleware/errorHandler';
   await expect(sql`DELETE FROM nex_coin_policies WHERE clinic_id=${clinic}`).rejects.toThrow('append-only');
  });
  test('a failure after automatic earning rolls back the award, invoice, and stock together',async()=>{
-  const id=await customer(),requestBody=body(id,50),original=persistence.localMutate;
+  const id=await customer(),requestBody=await body(id,50),original=persistence.localMutate;
   const before=Number((await sql`SELECT quantity_remaining FROM medicine_batches WHERE id=${batch}`)[0].quantity_remaining);
   const spy=jest.spyOn(persistence,'localMutate').mockImplementation(async input=>{
    if(input.table==='sales'&&input.data.nex_coins_earned_paise)throw new Error('Forced reward persistence failure');
-   return original(input);
+   return (await original(input));
   });
   const failed=await request(app).post('/sales').send(requestBody);expect(failed.status).toBe(500);spy.mockRestore();
   expect((await WalletService.get(ctx(id))).balance_paise).toBe(0);

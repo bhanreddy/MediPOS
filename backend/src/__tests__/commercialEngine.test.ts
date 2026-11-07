@@ -148,129 +148,129 @@ describe('Task 3 — Enterprise Pricing, Promotions, Supplier Schemes & Loyalty 
     let regPbId: string;
     let storePbId: string;
 
-    beforeAll(() => {
+    beforeAll(async () => {
       // 1. Org Level Price Book: Paracetamol = ₹28.00 (2800 paise)
-      const orgPb = PriceBookService.createPriceBook({
+      const orgPb = (await PriceBookService.createPriceBook({
         organization_id: orgId,
         name: 'Org Standard Price Book',
         scope: 'ORGANIZATION',
         priority: 10,
         status: 'ACTIVE',
-      });
+      }));
       orgPbId = orgPb.id || orgPb._local_id!;
-      PriceBookService.setPriceBookItem({
+      (await PriceBookService.setPriceBookItem({
         organization_id: orgId,
         price_book_id: orgPbId,
         medicine_id: medParacetamolId,
         selling_price_paise: 2800,
         mrp_paise: 3000,
-      });
+      }));
 
       // 2. Regional Level Price Book: Paracetamol = ₹26.00 (2600 paise)
-      const regPb = PriceBookService.createPriceBook({
+      const regPb = (await PriceBookService.createPriceBook({
         organization_id: orgId,
         name: 'South Region Price Book',
         scope: 'REGION',
         priority: 20,
         status: 'ACTIVE',
-      });
+      }));
       regPbId = regPb.id || regPb._local_id!;
-      PriceBookService.setPriceBookScope({
+      (await PriceBookService.setPriceBookScope({
         organization_id: orgId,
         price_book_id: regPbId,
         scope_type: 'REGION',
         scope_id: regionId,
-      });
-      PriceBookService.setPriceBookItem({
+      }));
+      (await PriceBookService.setPriceBookItem({
         organization_id: orgId,
         price_book_id: regPbId,
         medicine_id: medParacetamolId,
         selling_price_paise: 2600,
         mrp_paise: 3000,
-      });
+      }));
 
       // 3. Store Level Price Book: Paracetamol = ₹24.00 (2400 paise)
-      const storePb = PriceBookService.createPriceBook({
+      const storePb = (await PriceBookService.createPriceBook({
         organization_id: orgId,
         name: 'Hyderabad Store Price Book',
         scope: 'STORE',
         priority: 30,
         status: 'ACTIVE',
-      });
+      }));
       storePbId = storePb.id || storePb._local_id!;
-      PriceBookService.setPriceBookScope({
+      (await PriceBookService.setPriceBookScope({
         organization_id: orgId,
         price_book_id: storePbId,
         scope_type: 'STORE',
         scope_id: storeAId,
-      });
-      PriceBookService.setPriceBookItem({
+      }));
+      (await PriceBookService.setPriceBookItem({
         organization_id: orgId,
         price_book_id: storePbId,
         medicine_id: medParacetamolId,
         selling_price_paise: 2400,
         mrp_paise: 3000,
-      });
+      }));
     });
 
-    test('Store Price Book takes precedence over Region and Org Price Books (Store > Region > Org)', () => {
-      const resolved = PriceBookService.resolveHierarchy({
+    test('Store Price Book takes precedence over Region and Org Price Books (Store > Region > Org)', async () => {
+      const resolved = (await PriceBookService.resolveHierarchy({
         organizationId: orgId,
         storeId: storeAId,
         regionId,
         medicineId: medParacetamolId,
-      });
+      }));
 
       expect(resolved.source).toBe('STORE_PRICE_BOOK');
       expect(resolved.basePricePaise).toBe(2400); // Store override ₹24.00
       expect(resolved.mrpPaise).toBe(3000);
     });
 
-    test('Region Price Book applies when store has no store-specific price book', () => {
-      const resolved = PriceBookService.resolveHierarchy({
+    test('Region Price Book applies when store has no store-specific price book', async () => {
+      const resolved = (await PriceBookService.resolveHierarchy({
         organizationId: orgId,
         storeId: storeBId, // Store B has no store-specific book
         regionId,
         medicineId: medParacetamolId,
-      });
+      }));
 
       expect(resolved.source).toBe('REGION_PRICE_BOOK');
       expect(resolved.basePricePaise).toBe(2600); // Region price ₹26.00
     });
 
-    test('Org Price Book applies when neither store nor region price book exists', () => {
-      const resolved = PriceBookService.resolveHierarchy({
+    test('Org Price Book applies when neither store nor region price book exists', async () => {
+      const resolved = (await PriceBookService.resolveHierarchy({
         organizationId: orgId,
         storeId: 'store-north-unmapped',
         regionId: 'reg-north-unmapped',
         medicineId: medParacetamolId,
-      });
+      }));
 
       expect(resolved.source).toBe('ORG_PRICE_BOOK');
       expect(resolved.basePricePaise).toBe(2800); // Org price ₹28.00
     });
 
-    test('Default Medicine Catalog MRP applies when no price book entries exist', () => {
-      const resolved = PriceBookService.resolveHierarchy({
+    test('Default Medicine Catalog MRP applies when no price book entries exist', async () => {
+      const resolved = (await PriceBookService.resolveHierarchy({
         organizationId: orgId,
         storeId: storeAId,
         medicineId: medCetaphilId, // Cetaphil has no price book entry
-      });
+      }));
 
       expect(resolved.source).toBe('MASTER_CATALOG');
       expect(resolved.basePricePaise).toBe(45000); // ₹450.00
       expect(resolved.mrpPaise).toBe(45000);
     });
 
-    test('Multi-unit conversion factor correctly scales base price and MRP', () => {
+    test('Multi-unit conversion factor correctly scales base price and MRP', async () => {
       // Paracetamol Box (conversion factor = 10 strips per box)
-      const resolved = PriceBookService.resolveHierarchy({
+      const resolved = (await PriceBookService.resolveHierarchy({
         organizationId: orgId,
         storeId: storeAId,
         medicineId: medParacetamolId,
         unitType: 'BOX',
         conversionFactor: 10.0,
-      });
+      }));
 
       expect(resolved.basePricePaise).toBe(24000); // 2400 * 10 = ₹240.00
       expect(resolved.mrpPaise).toBe(30000); // 3000 * 10 = ₹300.00
@@ -281,55 +281,55 @@ describe('Task 3 — Enterprise Pricing, Promotions, Supplier Schemes & Loyalty 
   // 2. MARGIN GUARD & MRP PROTECTION TESTS
   // ════════════════════════════════════════════════════════════════════════════
   describe('2. Margin Guard & MRP Floor Protection', () => {
-    test('Selling price strictly capped at MRP (price > MRP is BLOCKED)', () => {
-      const result = MarginGuard.evaluate({
+    test('Selling price strictly capped at MRP (price > MRP is BLOCKED)', async () => {
+      const result = (await MarginGuard.evaluate({
         organizationId: orgId,
         medicineId: medParacetamolId,
         sellingPricePaise: 3500, // ₹35.00 > MRP ₹30.00
         mrpPaise: 3000,
         discountPct: 0,
-      });
+      }));
 
       expect(result.status).toBe('BLOCKED');
       expect(result.requiresSupervisorApproval).toBe(true);
       expect(result.approvalReason).toContain('exceeds statutory MRP');
     });
 
-    test('Healthy margin (>= 15%) is marked HEALTHY without supervisor override', () => {
-      const result = MarginGuard.evaluate({
+    test('Healthy margin (>= 15%) is marked HEALTHY without supervisor override', async () => {
+      const result = (await MarginGuard.evaluate({
         organizationId: orgId,
         medicineId: medParacetamolId,
         sellingPricePaise: 2500, // ₹25.00 vs cost ₹18.00 -> 28% margin
         mrpPaise: 3000,
         discountPct: 0,
-      });
+      }));
 
       expect(result.status).toBe('ALLOWED');
       expect(result.grossMarginPct).toBeGreaterThanOrEqual(15.0);
       expect(result.requiresSupervisorApproval).toBe(false);
     });
 
-    test('Thin margin (5% to 9.99%) triggers SUPERVISOR_REQUIRED', () => {
-      const result = MarginGuard.evaluate({
+    test('Thin margin (5% to 9.99%) triggers SUPERVISOR_REQUIRED', async () => {
+      const result = (await MarginGuard.evaluate({
         organizationId: orgId,
         medicineId: medParacetamolId,
         sellingPricePaise: 1950, // ₹19.50 vs cost ₹18.00 -> 7.69% margin
         mrpPaise: 3000,
         discountPct: 0,
-      });
+      }));
 
       expect(result.status).toBe('SUPERVISOR_APPROVAL_REQUIRED');
       expect(result.requiresSupervisorApproval).toBe(true);
     });
 
-    test('Loss sale (selling below acquisition cost) triggers BLOCKED status', () => {
-      const result = MarginGuard.evaluate({
+    test('Loss sale (selling below acquisition cost) triggers BLOCKED status', async () => {
+      const result = (await MarginGuard.evaluate({
         organizationId: orgId,
         medicineId: medParacetamolId,
         sellingPricePaise: 1500, // ₹15.00 vs cost ₹18.00 -> negative margin
         mrpPaise: 3000,
         discountPct: 0,
-      });
+      }));
 
       expect(result.status).toBe('MANAGER_APPROVAL_REQUIRED');
       expect(result.requiresSupervisorApproval).toBe(true);
@@ -344,8 +344,8 @@ describe('Task 3 — Enterprise Pricing, Promotions, Supplier Schemes & Loyalty 
     beforeEach(() => {
       localDb.prepare('DELETE FROM promotions WHERE organization_id = ?').run(orgId);
     });
-    test('PERCENTAGE_DISCOUNT computes correct discount and respects max cap', () => {
-      const promo = PromotionEngine.createPromotion({
+    test('PERCENTAGE_DISCOUNT computes correct discount and respects max cap', async () => {
+      const promo = (await PromotionEngine.createPromotion({
         organization_id: orgId,
         code: 'CETA10',
         name: '10% Off Cetaphil',
@@ -353,9 +353,9 @@ describe('Task 3 — Enterprise Pricing, Promotions, Supplier Schemes & Loyalty 
         max_discount_paise: 4000, // Max ₹40 cap
         config_json: { percentage_discount: 10 },
         status: 'ACTIVE',
-      });
+      }));
 
-      const outcome = PromotionEngine.evaluateCartPromotions({
+      const outcome = (await PromotionEngine.evaluateCartPromotions({
         organizationId: orgId,
         cartLines: [{
           medicineId: medCetaphilId,
@@ -367,25 +367,25 @@ describe('Task 3 — Enterprise Pricing, Promotions, Supplier Schemes & Loyalty 
           unitType: 'BOTTLE',
           conversionFactor: 1.0,
         }],
-      });
+      }));
 
       expect(outcome.totalPromoDiscountPaise).toBe(4000); // capped at ₹40
       expect(outcome.appliedPromotions.length).toBe(1);
     });
 
-    test('BUY_X_GET_Y Same Product correctly calculates paid vs free units', () => {
+    test('BUY_X_GET_Y Same Product correctly calculates paid vs free units', async () => {
       // Buy 2 Get 1 Free on Paracetamol
-      PromotionEngine.createPromotion({
+      (await PromotionEngine.createPromotion({
         organization_id: orgId,
         code: 'B2G1PARA',
         name: 'Buy 2 Get 1 Free Paracetamol',
         promotion_type: 'BUY_X_GET_Y',
         config_json: { buy_qty: 2, get_free_qty: 1 },
         status: 'ACTIVE',
-      });
+      }));
 
       // Customer buys 7 units: 2 full sets of 3 (2*1 = 2 free units, 5 paid units)
-      const outcome = PromotionEngine.evaluateCartPromotions({
+      const outcome = (await PromotionEngine.evaluateCartPromotions({
         organizationId: orgId,
         storeId: storeAId,
         cartLines: [{
@@ -398,14 +398,14 @@ describe('Task 3 — Enterprise Pricing, Promotions, Supplier Schemes & Loyalty 
           unitType: 'STRIP',
           conversionFactor: 1.0,
         }],
-      });
+      }));
 
       expect(outcome.totalPromoDiscountPaise).toBe(6000); // 2 free units * 3000 paise = 6000 paise (₹60.00)
       expect(outcome.freeItems[0].quantity).toBe(2);
     });
 
-    test('QUANTITY_SLAB applies tiered pricing based on purchase volume', () => {
-      PromotionEngine.createPromotion({
+    test('QUANTITY_SLAB applies tiered pricing based on purchase volume', async () => {
+      (await PromotionEngine.createPromotion({
         organization_id: orgId,
         code: 'SLAB_PARA',
         name: 'Slab Discount Paracetamol',
@@ -417,9 +417,9 @@ describe('Task 3 — Enterprise Pricing, Promotions, Supplier Schemes & Loyalty 
           ],
         },
         status: 'ACTIVE',
-      });
+      }));
 
-      const outcome = PromotionEngine.evaluateCartPromotions({
+      const outcome = (await PromotionEngine.evaluateCartPromotions({
         organizationId: orgId,
         cartLines: [{
           medicineId: medParacetamolId,
@@ -431,14 +431,14 @@ describe('Task 3 — Enterprise Pricing, Promotions, Supplier Schemes & Loyalty 
           unitType: 'STRIP',
           conversionFactor: 1.0,
         }],
-      });
+      }));
 
       expect(outcome.totalPromoDiscountPaise).toBe(5000);
     });
 
-    test('EXCLUSIVE promotion overrides stackable promotions when offering higher customer savings', () => {
+    test('EXCLUSIVE promotion overrides stackable promotions when offering higher customer savings', async () => {
       // Create Exclusive 25% promo
-      const megaPromo = PromotionEngine.createPromotion({
+      const megaPromo = (await PromotionEngine.createPromotion({
         organization_id: orgId,
         code: 'MEGA25',
         name: 'Mega Exclusive 25% Off',
@@ -446,10 +446,10 @@ describe('Task 3 — Enterprise Pricing, Promotions, Supplier Schemes & Loyalty 
         stackability: 'EXCLUSIVE',
         config_json: { percentage_discount: 25 },
         status: 'ACTIVE',
-      });
+      }));
 
       const pId = megaPromo.id || megaPromo._local_id!;
-      localMutate({
+      (await localMutate({
         table: 'promotion_targets',
         operation: 'INSERT',
         data: {
@@ -459,9 +459,9 @@ describe('Task 3 — Enterprise Pricing, Promotions, Supplier Schemes & Loyalty 
           target_type: 'PRODUCT',
           target_id: medCetaphilId,
         },
-      });
+      }));
 
-      const outcome = PromotionEngine.evaluateCartPromotions({
+      const outcome = (await PromotionEngine.evaluateCartPromotions({
         organizationId: orgId,
         cartLines: [{
           medicineId: medCetaphilId,
@@ -473,7 +473,7 @@ describe('Task 3 — Enterprise Pricing, Promotions, Supplier Schemes & Loyalty 
           unitType: 'BOTTLE',
           conversionFactor: 1.0,
         }],
-      });
+      }));
 
       // 25% of 45000 = 11250 paise
       expect(outcome.totalPromoDiscountPaise).toBe(11250);
@@ -490,8 +490,8 @@ describe('Task 3 — Enterprise Pricing, Promotions, Supplier Schemes & Loyalty 
   describe('4. Coupon Engine Validation & Atomic Redemptions', () => {
     let activeCouponId: string;
 
-    beforeAll(() => {
-      const c = CouponEngine.createCoupon({
+    beforeAll(async () => {
+      const c = (await CouponEngine.createCoupon({
         organization_id: orgId,
         code: 'SAVE100',
         discount_type: 'FLAT',
@@ -500,62 +500,62 @@ describe('Task 3 — Enterprise Pricing, Promotions, Supplier Schemes & Loyalty 
         max_uses: 5,
         max_uses_per_customer: 1,
         status: 'ACTIVE',
-      });
+      }));
       activeCouponId = c.id || c._local_id!;
     });
 
-    test('Coupon successfully validates when minimum cart value is met', () => {
-      const val = CouponEngine.validateCoupon({
+    test('Coupon successfully validates when minimum cart value is met', async () => {
+      const val = (await CouponEngine.validateCoupon({
         organizationId: orgId,
         code: 'SAVE100',
         cartSubtotalPaise: 60000, // ₹600 >= ₹500
-      });
+      }));
 
       expect(val.isValid).toBe(true);
       expect(val.discountAmountPaise).toBe(10000); // ₹100
       expect(val.statusCode).toBe('VALID');
     });
 
-    test('Coupon is rejected with MINIMUM_CART_NOT_MET when cart total is below threshold', () => {
-      const val = CouponEngine.validateCoupon({
+    test('Coupon is rejected with MINIMUM_CART_NOT_MET when cart total is below threshold', async () => {
+      const val = (await CouponEngine.validateCoupon({
         organizationId: orgId,
         code: 'SAVE100',
         cartSubtotalPaise: 30000, // ₹300 < ₹500
-      });
+      }));
 
       expect(val.isValid).toBe(false);
       expect(val.statusCode).toBe('MINIMUM_CART_NOT_MET');
       expect(val.discountAmountPaise).toBe(0);
     });
 
-    test('Coupon is rejected with INVALID for non-existent coupon code', () => {
-      const val = CouponEngine.validateCoupon({
+    test('Coupon is rejected with INVALID for non-existent coupon code', async () => {
+      const val = (await CouponEngine.validateCoupon({
         organizationId: orgId,
         code: 'NON_EXISTENT_CODE',
         cartSubtotalPaise: 100000,
-      });
+      }));
 
       expect(val.isValid).toBe(false);
       expect(val.statusCode).toBe('INVALID');
     });
 
-    test('Coupon atomic redemption tracks usage and prevents exceeding per-customer limit', () => {
+    test('Coupon atomic redemption tracks usage and prevents exceeding per-customer limit', async () => {
       const sale1Id = uuidv4();
-      CouponEngine.redeemCoupon({
+      (await CouponEngine.redeemCoupon({
         organizationId: orgId,
         couponId: activeCouponId,
         customerId,
         saleId: sale1Id,
         discountAmountPaise: 10000,
-      });
+      }));
 
       // Attempt second validation for same customer
-      const secondVal = CouponEngine.validateCoupon({
+      const secondVal = (await CouponEngine.validateCoupon({
         organizationId: orgId,
         customerId,
         code: 'SAVE100',
         cartSubtotalPaise: 80000,
-      });
+      }));
 
       expect(secondVal.isValid).toBe(false);
       expect(secondVal.statusCode).toBe('CUSTOMER_LIMIT_REACHED');
@@ -568,40 +568,40 @@ describe('Task 3 — Enterprise Pricing, Promotions, Supplier Schemes & Loyalty 
   describe('5. Customer Groups & Memberships', () => {
     let vipGroupId: string;
 
-    beforeAll(() => {
-      const group = CustomerGroupService.createGroup({
+    beforeAll(async () => {
+      const group = (await CustomerGroupService.createGroup({
         organization_id: orgId,
         code: 'VIP_GOLD',
         name: 'VIP Gold Members',
         discount_pct: 5.0, // 5% direct group discount
         priority: 50,
-      });
+      }));
       vipGroupId = group.id || group._local_id!;
 
-      CustomerGroupService.assignCustomer({
+      (await CustomerGroupService.assignCustomer({
         organizationId: orgId,
         customerGroupId: vipGroupId,
         customerId,
-      });
+      }));
 
-      CustomerGroupService.setMembership({
+      (await CustomerGroupService.setMembership({
         organizationId: orgId,
         customerId,
         membershipType: 'GOLD',
         tier: 'TIER_1',
         loyaltyMultiplier: 1.5, // 1.5x points multiplier
-      });
+      }));
     });
 
-    test('Customer Group accurately resolves with discount percentage and priority', () => {
-      const resolved = CustomerGroupService.resolveCustomerGroup(customerId, orgId);
+    test('Customer Group accurately resolves with discount percentage and priority', async () => {
+      const resolved = (await CustomerGroupService.resolveCustomerGroup(customerId, orgId));
       expect(resolved).not.toBeNull();
       expect(resolved?.code).toBe('VIP_GOLD');
       expect(Number(resolved?.discount_pct)).toBe(5.0);
     });
 
-    test('Active customer membership accurately resolves tier and loyalty multiplier', () => {
-      const membership = CustomerGroupService.getActiveMembership(customerId, orgId);
+    test('Active customer membership accurately resolves tier and loyalty multiplier', async () => {
+      const membership = (await CustomerGroupService.getActiveMembership(customerId, orgId));
       expect(membership).not.toBeNull();
       expect(membership?.membership_type).toBe('GOLD');
       expect(Number(membership?.loyalty_multiplier)).toBe(1.5);
@@ -612,52 +612,52 @@ describe('Task 3 — Enterprise Pricing, Promotions, Supplier Schemes & Loyalty 
   // 6. IMMUTABLE LOYALTY LEDGER TESTS
   // ════════════════════════════════════════════════════════════════════════════
   describe('6. Immutable Loyalty Points Ledger & Returns Reversal', () => {
-    test('quotes no longer earn loyalty credits or expose a redeemable legacy balance', () => {
-      const quote = CommercialEngine.quoteCommercialCart({
+    test('quotes no longer earn loyalty credits or expose a redeemable legacy balance', async () => {
+      const quote = (await CommercialEngine.quoteCommercialCart({
         organizationId: orgId, storeId: storeAId, customerId,
         items: [{ medicine_id: medParacetamolId, quantity: 2 }],
-      });
+      }));
       expect(quote.loyaltyCreditsEarnable).toBe(0);
       expect(quote.availableLoyaltyCredits).toBe(0);
       expect(quote.loyaltyRedeemedPaise).toBe(0);
     });
 
-    test('legacy redemption and manual point adjustments are rejected', () => {
-      expect(() => CommercialEngine.quoteCommercialCart({
+    test('legacy redemption and manual point adjustments are rejected', async () => {
+      await expect((async () => (await CommercialEngine.quoteCommercialCart({
         organizationId: orgId, storeId: storeAId, customerId,
         items: [{ medicine_id: medParacetamolId, quantity: 2 }],
         redeemLoyaltyCredits: 100,
-      })).toThrow('Loyalty points have been removed');
-      expect(() => LoyaltyEngine.recordTransaction({
+      })))()).rejects.toThrow('Loyalty points have been removed');
+      await expect((async () => (await LoyaltyEngine.recordTransaction({
         organizationId: orgId, customerId,
         transactionType: 'ADJUSTMENT', credits: 400,
-      })).toThrow('Loyalty points have been removed');
+      })))()).rejects.toThrow('Loyalty points have been removed');
     });
 
-    test('Return reversal proportionality deducts earned points on product return', () => {
+    test('Return reversal proportionality deducts earned points on product return', async () => {
       const saleId = uuidv4();
       const returnId = uuidv4();
 
       // Seed a historical award without issuing new points through the removed feature.
-      const account = LoyaltyEngine.getOrCreateAccount(orgId, customerId);
+      const account = (await LoyaltyEngine.getOrCreateAccount(orgId, customerId));
       const awardId = uuidv4();
-      localMutate({ table: 'loyalty_transactions', operation: 'INSERT', data: {
+      (await localMutate({ table: 'loyalty_transactions', operation: 'INSERT', data: {
         id: awardId, _local_id: awardId, organization_id: orgId,
         account_id: account.id, customer_id: customerId,
         transaction_type: 'EARN', credits: 20, credits_balance_after: 20, sale_id: saleId,
-      } });
+      } }));
       localDb.prepare('UPDATE loyalty_accounts SET available_balance = 20 WHERE id = ?').run(account.id);
 
       // Process 50% partial return
-      LoyaltyEngine.processReturnReversal({
+      (await LoyaltyEngine.processReturnReversal({
         organizationId: orgId,
         customerId,
         originalSaleId: saleId,
         returnId,
         returnRatio: 0.5,
-      });
+      }));
 
-      const history = LoyaltyEngine.getCustomerHistory(customerId);
+      const history = (await LoyaltyEngine.getCustomerHistory(customerId));
       const revTx = history.transactions.find(t => t.transaction_type === 'REVERSAL');
       expect(revTx).toBeDefined();
       expect(Number(revTx?.credits)).toBe(-10); // 50% of 20 reversed
@@ -668,9 +668,9 @@ describe('Task 3 — Enterprise Pricing, Promotions, Supplier Schemes & Loyalty 
   // 7. SUPPLIER SCHEMES (PROCUREMENT) TESTS
   // ════════════════════════════════════════════════════════════════════════════
   describe('7. Supplier Schemes & Effective Unit Acquisition Cost', () => {
-    beforeAll(() => {
+    beforeAll(async () => {
       // Buy 10 Get 2 Free scheme with 3% trade discount on Paracetamol from Cipla
-      SupplierSchemeEngine.createScheme({
+      (await SupplierSchemeEngine.createScheme({
         organization_id: orgId,
         supplier_id: supplierId,
         medicine_id: medParacetamolId,
@@ -680,21 +680,21 @@ describe('Task 3 — Enterprise Pricing, Promotions, Supplier Schemes & Loyalty 
         free_quantity: 2,
         discount_pct: 3.0,
         status: 'ACTIVE',
-      });
+      }));
     });
 
-    test('Buy 10 Get 2 Free accurately computes received physical units and effective blended unit cost', () => {
+    test('Buy 10 Get 2 Free accurately computes received physical units and effective blended unit cost', async () => {
       // Billed Quantity: 50 units at purchase rate ₹18.00.
       // Free Quantity: 5 sets * 2 = 10 free units. Total received = 60 units.
       // Gross = 50 * 18 = ₹900. Trade discount 3% = ₹27. Net Paid = ₹873 (87,300 paise).
       // Effective Unit Cost = 87,300 / 60 = 1455 paise = ₹14.55 per unit (vs nominal ₹18.00).
-      const result = SupplierSchemeEngine.evaluateInwardScheme({
+      const result = (await SupplierSchemeEngine.evaluateInwardScheme({
         organizationId: orgId,
         supplierId,
         medicineId: medParacetamolId,
         billedQuantity: 50,
         purchasePrice: 18.0,
-      });
+      }));
 
       expect(result.billedQuantity).toBe(50);
       expect(result.freeQuantity).toBe(10);
@@ -776,20 +776,20 @@ describe('Task 3 — Enterprise Pricing, Promotions, Supplier Schemes & Loyalty 
       const saleItem = chkRes.body.data.items[0];
 
       // 2. Quote Return of 2 units
-      const quote = ReturnsEngine.quoteReturn({
+      const quote = (await ReturnsEngine.quoteReturn({
         originalSaleId: sale.id || sale._local_id,
         items: [{
           sale_item_id: saleItem.id || saleItem._local_id,
           quantity: 2,
           reason_code: 'CUSTOMER_RETURN',
         }],
-      });
+      }));
 
       expect(quote.totalRefund).toBeGreaterThan(0);
       expect(quote.lines[0].returnQuantity).toBe(2);
 
       // 3. Process Return
-      const processRes = ReturnsEngine.processReturn({
+      const processRes = (await ReturnsEngine.processReturn({
         originalSaleId: sale.id || sale._local_id,
         items: [{
           sale_item_id: saleItem.id || saleItem._local_id,
@@ -800,7 +800,7 @@ describe('Task 3 — Enterprise Pricing, Promotions, Supplier Schemes & Loyalty 
         organizationId: orgId,
         storeId: storeAId,
         performedBy: cashierId,
-      });
+      }));
 
       expect(processRes.creditNoteNumber).toMatch(/CN/);
       expect(processRes.returnInvoiceNumber).toMatch(/RET/);

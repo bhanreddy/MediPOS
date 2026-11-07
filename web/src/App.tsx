@@ -19,7 +19,8 @@ const Error403 = () => <AuthFrame title="Access restricted" subtitle="Your accou
 
 // The top level App layout where we check session
 const RootLayout = () => {
-    const { checkSession } = useAuth();
+    const { checkSession, user, clinic_id } = useAuth();
+    const tenantScope = `${user?.id || ''}:${sessionStorage.getItem('impersonate_clinic_id') || clinic_id || ''}`;
     
     useEffect(() => {
         const stop = observeAuthSession();
@@ -30,7 +31,7 @@ const RootLayout = () => {
         // Background sync is started by ClinicLayout — no duplicate listener here.
     }, [checkSession]);
 
-    return <Suspense fallback={<div role="status" className="p-8 text-muted">Loading page…</div>}><Outlet /></Suspense>;
+    return <Suspense key={tenantScope} fallback={<div role="status" className="p-8 text-muted">Loading page…</div>}><Outlet /></Suspense>;
 };
 
 import { AdminLayout } from './components/admin/AdminLayout';

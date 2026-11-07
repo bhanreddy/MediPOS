@@ -9,15 +9,16 @@ afterEach(() => {
   else process.env.DATABASE_URL = originalDatabaseUrl;
 });
 
-test('a configured database pool answers the profile and the second request reuses it', async () => {
+test('each request revalidates the current assignment after an account moves clinics', async () => {
   process.env.DATABASE_URL = 'postgres://pooler.example/postgres';
   resetSupabaseIdentityCache();
   queryRaw.mockResolvedValueOnce([{ clinic_id: 'clinic-a', role: 'OWNER', full_name: 'Owner' }]);
+  queryRaw.mockResolvedValueOnce([{ clinic_id: 'clinic-b', role: 'CASHIER', full_name: 'Owner' }]);
   const first = await getUserProfile('user-1');
   const second = await getUserProfile('user-1');
   expect(first.data).toEqual({ clinic_id: 'clinic-a', role: 'OWNER', full_name: 'Owner' });
-  expect(second.data?.role).toBe('OWNER');
-  expect(queryRaw).toHaveBeenCalledTimes(1);
+  expect(second.data).toMatchObject({ role: 'CASHIER', clinic_id: 'clinic-b' });
+  expect(queryRaw).toHaveBeenCalledTimes(2);
   expect(queryRaw.mock.calls[0][0]).toContain('FROM users');
   expect(queryRaw.mock.calls[0][1]).toEqual(['user-1']);
 });

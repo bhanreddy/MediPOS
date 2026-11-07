@@ -1,5 +1,5 @@
 // fulfilmentEngine.ts — Enterprise Multi-Store Fulfilment Location Selection Engine
-import { localDb } from '../../local-db';
+import { businessDb as localDb } from '../../lib/businessDb';
 import { InventoryAvailabilityService } from '../inventory/inventoryAvailabilityService';
 import { FulfilmentCandidate, FulfilmentType } from '../../domain/orderTypes';
 import { AppError } from '../../lib/appError';
@@ -76,7 +76,7 @@ export class FulfilmentEngine {
   /**
    * Evaluate and rank fulfilment candidates for an order
    */
-  static evaluateCandidates(params: LocationEvaluationParams): FulfilmentCandidate[] {
+  static async evaluateCandidates(params: LocationEvaluationParams): Promise<FulfilmentCandidate[]> {
     const {
       organizationId,
       items,
@@ -93,21 +93,21 @@ export class FulfilmentEngine {
     // 1. Check if any items require cold chain or special storage
     let requiresColdChain = false;
     for (const it of items) {
-      const medRow: any = localDb
+      const medRow: any = (await localDb
         .prepare('SELECT storage_type, cold_chain_required FROM medicines WHERE id = ? OR _local_id = ?')
-        .get(it.medicine_id, it.medicine_id);
+        .get(it.medicine_id, it.medicine_id));
       if (medRow?.cold_chain_required || medRow?.storage_type === 'COLD_CHAIN') {
         requiresColdChain = true;
       }
     }
 
     // 2. Query all candidate stores in the organization
-    const storeRows: any[] = localDb
+    const storeRows: any[] = (await localDb
       .prepare(
         `SELECT * FROM stores 
          WHERE organization_id = ? AND _deleted = 0 AND (deleted_at IS NULL)`
       )
-      .all(organizationId);
+      .all(organizationId));
 
     const candidates: FulfilmentCandidate[] = [];
 
@@ -160,24 +160,24 @@ export class FulfilmentEngine {
       }
 
       // Query active pick queue load
-      const loadRow: any = localDb
+      const loadRow: any = (await localDb
         .prepare(
           `SELECT COUNT(*) as active_count FROM orders 
            WHERE fulfilment_store_id = ? AND status IN ('CONFIRMED', 'INVENTORY_RESERVED', 'PICKING') AND _deleted = 0`
         )
-        .get(s.id);
+        .get(s.id));
       const activeOrderCount = Number(loadRow?.active_count || 0);
 
       // Check item-level inventory availability
       let availableItemsCount = 0;
-      const itemAvailabilities = items.map(it => {
+      const itemAvailabilities = (await Promise.all(items.map(async it => {
         const reqQty = it.quantity * (it.conversion_factor || 1.0);
-        const avail = InventoryAvailabilityService.getAvailability({
+        const avail = (await InventoryAvailabilityService.getAvailability({
           organizationId,
           medicineId: it.medicine_id,
           locationType: 'STORE',
           storeId: s.id,
-        });
+        }));
 
         const isAvail = avail.totalAvailable >= reqQty;
         if (isAvail) availableItemsCount++;
@@ -189,7 +189,7 @@ export class FulfilmentEngine {
           availableQuantity: avail.totalAvailable,
           isAvailable: isAvail,
         };
-      });
+      })));
 
       const totalItemsCount = items.length;
       const availabilityPct = Math.round((availableItemsCount / totalItemsCount) * 100);
@@ -245,8 +245,8 @@ export class FulfilmentEngine {
   /**
    * Select single best eligible location for an order
    */
-  static selectBestLocation(params: LocationEvaluationParams): FulfilmentCandidate {
-    const candidates = this.evaluateCandidates(params);
+  static async selectBestLocation(params: LocationEvaluationParams): Promise<FulfilmentCandidate> {
+    const candidates = (await this.evaluateCandidates(params));
     const eligible = candidates.filter(c => c.isEligible);
     if (eligible.length > 0) {
       return eligible[0];

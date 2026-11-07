@@ -1,5 +1,5 @@
 // transferPickPackService.ts — Mobile Picking & Packaging Engine with Warehouse Bin Routing
-import { localDb } from '../../local-db';
+import { businessDb as localDb } from '../../lib/businessDb';
 import { localMutate } from '../../lib/localMutate';
 import { v4 as uuidv4 } from 'uuid';
 import { TransferPackage } from '../../domain/transferTypes';
@@ -8,17 +8,17 @@ export class TransferPickPackService {
   /**
    * Generate prioritized pick list with bin routing
    */
-  static generatePickList(transferId: string, organizationId: string): any {
-    const transfer: any = localDb
+  static async generatePickList(transferId: string, organizationId: string): Promise<any> {
+    const transfer: any = (await localDb
       .prepare(
         `SELECT * FROM stock_transfers 
          WHERE (id = ? OR _local_id = ?) AND (organization_id = ?) AND _deleted = 0`
       )
-      .get(transferId, transferId, organizationId);
+      .get(transferId, transferId, organizationId));
 
     if (!transfer) throw new Error('Transfer not found');
 
-    const allocations: any[] = localDb
+    const allocations: any[] = (await localDb
       .prepare(
         `SELECT stba.*, m.name as medicine_name, m.primary_barcode, wb.bin_code, wb.zone, wb.pick_sequence
          FROM stock_transfer_batch_allocations stba
@@ -27,7 +27,7 @@ export class TransferPickPackService {
          WHERE stba.transfer_id = ? AND stba._deleted = 0
          ORDER BY COALESCE(wb.pick_sequence, 100) ASC, stba.expiry_date ASC`
       )
-      .all(transfer.id);
+      .all(transfer.id));
 
     return {
       transferId: transfer.id,
@@ -57,7 +57,7 @@ export class TransferPickPackService {
   /**
    * Record a pick scan event with strict barcode/batch validation
    */
-  static recordPick(params: {
+  static async recordPick(params: {
     transferId: string;
     allocationId: string;
     organizationId: string;
@@ -65,7 +65,7 @@ export class TransferPickPackService {
     scannedBatchNumber?: string;
     quantityPicked: number;
     pickedBy: string;
-  }): any {
+  }): Promise<any> {
     const {
       transferId,
       allocationId,
@@ -76,14 +76,14 @@ export class TransferPickPackService {
       pickedBy,
     } = params;
 
-    const alloc: any = localDb
+    const alloc: any = (await localDb
       .prepare(
         `SELECT stba.*, m.primary_barcode 
          FROM stock_transfer_batch_allocations stba
          JOIN medicines m ON m.id = stba.medicine_id OR m._local_id = stba.medicine_id
          WHERE (stba.id = ? OR stba._local_id = ?) AND stba.transfer_id = ? AND stba._deleted = 0`
       )
-      .get(allocationId, allocationId, transferId);
+      .get(allocationId, allocationId, transferId));
 
     if (!alloc) throw new Error('Batch allocation line not found for this transfer');
 
@@ -92,12 +92,12 @@ export class TransferPickPackService {
       const cleanScanned = scannedBarcode.trim();
       const isMatch =
         cleanScanned === alloc.primary_barcode ||
-        localDb
+        (await localDb
           .prepare(
             `SELECT 1 FROM product_barcodes 
              WHERE barcode = ? AND (medicine_id = ? OR medicine_id = ?) AND _deleted = 0`
           )
-          .get(cleanScanned, alloc.medicine_id, alloc.medicine_id);
+          .get(cleanScanned, alloc.medicine_id, alloc.medicine_id));
 
       if (!isMatch) {
         throw new Error(`Validation Error: Scanned barcode ${scannedBarcode} does not match allocated product`);
@@ -116,7 +116,7 @@ export class TransferPickPackService {
     }
 
     const nowIso = new Date().toISOString();
-    localMutate({
+    (await localMutate({
       table: 'stock_transfer_batch_allocations',
       operation: 'UPDATE',
       data: {
@@ -125,28 +125,28 @@ export class TransferPickPackService {
         is_picked: 1,
         picked_at: nowIso,
       },
-    });
+    }));
 
     // Update item picked quantity
-    const totalPickedRow: any = localDb
+    const totalPickedRow: any = (await localDb
       .prepare(
         `SELECT SUM(quantity_picked) as total_picked 
          FROM stock_transfer_batch_allocations 
          WHERE transfer_item_id = ? AND _deleted = 0`
       )
-      .get(alloc.transfer_item_id);
+      .get(alloc.transfer_item_id));
 
-    localMutate({
+    (await localMutate({
       table: 'stock_transfer_items',
       operation: 'UPDATE',
       data: {
         _local_id: alloc.transfer_item_id,
         picked_quantity: Number(totalPickedRow?.total_picked || 0),
       },
-    });
+    }));
 
     // Advance transfer to PICKING status if currently READY_TO_PICK
-    localMutate({
+    (await localMutate({
       table: 'stock_transfers',
       operation: 'UPDATE',
       data: {
@@ -155,7 +155,7 @@ export class TransferPickPackService {
         pick_started_at: nowIso,
         picked_by: pickedBy,
       },
-    });
+    }));
 
     return {
       allocationId: alloc.id,
@@ -169,28 +169,28 @@ export class TransferPickPackService {
   /**
    * Complete entire picking process
    */
-  static completePicking(transferId: string, organizationId: string, pickedBy: string): any {
-    const transfer: any = localDb
+  static async completePicking(transferId: string, organizationId: string, pickedBy: string): Promise<any> {
+    const transfer: any = (await localDb
       .prepare(
         `SELECT * FROM stock_transfers 
          WHERE (id = ? OR _local_id = ?) AND (organization_id = ?) AND _deleted = 0`
       )
-      .get(transferId, transferId, organizationId);
+      .get(transferId, transferId, organizationId));
 
     if (!transfer) throw new Error('Transfer not found');
 
-    const allocs: any[] = localDb
+    const allocs: any[] = (await localDb
       .prepare(
         `SELECT * FROM stock_transfer_batch_allocations WHERE transfer_id = ? AND _deleted = 0`
       )
-      .all(transfer.id);
+      .all(transfer.id));
 
     if (allocs.length === 0) {
       throw new Error('Cannot complete picking with zero allocations');
     }
 
     const nowIso = new Date().toISOString();
-    localMutate({
+    (await localMutate({
       table: 'stock_transfers',
       operation: 'UPDATE',
       data: {
@@ -199,9 +199,9 @@ export class TransferPickPackService {
         picked_by: pickedBy,
         picked_at: nowIso,
       },
-    });
+    }));
 
-    localMutate({
+    (await localMutate({
       table: 'transfer_events',
       operation: 'INSERT',
       data: {
@@ -214,7 +214,7 @@ export class TransferPickPackService {
         performed_by: pickedBy,
         notes: `Completed pick for ${allocs.length} lines`,
       },
-    });
+    }));
 
     return { status: 'PICKED', transferId: transfer.id };
   }
@@ -222,7 +222,7 @@ export class TransferPickPackService {
   /**
    * Create packaging box/container and generate shipping labels
    */
-  static createPackage(params: {
+  static async createPackage(params: {
     transferId: string;
     organizationId: string;
     packageType?: 'BOX' | 'BAG' | 'CONTAINER' | 'COLD_BOX' | 'PALLET';
@@ -238,7 +238,7 @@ export class TransferPickPackService {
     weightKg?: number;
     specialInstructions?: string;
     sealNumber?: string;
-  }): TransferPackage {
+  }): Promise<TransferPackage> {
     const {
       transferId,
       organizationId,
@@ -251,25 +251,25 @@ export class TransferPickPackService {
       sealNumber,
     } = params;
 
-    const transfer: any = localDb
+    const transfer: any = (await localDb
       .prepare(
         `SELECT * FROM stock_transfers 
          WHERE (id = ? OR _local_id = ?) AND (organization_id = ?) AND _deleted = 0`
       )
-      .get(transferId, transferId, organizationId);
+      .get(transferId, transferId, organizationId));
 
     if (!transfer) throw new Error('Transfer not found');
 
-    const existingPackages: any = localDb
+    const existingPackages: any = (await localDb
       .prepare('SELECT COUNT(*) as cnt FROM transfer_packages WHERE transfer_id = ?')
-      .get(transfer.id);
+      .get(transfer.id));
 
     const nextPkgNum = Number(existingPackages?.cnt || 0) + 1;
     const pkgId = uuidv4();
     const pkgIdentifier = `${transfer.transfer_number}/PKG-${String(nextPkgNum).padStart(2, '0')}`;
     const nowIso = new Date().toISOString();
 
-    const pkg = localMutate({
+    const pkg = (await localMutate({
       table: 'transfer_packages',
       operation: 'INSERT',
       data: {
@@ -287,10 +287,10 @@ export class TransferPickPackService {
         special_instructions: specialInstructions || null,
         seal_number: sealNumber || null,
       },
-    });
+    }));
 
     for (const item of items) {
-      localMutate({
+      (await localMutate({
         table: 'transfer_package_items',
         operation: 'INSERT',
         data: {
@@ -303,11 +303,11 @@ export class TransferPickPackService {
           batch_id: item.batchId,
           quantity_packed: item.quantityPacked,
         },
-      });
+      }));
     }
 
     // Update transfer header package count and status
-    localMutate({
+    (await localMutate({
       table: 'stock_transfers',
       operation: 'UPDATE',
       data: {
@@ -318,9 +318,9 @@ export class TransferPickPackService {
         packed_at: nowIso,
         is_cold_chain: isColdChain || transfer.is_cold_chain ? 1 : 0,
       },
-    });
+    }));
 
-    localMutate({
+    (await localMutate({
       table: 'transfer_events',
       operation: 'INSERT',
       data: {
@@ -333,7 +333,7 @@ export class TransferPickPackService {
         performed_by: packedBy,
         notes: `Created package ${pkgIdentifier}`,
       },
-    });
+    }));
 
     return pkg as any;
   }

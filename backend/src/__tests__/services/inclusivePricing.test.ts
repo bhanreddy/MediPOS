@@ -44,20 +44,20 @@ test.each([undefined, false, true])('new sales force inclusive prices when the c
   expect(total.totalGst).toBe(12);
 });
 
-test.each([0, 5, 12, 18, 28])('POS keeps the selling price unchanged at %s%% GST', rate => {
-  const quote = CommercialEngine.quoteCommercialCart({ ...context, items: [{ medicine_id: String(rate), quantity: 1 }] });
+test.each([0, 5, 12, 18, 28])('POS keeps the selling price unchanged at %s%% GST', async rate => {
+  const quote = (await CommercialEngine.quoteCommercialCart({ ...context, items: [{ medicine_id: String(rate), quantity: 1 }] }));
   expect(quote.grandTotalPaise).toBe(11200);
   expect(quote.lines[0].lineTotalPaise).toBe(11200);
   expect(quote.taxableAmountPaise + quote.totalGstPaise).toBe(11200);
   expect(quote.cgstPaise + quote.sgstPaise).toBe(quote.totalGstPaise);
 });
 
-test('discounts reduce both the included GST and customer payment', () => {
-  const quote = CommercialEngine.quoteCommercialCart({
+test('discounts reduce both the included GST and customer payment', async () => {
+  const quote = (await CommercialEngine.quoteCommercialCart({
     ...context,
     items: [{ medicine_id: '12', quantity: 2, requested_discount_pct: 10 }],
     billDiscountPaise: 1120,
-  });
+  }));
   // ₹224 less ₹22.40 line discount and ₹11.20 bill discount = ₹190.40.
   expect(quote.subtotalPaise - quote.totalDiscountPaise).toBe(19040);
   expect(quote.lines[0].lineTotalPaise).toBe(19040);
@@ -66,16 +66,16 @@ test('discounts reduce both the included GST and customer payment', () => {
   expect(quote.grandTotalPaise - quote.roundOffPaise).toBe(19040);
 });
 
-test('mixed rates and coupon allocation reconcile to the last paise', () => {
-  jest.mocked(CouponEngine.validateCoupon).mockReturnValue({
+test('mixed rates and coupon allocation reconcile to the last paise', async () => {
+  jest.mocked(CouponEngine.validateCoupon).mockResolvedValue({
     isValid: true, statusCode: 'VALID', message: 'Valid', discountAmountPaise: 1501,
   });
-  const quote = CommercialEngine.quoteCommercialCart({
+  const quote = (await CommercialEngine.quoteCommercialCart({
     ...context,
     items: [{ medicine_id: '5', quantity: 1 }, { medicine_id: '18', quantity: 1 }, { medicine_id: '0', quantity: 1 }],
     couponCode: 'SAVE',
     billDiscountPaise: 100,
-  });
+  }));
   const gross = quote.subtotalPaise - quote.totalDiscountPaise;
   expect(gross).toBe(31999);
   expect(quote.lines.reduce((sum, line) => sum + line.lineTotalPaise, 0)).toBe(gross);
@@ -87,16 +87,16 @@ test('mixed rates and coupon allocation reconcile to the last paise', () => {
   }
 });
 
-test('a fully discounted bill has no payable amount or included GST', () => {
-  const quote = CommercialEngine.quoteCommercialCart({ ...context, items: [{ medicine_id: '12', quantity: 1 }], billDiscountPaise: 20000 });
+test('a fully discounted bill has no payable amount or included GST', async () => {
+  const quote = (await CommercialEngine.quoteCommercialCart({ ...context, items: [{ medicine_id: '12', quantity: 1 }], billDiscountPaise: 20000 }));
   expect(quote.grandTotalPaise).toBe(0);
   expect(quote.taxableAmountPaise).toBe(0);
   expect(quote.totalGstPaise).toBe(0);
   expect(quote.totalDiscountPaise).toBe(11200);
 });
 
-test('interstate GST is included entirely as IGST', () => {
-  const quote = CommercialEngine.quoteCommercialCart({ ...context, items: [{ medicine_id: '12', quantity: 1 }], isInterstate: true });
+test('interstate GST is included entirely as IGST', async () => {
+  const quote = (await CommercialEngine.quoteCommercialCart({ ...context, items: [{ medicine_id: '12', quantity: 1 }], isInterstate: true }));
   expect(quote.grandTotalPaise).toBe(11200);
   expect(quote.igstPaise).toBe(1200);
   expect(quote.cgstPaise + quote.sgstPaise).toBe(0);

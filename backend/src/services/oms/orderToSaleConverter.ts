@@ -1,5 +1,5 @@
 // orderToSaleConverter.ts — Atomic Order to Sale Conversion Pipeline
-import { localDb } from '../../local-db';
+import { businessDb as localDb } from '../../lib/businessDb';
 import { localMutate } from '../../lib/localMutate';
 import { v4 as uuidv4 } from 'uuid';
 import { DocumentNumberingService } from '../documentNumbering';
@@ -28,7 +28,7 @@ export class OrderToSaleConverter {
   /**
    * Convert fulfilled order into final canonical Sale
    */
-  static convertToSale(params: ConvertOrderToSaleParams): { saleId: string; invoiceNumber: string; sale: any } {
+  static async convertToSale(params: ConvertOrderToSaleParams): Promise<{ saleId: string; invoiceNumber: string; sale: any }> {
     const {
       orderId,
       organizationId,
@@ -39,9 +39,9 @@ export class OrderToSaleConverter {
       payments = [],
     } = params;
 
-    const order: any = localDb
+    const order: any = (await localDb
       .prepare('SELECT * FROM orders WHERE (id = ? OR _local_id = ?) AND organization_id = ?')
-      .get(orderId, orderId, organizationId);
+      .get(orderId, orderId, organizationId));
 
     if (!order) {
       throw new AppError(404, 'Order not found', 'ORDER_NOT_FOUND');
@@ -49,9 +49,9 @@ export class OrderToSaleConverter {
 
     // Idempotency: If order already converted to sale, return existing sale
     if (order.sale_id) {
-      const existingSale: any = localDb
+      const existingSale: any = (await localDb
         .prepare('SELECT * FROM sales WHERE id = ? OR _local_id = ?')
-        .get(order.sale_id, order.sale_id);
+        .get(order.sale_id, order.sale_id));
       if (existingSale) {
         return {
           saleId: existingSale.id,
@@ -70,38 +70,38 @@ export class OrderToSaleConverter {
       throw new AppError(400, 'Store ID required for sale conversion', 'STORE_REQUIRED');
     }
 
-    const orderItems: any[] = localDb
+    const orderItems: any[] = (await localDb
       .prepare("SELECT * FROM order_items WHERE order_id = ? AND _deleted = 0 AND status != 'CANCELLED'")
-      .all(order.id);
+      .all(order.id));
 
     if (orderItems.length === 0) {
       throw new AppError(400, 'No active items in order to convert to sale', 'EMPTY_ORDER_ITEMS');
     }
 
     // Retrieve fulfilment batch allocations
-    const fulfilmentItems: any[] = localDb
+    const fulfilmentItems: any[] = (await localDb
       .prepare('SELECT * FROM order_fulfilment_items WHERE order_id = ? AND _deleted = 0')
-      .all(order.id);
+      .all(order.id));
 
     let saleResult: any = null;
 
     // Atomic Checkout Transaction
-    const executeConversionTx = localDb.transaction(() => {
+    const executeConversionTx = localDb.transaction(async () => {
       const saleId = uuidv4();
-      const invoiceNumber = DocumentNumberingService.generate({
+      const invoiceNumber = (await DocumentNumberingService.generate({
         organizationId,
         storeId: effectiveStoreId,
         documentType: 'SALE_INVOICE',
-      });
+      }));
 
       const nowIso = new Date().toISOString();
       const grandTotal = Number(order.grand_total || 0);
       const grandTotalPaise = Number(order.grand_total_paise || Math.round(grandTotal * 100));
 
       // Resolve payments: Check existing payment_transactions linked to order or passed payments
-      const existingPaymentTxs: any[] = localDb
+      const existingPaymentTxs: any[] = (await localDb
         .prepare("SELECT * FROM payment_transactions WHERE order_id = ? AND status = 'COMPLETED'")
-        .all(order.id);
+        .all(order.id));
 
       let totalPaidPaise = 0;
       for (const p of existingPaymentTxs) {
@@ -115,7 +115,7 @@ export class OrderToSaleConverter {
           totalPaidPaise += amtPaise;
 
           const pTxId = uuidv4();
-          localMutate({
+          (await localMutate({
             table: 'payment_transactions',
             operation: 'INSERT',
             data: {
@@ -134,18 +134,18 @@ export class OrderToSaleConverter {
               status: 'COMPLETED',
               created_at: nowIso,
             },
-          });
+          }));
         }
       } else if (existingPaymentTxs.length > 0) {
         // Link existing payment transactions to the new sale_id
-        localDb
+        (await localDb
           .prepare('UPDATE payment_transactions SET sale_id = ?, updated_at = ?, _updated_at = ? WHERE order_id = ?')
-          .run(saleId, nowIso, nowIso, order.id);
+          .run(saleId, nowIso, nowIso, order.id));
       } else {
         // Default to CASH payment at counter
         const pTxId = uuidv4();
         totalPaidPaise = grandTotalPaise;
-        localMutate({
+        (await localMutate({
           table: 'payment_transactions',
           operation: 'INSERT',
           data: {
@@ -163,13 +163,13 @@ export class OrderToSaleConverter {
             status: 'COMPLETED',
             created_at: nowIso,
           },
-        });
+        }));
       }
 
       const balanceDuePaise = Math.max(0, grandTotalPaise - totalPaidPaise);
 
       // Insert Sale Master
-      const saleRecord = localMutate({
+      const saleRecord = (await localMutate({
         table: 'sales',
         operation: 'INSERT',
         data: {
@@ -196,7 +196,7 @@ export class OrderToSaleConverter {
           served_by: servedByUserId,
           created_at: nowIso,
         },
-      });
+      }));
 
       // Insert Sale Items and Deduct Inventory
       for (const item of orderItems) {
@@ -206,7 +206,7 @@ export class OrderToSaleConverter {
 
         const qty = Number(item.fulfilled_quantity || item.requested_quantity || 1);
 
-        localMutate({
+        (await localMutate({
           table: 'sale_items',
           operation: 'INSERT',
           data: {
@@ -233,7 +233,7 @@ export class OrderToSaleConverter {
             is_prescription_required: item.prescription_required ? 1 : 0,
             created_at: nowIso,
           },
-        });
+        }));
 
         // Deduct inventory & Consume Reservations for each allocated batch
         for (const alloc of allocsForItem) {
@@ -242,19 +242,19 @@ export class OrderToSaleConverter {
 
           if (targetBatchId) {
             // Deduct physical batch stock
-            const batchRow: any = localDb
+            const batchRow: any = (await localDb
               .prepare('SELECT quantity_remaining, mrp, purchase_price FROM medicine_batches WHERE id = ? OR _local_id = ?')
-              .get(targetBatchId, targetBatchId);
+              .get(targetBatchId, targetBatchId));
 
             if (batchRow) {
               const newRemaining = Math.max(0, Number(batchRow.quantity_remaining || 0) - allocQty);
-              localDb
+              (await localDb
                 .prepare('UPDATE medicine_batches SET quantity_remaining = ? WHERE id = ? OR _local_id = ?')
-                .run(newRemaining, targetBatchId, targetBatchId);
+                .run(newRemaining, targetBatchId, targetBatchId));
 
               // Record sale batch allocation
               const allocId = uuidv4();
-              localMutate({
+              (await localMutate({
                 table: 'sale_batch_allocations',
                 operation: 'INSERT',
                 data: {
@@ -273,31 +273,31 @@ export class OrderToSaleConverter {
                   cost_price: batchRow.purchase_price || 0,
                   created_at: nowIso,
                 },
-              });
+              }));
             }
 
             // Consume Inventory Reservation
             if (alloc.reservation_id) {
-              InventoryReservationService.consumeReservation(alloc.reservation_id);
+              (await InventoryReservationService.consumeReservation(alloc.reservation_id));
             }
 
             // Deduct store Inventory Position
             try {
-              InventoryPositionService.adjustStock({
+              (await InventoryPositionService.adjustStock({
                 organizationId,
                 medicineId: item.medicine_id,
                 batchId: targetBatchId,
                 locationType: 'STORE',
                 storeId: effectiveStoreId,
                 quantityDelta: -allocQty,
-              });
+              }));
             } catch {
               // fallback
             }
 
             // Write Immutable Stock Ledger entry
             const ledgerId = uuidv4();
-            localMutate({
+            (await localMutate({
               table: 'stock_ledger',
               operation: 'INSERT',
               data: {
@@ -317,12 +317,12 @@ export class OrderToSaleConverter {
                 created_by: servedByUserId,
                 created_at: nowIso,
               },
-            });
+            }));
 
             // Prescription Dispensing Event
             if (item.prescription_id || item.prescription_item_id) {
               const dispEventId = uuidv4();
-              localMutate({
+              (await localMutate({
                 table: 'dispensing_events',
                 operation: 'INSERT',
                 data: {
@@ -343,14 +343,14 @@ export class OrderToSaleConverter {
                   dispensed_at: nowIso,
                   created_at: nowIso,
                 },
-              });
+              }));
             }
           }
         }
       }
 
       // Update Order Status to COMPLETED and link sale_id
-      localMutate({
+      (await localMutate({
         table: 'orders',
         operation: 'UPDATE',
         data: {
@@ -362,13 +362,13 @@ export class OrderToSaleConverter {
           completed_at: nowIso,
           updated_at: nowIso,
         },
-      });
+      }));
 
-      localDb
+      (await localDb
         .prepare("UPDATE order_fulfilments SET status = 'HANDED_OVER', completed_at = ?, updated_at = ?, _updated_at = ? WHERE order_id = ?")
-        .run(nowIso, nowIso, nowIso, order.id);
+        .run(nowIso, nowIso, nowIso, order.id));
 
-      OrderEventService.logEvent({
+      (await OrderEventService.logEvent({
         orderId: order.id,
         organizationId,
         eventType: 'COMPLETED',
@@ -381,12 +381,12 @@ export class OrderToSaleConverter {
           grandTotal,
         },
         notes: `Order #${order.order_number} completed and converted to Invoice #${invoiceNumber}`,
-      });
+      }));
 
       saleResult = { saleId, invoiceNumber, sale: saleRecord };
     });
 
-    executeConversionTx();
+    (await executeConversionTx());
     return saleResult;
   }
 }

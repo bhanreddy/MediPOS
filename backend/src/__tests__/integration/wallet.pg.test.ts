@@ -20,7 +20,7 @@ import { errorHandler } from '../../middleware/errorHandler';
  const app=express();app.use(express.json());app.use('/wallet',walletRouter);app.use('/sales',salesRouter);app.use(errorHandler);
  const medicine=randomUUID(),batch=randomUUID();
  const context=(customerId:string)=>({clinicId:clinic,customerId,actorId:actor});
- const issue=(customerId:string,amount=5000,days=90,requestId=randomUUID())=>WalletService.issue(context(customerId),{amountPaise:amount,validityDays:days,reason:'QA welcome promotion',requestId});
+ const issue=async (customerId:string,amount=5000,days=90,requestId=randomUUID())=>(await WalletService.issue(context(customerId),{amountPaise:amount,validityDays:days,reason:'QA welcome promotion',requestId}));
  async function customer(){const id=randomUUID();await sql`INSERT INTO customers(id,_local_id,clinic_id,name,phone) VALUES(${id},${id},${clinic},'Wallet QA','9000000000')`;return id;}
  async function saleReference(customerId:string){const id=randomUUID();await sql`INSERT INTO sales(id,_local_id,clinic_id,customer_id,invoice_number,payment_mode,net_amount) VALUES(${id},${id},${clinic},${customerId},${id},'cash',100)`;return id;}
  const payload=(customerId:string,wallet=2000)=>({customer_id:customerId,_local_id:randomUUID(),payment_mode:'cash',paid_amount:40-wallet/100,price_includes_tax:true,wallet_amount_paise:wallet,items:[{medicine_id:medicine,batch_id:batch,quantity:2,mrp:20,gst_rate:12}]});
@@ -81,7 +81,7 @@ import { errorHandler } from '../../middleware/errorHandler';
   const id=await customer();const issued=await issue(id,5000,1),sale=await saleReference(id);await WalletService.redeem(context(id),2000,sale);
   const original=persistence.postgresQuery;
   const future=new Date(Date.parse(issued.lots[0].expires_at)+1000);
-  jest.spyOn(persistence,'postgresQuery').mockImplementation(((query:string,params:any[])=>query==='SELECT clock_timestamp() AS now'?Promise.resolve([{now:future}]):original(query,params)) as typeof persistence.postgresQuery);
+  jest.spyOn(persistence,'postgresQuery').mockImplementation((async (query:string,params:any[])=>query==='SELECT clock_timestamp() AS now'?Promise.resolve([{now:future}]):(await original(query,params))) as typeof persistence.postgresQuery);
   expect((await WalletService.get(context(id))).balance_paise).toBe(0);
   await expect(WalletService.redeem(context(id),1,await saleReference(id))).rejects.toThrow('expired');
   const returnSale=await saleReference(id);await WalletService.refund(context(id),sale,returnSale,2000);
@@ -144,6 +144,8 @@ import { errorHandler } from '../../middleware/errorHandler';
 
  test('rounding many partial returns cannot convert a fully promotional invoice into cash',async()=>{
   const id=await customer();await issue(id,100);
+  await sql`UPDATE medicines SET gst_rate=0 WHERE id=${medicine}`;
+  await sql`UPDATE medicine_batches SET mrp=0.01 WHERE id=${batch}`;
   const sold=await request(app).post('/sales').send({...payload(id,2),paid_amount:0,items:[{medicine_id:medicine,batch_id:batch,quantity:3,mrp:0.01,discount_pct:33,gst_rate:0}]});
   expect(sold.status).toBe(201);expect(Number(sold.body.data.net_amount)).toBe(0.02);
   let returnedWallet=0;

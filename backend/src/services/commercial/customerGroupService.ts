@@ -1,4 +1,4 @@
-import { localDb } from '../../local-db';
+import { businessDb as localDb } from '../../lib/businessDb';
 import { localMutate } from '../../lib/localMutate';
 import { v4 as uuidv4 } from 'uuid';
 import {
@@ -11,8 +11,8 @@ export class CustomerGroupService {
   /**
    * Lists customer groups for an organization
    */
-  static listGroups(organizationId: string): CustomerGroup[] {
-    return localDb
+  static async listGroups(organizationId: string): Promise<CustomerGroup[]> {
+    return (await localDb
       .prepare(
         `SELECT cg.*, 
           (SELECT COUNT(*) FROM customer_group_members WHERE customer_group_id = cg.id OR customer_group_id = cg._local_id) as member_count
@@ -20,15 +20,15 @@ export class CustomerGroupService {
          WHERE (cg.organization_id = ?) AND cg._deleted = 0
          ORDER BY cg.priority DESC, cg.name ASC`
       )
-      .all(organizationId) as CustomerGroup[];
+      .all(organizationId)) as CustomerGroup[];
   }
 
   /**
    * Creates a customer group
    */
-  static createGroup(data: Partial<CustomerGroup>): CustomerGroup {
+  static async createGroup(data: Partial<CustomerGroup>): Promise<CustomerGroup> {
     const id = data.id || uuidv4();
-    const group = localMutate({
+    const group = (await localMutate({
       table: 'customer_groups',
       operation: 'INSERT',
       data: {
@@ -43,23 +43,23 @@ export class CustomerGroupService {
         discount_pct: data.discount_pct ?? 0,
         is_active: data.is_active !== undefined ? (data.is_active ? 1 : 0) : 1,
       },
-    });
+    }));
     return group as CustomerGroup;
   }
 
   /**
    * Assigns a customer to a group
    */
-  static assignCustomer(params: {
+  static async assignCustomer(params: {
     organizationId: string;
     customerGroupId: string;
     customerId: string;
     startAt?: string;
     endAt?: string;
     assignedBy?: string;
-  }): CustomerGroupMember {
+  }): Promise<CustomerGroupMember> {
     const id = uuidv4();
-    const member = localMutate({
+    const member = (await localMutate({
       table: 'customer_group_members',
       operation: 'INSERT',
       data: {
@@ -73,16 +73,16 @@ export class CustomerGroupService {
         status: 'ACTIVE',
         assigned_by: params.assignedBy || null,
       },
-    });
+    }));
     return member as CustomerGroupMember;
   }
 
   /**
    * Resolves the primary active group for a customer based on highest priority
    */
-  static resolveCustomerGroup(customerId: string, organizationId: string): CustomerGroup | null {
+  static async resolveCustomerGroup(customerId: string, organizationId: string): Promise<CustomerGroup | null> {
     const nowIso = new Date().toISOString();
-    const group: any = localDb
+    const group: any = (await localDb
       .prepare(
         `SELECT cg.*
          FROM customer_groups cg
@@ -96,7 +96,7 @@ export class CustomerGroupService {
          ORDER BY cg.priority DESC
          LIMIT 1`
       )
-      .get(customerId, customerId, organizationId, nowIso, nowIso);
+      .get(customerId, customerId, organizationId, nowIso, nowIso));
 
     return group || null;
   }
@@ -104,7 +104,7 @@ export class CustomerGroupService {
   /**
    * Creates or updates a customer membership tier
    */
-  static setMembership(params: {
+  static async setMembership(params: {
     organizationId: string;
     customerId: string;
     membershipType?: string;
@@ -113,14 +113,14 @@ export class CustomerGroupService {
     membershipNumber?: string;
     startAt?: string;
     endAt?: string;
-  }): CustomerMembership {
+  }): Promise<CustomerMembership> {
     const id = uuidv4();
-    const existing: any = localDb
+    const existing: any = (await localDb
       .prepare('SELECT * FROM customer_memberships WHERE customer_id = ? AND _deleted = 0')
-      .get(params.customerId);
+      .get(params.customerId));
 
     if (existing) {
-      const updated = localMutate({
+      const updated = (await localMutate({
         table: 'customer_memberships',
         operation: 'UPDATE',
         data: {
@@ -133,11 +133,11 @@ export class CustomerGroupService {
           end_at: params.endAt || existing.end_at,
           status: 'ACTIVE',
         },
-      });
+      }));
       return updated as CustomerMembership;
     }
 
-    const created = localMutate({
+    const created = (await localMutate({
       table: 'customer_memberships',
       operation: 'INSERT',
       data: {
@@ -153,16 +153,16 @@ export class CustomerGroupService {
         end_at: params.endAt || null,
         status: 'ACTIVE',
       },
-    });
+    }));
     return created as CustomerMembership;
   }
 
   /**
    * Retrieves active membership for a customer
    */
-  static getActiveMembership(customerId: string, organizationId: string): CustomerMembership | null {
+  static async getActiveMembership(customerId: string, organizationId: string): Promise<CustomerMembership | null> {
     const nowIso = new Date().toISOString();
-    const mem: any = localDb
+    const mem: any = (await localDb
       .prepare(
         `SELECT * FROM customer_memberships
          WHERE (customer_id = ? OR customer_id = ?)
@@ -172,7 +172,7 @@ export class CustomerGroupService {
            AND (end_at IS NULL OR end_at >= ?)
          LIMIT 1`
       )
-      .get(customerId, customerId, organizationId, nowIso, nowIso);
+      .get(customerId, customerId, organizationId, nowIso, nowIso));
 
     return mem || null;
   }

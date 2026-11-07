@@ -1,5 +1,7 @@
+import { recordSupplierCloudPayment } from '../supplierCloudPayments';
+import { tenantRecord } from '../../lib/tenantRecords';
 // supplierPayableService.ts — Transaction-Level Payable Ledger, FIFO Payment Allocation & Ageing Engine
-import { localDb } from '../../local-db';
+import { businessDb as localDb, cloudBusinessMode, lockBusinessRows } from '../../lib/businessDb';
 import { localMutate } from '../../lib/localMutate';
 import { Money } from '../../lib/money';
 import { v4 as uuidv4 } from 'uuid';
@@ -15,7 +17,7 @@ export class SupplierPayableService {
   /**
    * Record transaction in immutable supplier payable ledger
    */
-  static recordLedgerEntry(params: {
+  static async recordLedgerEntry(params: {
     organizationId: string;
     storeId?: string | null;
     supplierId: string;
@@ -27,7 +29,7 @@ export class SupplierPayableService {
     creditPaise: number; // Increases liability (e.g. purchase invoice)
     notes?: string | null;
     performedBy: string;
-  }): SupplierPayableLedgerEntry {
+  }): Promise<SupplierPayableLedgerEntry> {
     const {
       organizationId,
       storeId = null,
@@ -42,14 +44,16 @@ export class SupplierPayableService {
       performedBy,
     } = params;
 
+    await lockBusinessRows('suppliers',[supplierId]);
     // Fetch supplier current balance
-    const supplier: any = localDb
+    const supplier: any = (await localDb
       .prepare(
         `SELECT id, _local_id, outstanding_balance FROM suppliers
          WHERE (id = ? OR _local_id = ?) AND (organization_id = ?) LIMIT 1`
       )
-      .get(supplierId, supplierId, organizationId);
+      .get(supplierId, supplierId, organizationId));
 
+    if (!supplier) throw new Error('Supplier not found');
     const currentBalancePaise = supplier?.outstanding_balance ? Money.toPaise(Number(supplier.outstanding_balance)) : 0;
     // New Balance = Current + Credit - Debit
     const newBalancePaise = Math.max(0, currentBalancePaise + creditPaise - debitPaise);
@@ -58,7 +62,7 @@ export class SupplierPayableService {
     const entryId = uuidv4();
     const nowIso = new Date().toISOString();
 
-    const entry = localMutate({
+    const entry = (await localMutate({
       table: 'supplier_payable_ledger',
       operation: 'INSERT',
       data: {
@@ -78,18 +82,18 @@ export class SupplierPayableService {
         performed_by: performedBy,
         created_at: nowIso,
       },
-    });
+    }));
 
     // Update supplier master outstanding balance
     if (supplier) {
-      localMutate({
+      (await localMutate({
         table: 'suppliers',
         operation: 'UPDATE',
         data: {
           _local_id: supplier._local_id || supplier.id,
           outstanding_balance: newBalanceRs,
         },
-      });
+      }));
     }
 
     return entry as any;
@@ -98,7 +102,7 @@ export class SupplierPayableService {
   /**
    * Record Supplier Payment with manual or automatic FIFO invoice allocation
    */
-  static recordPayment(params: {
+  static async recordPayment(params: {
     organizationId: string;
     storeId?: string | null;
     supplierId: string;
@@ -106,13 +110,14 @@ export class SupplierPayableService {
     paymentMode: PaymentMode;
     referenceNumber?: string | null;
     amountPaise: number;
+    idempotencyKey?: string;
     notes?: string | null;
     recordedBy: string;
     allocations?: Array<{
       invoiceId: string;
       amountPaise: number;
     }>;
-  }): SupplierPayment {
+  }): Promise<SupplierPayment> {
     const {
       organizationId,
       storeId = null,
@@ -130,12 +135,29 @@ export class SupplierPayableService {
       throw new Error('Payment amount must be greater than zero');
     }
 
+    if (cloudBusinessMode()) {
+      const supplier=await tenantRecord('suppliers',supplierId,organizationId);
+      const result=await recordSupplierCloudPayment({clinicId:supplier.clinic_id,userId:recordedBy,supplierId,
+        requestId:params.idempotencyKey||'',amount:Money.toRupees(amountPaise),mode:paymentMode,note:notes||undefined,reference:referenceNumber||undefined,allocations});
+      return {...result.payment,allocations:result.allocations} as SupplierPayment;
+    }
+    const supplier = (await tenantRecord('suppliers', supplierId, organizationId));
+    if (storeId) (await tenantRecord('stores', storeId, organizationId));
+    // Validate the whole batch before changing any invoice balances.
+    for (const allocation of allocations || []) {
+      const invoice = (await tenantRecord('purchase_invoices', allocation.invoiceId, organizationId));
+      if (![supplier.id, supplier._local_id].includes(invoice.supplier_id))
+        throw new Error('Invoice does not belong to this supplier');
+      if (!Number.isFinite(allocation.amountPaise) || allocation.amountPaise <= 0)
+        throw new Error('Allocation amount must be greater than zero');
+    }
+
     const paymentId = uuidv4();
-    const paymentNumber = DocumentNumberingService.generate({
+    const paymentNumber = (await DocumentNumberingService.generate({
       organizationId,
       storeId,
       documentType: 'SUPPLIER_PAYMENT',
-    });
+    }));
 
     const nowIso = new Date().toISOString();
     let remainingAmountToAllocate = amountPaise;
@@ -147,13 +169,13 @@ export class SupplierPayableService {
         if (remainingAmountToAllocate <= 0) break;
         const allocAmount = Math.min(alloc.amountPaise, remainingAmountToAllocate);
 
-        const invoice: any = localDb.prepare('SELECT * FROM purchase_invoices WHERE id = ? OR _local_id = ?').get(alloc.invoiceId, alloc.invoiceId);
+        const invoice = (await tenantRecord('purchase_invoices', alloc.invoiceId, organizationId));
         if (invoice) {
           const invPaid = Number(invoice.paid_amount_paise || 0) + allocAmount;
           const invBalance = Math.max(0, Number(invoice.total_paise || 0) - invPaid);
           const newStatus = invBalance <= 0 ? 'PAID' : 'PARTIALLY_PAID';
 
-          localMutate({
+          (await localMutate({
             table: 'purchase_invoices',
             operation: 'UPDATE',
             data: {
@@ -162,9 +184,9 @@ export class SupplierPayableService {
               balance_due_paise: invBalance,
               payment_status: newStatus,
             },
-          });
+          }));
 
-          const allocRec = localMutate({
+          const allocRec = (await localMutate({
             table: 'supplier_payment_allocations',
             operation: 'INSERT',
             data: {
@@ -174,14 +196,14 @@ export class SupplierPayableService {
               allocated_amount_paise: allocAmount,
               created_at: nowIso,
             },
-          });
+          }));
           recordedAllocations.push(allocRec);
           remainingAmountToAllocate -= allocAmount;
         }
       }
     } else {
       // 2. Automatic FIFO allocation across oldest unpaid invoices
-      const unpaidInvoices: any[] = localDb
+      const unpaidInvoices: any[] = (await localDb
         .prepare(
           `SELECT * FROM purchase_invoices
            WHERE (organization_id = ?)
@@ -189,7 +211,7 @@ export class SupplierPayableService {
              AND payment_status != 'PAID' AND status = 'POSTED' AND _deleted = 0
            ORDER BY invoice_date ASC, created_at ASC`
         )
-        .all(organizationId, supplierId, supplierId);
+        .all(organizationId, supplierId, supplierId));
 
       for (const inv of unpaidInvoices) {
         if (remainingAmountToAllocate <= 0) break;
@@ -200,7 +222,7 @@ export class SupplierPayableService {
         const newBalance = Math.max(0, Number(inv.total_paise || 0) - newPaid);
         const newStatus = newBalance <= 0 ? 'PAID' : 'PARTIALLY_PAID';
 
-        localMutate({
+        (await localMutate({
           table: 'purchase_invoices',
           operation: 'UPDATE',
           data: {
@@ -209,9 +231,9 @@ export class SupplierPayableService {
             balance_due_paise: newBalance,
             payment_status: newStatus,
           },
-        });
+        }));
 
-        const allocRec = localMutate({
+        const allocRec = (await localMutate({
           table: 'supplier_payment_allocations',
           operation: 'INSERT',
           data: {
@@ -221,14 +243,14 @@ export class SupplierPayableService {
             allocated_amount_paise: allocAmount,
             created_at: nowIso,
           },
-        });
+        }));
         recordedAllocations.push(allocRec);
         remainingAmountToAllocate -= allocAmount;
       }
     }
 
     // 3. Create Payment Header
-    const paymentHeader = localMutate({
+    const paymentHeader = (await localMutate({
       table: 'supplier_payments',
       operation: 'INSERT',
       data: {
@@ -247,10 +269,10 @@ export class SupplierPayableService {
         recorded_by: recordedBy,
         created_at: nowIso,
       },
-    });
+    }));
 
     // 4. Record Supplier Payable Ledger Entry (Debit = Redirection of Liability)
-    this.recordLedgerEntry({
+    (await this.recordLedgerEntry({
       organizationId,
       storeId,
       supplierId,
@@ -261,7 +283,7 @@ export class SupplierPayableService {
       creditPaise: 0,
       notes: `Supplier Payment ${paymentNumber} via ${paymentMode}${referenceNumber ? ` (Ref: ${referenceNumber})` : ''}`,
       performedBy: recordedBy,
-    });
+    }));
 
     return {
       ...paymentHeader,
@@ -272,11 +294,11 @@ export class SupplierPayableService {
   /**
    * Get Supplier Ageing Breakdown (CURRENT, 1-30, 31-60, 61-90, 90+ days)
    */
-  static getSupplierAgeing(params: {
+  static async getSupplierAgeing(params: {
     organizationId: string;
     supplierId?: string;
     asOfDate?: Date;
-  }): Array<{
+  }): Promise<Array<{
     supplierId: string;
     supplierName: string;
     currentPaise: number;
@@ -285,7 +307,7 @@ export class SupplierPayableService {
     days61_90Paise: number;
     days90PlusPaise: number;
     totalOutstandingPaise: number;
-  }> {
+  }>> {
     const { organizationId, supplierId, asOfDate = new Date() } = params;
 
     let query = `
@@ -302,7 +324,7 @@ export class SupplierPayableService {
       values.push(supplierId, supplierId);
     }
 
-    const invoices: any[] = localDb.prepare(query).all(...values);
+    const invoices: any[] = (await localDb.prepare(query).all(...values));
     const supplierMap = new Map<string, {
       supplierId: string;
       supplierName: string;
@@ -356,25 +378,25 @@ export class SupplierPayableService {
   /**
    * Get Supplier Ledger Statement
    */
-  static getLedgerStatement(params: {
+  static async getLedgerStatement(params: {
     organizationId: string;
     supplierId: string;
     limit?: number;
     offset?: number;
-  }): { data: SupplierPayableLedgerEntry[]; total: number } {
+  }): Promise<{ data: SupplierPayableLedgerEntry[]; total: number }> {
     const { organizationId, supplierId, limit = 50, offset = 0 } = params;
 
-    const countRow: any = localDb
+    const countRow: any = (await localDb
       .prepare(
         `SELECT COUNT(*) as total FROM supplier_payable_ledger
          WHERE (organization_id = ?)
            AND (supplier_id = ? OR supplier_id = ?) AND _deleted = 0`
       )
-      .get(organizationId, supplierId, supplierId);
+      .get(organizationId, supplierId, supplierId));
 
     const total = Number(countRow?.total || 0);
 
-    const rows: any[] = localDb
+    const rows: any[] = (await localDb
       .prepare(
         `SELECT spl.*, s.name as supplier_name
          FROM supplier_payable_ledger spl
@@ -383,7 +405,7 @@ export class SupplierPayableService {
            AND (spl.supplier_id = ? OR spl.supplier_id = ?) AND spl._deleted = 0
          ORDER BY spl.created_at DESC LIMIT ? OFFSET ?`
       )
-      .all(organizationId, supplierId, supplierId, limit, offset);
+      .all(organizationId, supplierId, supplierId, limit, offset));
 
     return { data: rows, total };
   }

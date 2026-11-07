@@ -124,6 +124,7 @@ export async function applyPushRecord(
   error?: string;
 }> {
   const now = new Date().toISOString();
+  if(process.env.DATABASE_URL)return {localId:rec.localId,remoteId:rec.remoteId,status:'REJECTED' as const,version:rec.version,serverUpdatedAt:now,error:'Direct row synchronization is disabled. Preserve the local transaction and submit a canonical command to /api/offline/commands.'};
   const table = rec.table === 'invoices' ? 'sales' : rec.table;
 
   try {

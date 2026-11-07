@@ -1,0 +1,57 @@
+const {chromium}=require(process.env.QA_PLAYWRIGHT_MODULE || 'playwright');
+const fs=require('node:fs'),assert=require('node:assert/strict');
+// Use only disposable local fixtures and a locally running web app.
+const api = new URL(process.env.QA_API_URL || 'http://127.0.0.1:55601');
+const web = new URL(process.env.QA_WEB_URL || 'http://127.0.0.1:4179');
+if ([api, web].some(url => !['127.0.0.1','localhost'].includes(url.hostname))) throw new Error('Browser QA requires localhost');
+const fixture=JSON.parse(fs.readFileSync(process.env.QA_AUTH_FILE,'utf8'));
+(async()=>{
+ const browser=await chromium.launch({headless:true,channel:'chrome'});
+ try {
+  const context=await browser.newContext({viewport:{width:1440,height:990}});
+  const session={access_token:fixture.cashier_token,refresh_token:'phase1-qa-refresh',token_type:'bearer',expires_in:3600,expires_at:Math.floor(Date.now()/1000)+3600,user:{id:fixture.cashier,email:'cashier@example.invalid',aud:'authenticated',app_metadata:{},user_metadata:{},created_at:'2026-11-05T10:00:00Z'}};
+  const profile={id:fixture.cashier,clinic_id:fixture.clinic,role:'CASHIER',full_name:'QA Cashier',email:'cashier@example.invalid'};
+  await context.addInitScript(({session,profile})=>{if(!localStorage.getItem('supabase_session_json')){localStorage.setItem('supabase_session_json',JSON.stringify(session));localStorage.setItem('sb-127-auth-token',JSON.stringify(session));localStorage.setItem('auth_profile_json',JSON.stringify(profile));}window.print=()=>{document.documentElement.dataset.qaPrinted='true';};},{session,profile});
+  await context.route(url=>!['127.0.0.1','localhost'].includes(url.hostname)&&['http:','https:'].includes(url.protocol),route=>route.abort());
+  const page=await context.newPage();page.on('pageerror',error=>console.log('Browser error:',error.message));
+  await page.goto(new URL('/billing/new', web).href);
+  await page.getByRole('button',{name:'Cash register',exact:true}).click();
+  await page.getByLabel('Opening float (₹)').fill('100');
+  await page.getByRole('button',{name:'Open shift',exact:true}).click();
+  await page.getByRole('heading',{name:'X report',exact:true}).waitFor();
+  await page.getByRole('button',{name:'Close dialog'}).click();
+  await page.getByPlaceholder('Search a medicine or scan its barcode').fill('QA Browser FEFO',{timeout:15000});
+  await page.getByRole('option',{name:/QA Browser FEFO/i}).click({timeout:10000});
+  await page.getByRole('textbox',{name:'Quantity of QA Browser FEFO'}).fill('10');
+  await page.getByText('3 units + 7 units',{exact:true}).waitFor({timeout:10000});
+  const saleResponse=page.waitForResponse(response=>response.url().endsWith('/api/sales')&&response.request().method()==='POST'&&response.status()===201);
+  await page.getByRole('button',{name:'Confirm sale',exact:false}).first().click();
+  const sale=(await (await saleResponse).json()).data;
+  assert.equal(Number(sale.net_amount),114);
+  assert.deepEqual(sale.sale_items.map(item=>[item.batch_id,item.quantity]),[[fixture.batches[0],3],[fixture.batches[1],7]]);
+  await page.goto(new URL('/billing', web).href);
+  await page.getByRole('textbox',{name:'Search invoices'}).fill(sale.invoice_number);
+  await page.getByRole('button',{name:`Return items from invoice ${sale.invoice_number}`}).click();
+  const dialog=page.getByRole('dialog');
+  await dialog.getByRole('checkbox',{name:/Return QA Browser FEFO, batch QA-EARLY/}).check();
+  await dialog.getByLabel('Return reason').fill('Browser QA: original batch returned');
+  await dialog.getByLabel('Refund method').selectOption('cash');
+  await dialog.getByText('Refund to customer',{exact:true}).waitFor();
+  assert.equal(await dialog.getByText(/Approve restocking/).locator('input').first().isDisabled(),true);
+  await page.route('**/api/sales/returns',async route=>{const response=await route.fetch();assert.equal(response.status(),200);await route.abort();},{times:1});
+  await dialog.getByRole('button',{name:'Confirm return and record refund'}).click();
+  await dialog.getByRole('alert').waitFor();
+  assert.equal(await dialog.getByLabel('Return reason').inputValue(),'Browser QA: original batch returned');
+  await dialog.getByRole('button',{name:'Confirm return and record refund'}).click();
+  await dialog.getByText(/records this return and its refund/).waitFor();
+  const printPage=context.waitForEvent('page');await dialog.getByRole('button',{name:'Print credit note'}).click();
+  const popup=await printPage;
+  await popup.getByRole('heading',{name:/Credit note #/}).waitFor();
+  assert((await popup.locator('body').innerText()).includes(sale.invoice_number));
+  const records=await context.request.get(new URL('/api/sales', api).href,{headers:{Authorization:`Bearer ${fixture.cashier_token}`}});
+  const returns=(await records.json()).data.filter(row=>row.return_of===sale.id);
+  assert.equal(returns.length,1);assert.equal(Number(returns[0].net_amount),10);
+  if (process.env.QA_SCREENSHOT) await page.screenshot({path:process.env.QA_SCREENSHOT});
+  console.log('PASS: browser FEFO 3+7 with two prices; invoice search; cashier partial return after lost response; one refund; printable credit note.');
+ }finally{await browser.close();}
+})().catch(error=>{console.error(error);process.exitCode=1;});

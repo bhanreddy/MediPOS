@@ -83,38 +83,7 @@ describePg("Cloud documents against PostgreSQL", () => {
       await sql`INSERT INTO medicines(id,_local_id,clinic_id,name) VALUES(${id},${id},${clinic},'Write QA medicine')`;
     await sql`INSERT INTO medicine_batches(id,_local_id,clinic_id,medicine_id,supplier_id,batch_number,expiry_date,mrp,purchase_price,quantity_in,quantity_remaining) VALUES(${batch},${batch},${clinic},${med},${supplier},'WRITE-QA','2031-12-31',20,10,10,10)`;
   });
-  afterAll(async () => {
-    localDb.prepare("DELETE FROM users WHERE id = ?").run(user);
-    // Paid customer sales now create immutable rewards history. Retain those
-    // synthetic fixtures in the disposable *_qa database, as the wallet tests do.
-    const wallets = await sql`SELECT id FROM promo_wallet_accounts WHERE clinic_id=${clinic} LIMIT 1`;
-    if (wallets.length) {
-      await sql.end();
-      return;
-    }
-    for (const table of [
-      "audit_logs",
-      "expenses",
-      "purchase_return_lines",
-      "purchase_returns",
-      "stock_ledger",
-      "sale_items",
-      "sales",
-      "purchase_items",
-      "medicine_batches",
-      "purchases",
-      "purchase_orders",
-      "medicines",
-      "suppliers",
-      "customers",
-      "clinic_invoice_sequences",
-    ])
-      await sql`DELETE FROM ${sql(table)} WHERE clinic_id = ${clinic}`;
-    await sql`DELETE FROM users WHERE id = ${user}`;
-    await sql`DELETE FROM clinics WHERE id = ${clinic}`;
-    await sql`DELETE FROM auth.users WHERE id = ${user}`;
-    await sql.end();
-  });
+  afterAll(async () => { await sql.end(); });
   test("schedule-H1 report executes with PostgreSQL boolean columns", async () => {
     const response = await get('/reports/schedule-h1');
     expect(response.status).toBe(200);
@@ -163,8 +132,8 @@ describePg("Cloud documents against PostgreSQL", () => {
   });
   test("concurrent billing cannot oversell", async () => {
     const responses = await Promise.all([
-      post("/sales", { items: [line(5)] }),
-      post("/sales", { items: [line(5)] }),
+      post("/sales", { paid_amount:100,items: [line(5)] }),
+      post("/sales", { paid_amount:100,items: [line(5)] }),
     ]);
     expect(responses.map((r) => r.status).sort()).toEqual([201, 409]);
     expect(await stock()).toBe(3);
@@ -172,10 +141,11 @@ describePg("Cloud documents against PostgreSQL", () => {
   test("sold units cannot be returned twice", async () => {
     const payload = {
       original_sale_id: sale.id,
-      items: [{ sale_item_id: sale.sale_items[0].id, quantity: 2 }],
+      _local_id:randomUUID(),
+      items: [{ sale_item_id: sale.sale_items[0].id, quantity: 2,restock:true }],
     };
     expect((await post("/sales/returns", payload)).status).toBe(200);
-    expect((await post("/sales/returns", payload)).status).toBe(400);
+    expect((await post("/sales/returns", {...payload,_local_id:randomUUID()})).status).toBe(400);
     expect(await stock()).toBe(5);
   });
   test("failed purchase rolls back header, lines and stock", async () => {
@@ -286,6 +256,7 @@ describePg("Cloud documents against PostgreSQL", () => {
     expect(rejected.status).toBe(409);
     const returned = await post("/sales/returns", {
       original_sale_id: saved.body.data.id,
+      _local_id:randomUUID(),
       items: [{ sale_item_id: saved.body.data.sale_items[0].id, quantity: 1 }],
     });
     expect(returned.status).toBe(200);
@@ -330,7 +301,7 @@ describePg("Cloud documents against PostgreSQL", () => {
       payment_mode: "cash",
     });
     expect(expense.status).toBe(201);
-    expect(expense.body.data.organization_id).toBeNull();
+    expect(expense.body.data.organization_id).toBe(clinic);
     expect(
       (await get("/expenses")).body.data.some(
         (row: { id: string }) => row.id === expense.body.data.id,
@@ -411,7 +382,7 @@ describePg("Cloud documents against PostgreSQL", () => {
         await sql`SELECT id FROM audit_logs WHERE clinic_id=${clinic} AND record_id=${customer.body.data.id}`
       ).length,
     ).toBe(2);
-    const payment = await post(`/suppliers/${supplier}/payment`, { amount: 5 });
+    const payment = await post(`/suppliers/${supplier}/payment`, { amount: 5,_local_id:randomUUID() });
     expect(payment.status).toBe(200);
   });
   test("dashboard groups local business days and subtracts return documents", async () => {

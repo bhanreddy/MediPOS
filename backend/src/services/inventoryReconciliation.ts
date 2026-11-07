@@ -1,4 +1,4 @@
-import { localDb } from '../local-db';
+import { businessDb as localDb } from '../lib/businessDb';
 
 export type ReconciliationStatus = 'MATCHED' | 'MISMATCH' | 'LEGACY_ONLY' | 'LEDGER_ONLY';
 
@@ -18,18 +18,18 @@ export class InventoryReconciliationService {
   /**
    * Reconciles inventory for a specific batch and store location
    */
-  static reconcileBatch(params: {
+  static async reconcileBatch(params: {
     batchId: string;
     medicineId?: string;
     storeId?: string | null;
     organizationId?: string;
-  }): ReconciliationReport {
+  }): Promise<ReconciliationReport> {
     const { batchId, storeId = null } = params;
 
     // 1. Fetch Legacy Batch Stock
-    const batchRow: any = localDb
+    const batchRow: any = (await localDb
       .prepare('SELECT * FROM medicine_batches WHERE id = ? OR _local_id = ?')
-      .get(batchId, batchId);
+      .get(batchId, batchId));
 
     const legacyQty = batchRow ? Number(batchRow.quantity_remaining ?? 0) : null;
     const medicineId = batchRow?.medicine_id || params.medicineId || '';
@@ -37,26 +37,26 @@ export class InventoryReconciliationService {
     // 2. Fetch Inventory Position Stock
     let posRow: any = null;
     if (storeId) {
-      posRow = localDb
+      posRow = (await localDb
         .prepare('SELECT * FROM inventory_positions WHERE batch_id = ? AND store_id = ?')
-        .get(batchId, storeId);
+        .get(batchId, storeId));
     } else {
-      posRow = localDb
+      posRow = (await localDb
         .prepare('SELECT * FROM inventory_positions WHERE batch_id = ?')
-        .get(batchId);
+        .get(batchId));
     }
     const posQty = posRow ? Number(posRow.quantity_on_hand ?? 0) : null;
 
     // 3. Compute Ledger Sum of Movements
     let ledgerRows: any[] = [];
     if (storeId) {
-      ledgerRows = localDb
+      ledgerRows = (await localDb
         .prepare('SELECT quantity_delta FROM stock_ledger WHERE batch_id = ? AND store_id = ?')
-        .all(batchId, storeId);
+        .all(batchId, storeId));
     } else {
-      ledgerRows = localDb
+      ledgerRows = (await localDb
         .prepare('SELECT quantity_delta FROM stock_ledger WHERE batch_id = ?')
-        .all(batchId);
+        .all(batchId));
     }
 
     let ledgerQty: number | null = null;

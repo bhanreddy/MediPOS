@@ -29,7 +29,7 @@ describe('Task 5 — Advanced Inventory Intelligence, Stocktake, Expiry, Recall 
   let medAmoxicillinId: string;
   let batchAmoxA: string;
 
-  beforeAll(() => {
+  beforeAll(async () => {
     // 1. Create Organization, Stores, Warehouse
     localDb.prepare(`
       INSERT INTO organizations (id, _local_id, display_name, legal_name, code, gstin, pan, created_at, updated_at, _updated_at)
@@ -90,68 +90,68 @@ describe('Task 5 — Advanced Inventory Intelligence, Stocktake, Expiry, Recall 
     `).run(batchAmoxA, batchAmoxA, testOrgId, testStoreA, testStoreA, medAmoxicillinId);
 
     // 4. Initialize Positions
-    InventoryPositionService.adjustStock({
+    (await InventoryPositionService.adjustStock({
       organizationId: testOrgId,
       medicineId: medParacetamolId,
       batchId: batchParaA,
       locationType: 'STORE',
       storeId: testStoreA,
       quantityDelta: 100,
-    });
+    }));
 
-    InventoryPositionService.adjustStock({
+    (await InventoryPositionService.adjustStock({
       organizationId: testOrgId,
       medicineId: medParacetamolId,
       batchId: batchParaB,
       locationType: 'STORE',
       storeId: testStoreA,
       quantityDelta: 50,
-    });
+    }));
 
-    InventoryPositionService.adjustStock({
+    (await InventoryPositionService.adjustStock({
       organizationId: testOrgId,
       medicineId: medParacetamolId,
       batchId: batchParaExp,
       locationType: 'STORE',
       storeId: testStoreA,
       quantityDelta: 20,
-    });
+    }));
 
-    InventoryPositionService.adjustStock({
+    (await InventoryPositionService.adjustStock({
       organizationId: testOrgId,
       medicineId: medAmoxicillinId,
       batchId: batchAmoxA,
       locationType: 'STORE',
       storeId: testStoreA,
       quantityDelta: 40,
-    });
+    }));
 
     // Warehouse stock for Paracetamol
-    InventoryPositionService.adjustStock({
+    (await InventoryPositionService.adjustStock({
       organizationId: testOrgId,
       medicineId: medParacetamolId,
       batchId: batchParaA,
       locationType: 'WAREHOUSE',
       warehouseId: testWarehouseId,
       quantityDelta: 300,
-    });
+    }));
   });
 
   describe('1. Inventory State Model & Multi-State Consistency', () => {
-    it('calculates available stock subtracting reserved, quarantined, damaged, and recalled quantities', () => {
-      const pos = InventoryPositionService.getOrCreatePosition({
+    it('calculates available stock subtracting reserved, quarantined, damaged, and recalled quantities', async () => {
+      const pos = (await InventoryPositionService.getOrCreatePosition({
         organizationId: testOrgId,
         medicineId: medParacetamolId,
         batchId: batchParaA,
         locationType: 'STORE',
         storeId: testStoreA,
-      });
+      }));
 
       expect(pos.quantity_on_hand).toBe(100);
       expect(pos.quantity_available).toBe(100);
 
       // Quarantine 10 units and damage 5 units
-      const updated = InventoryPositionService.updateStateQuantities({
+      const updated = (await InventoryPositionService.updateStateQuantities({
         organizationId: testOrgId,
         medicineId: medParacetamolId,
         batchId: batchParaA,
@@ -159,7 +159,7 @@ describe('Task 5 — Advanced Inventory Intelligence, Stocktake, Expiry, Recall 
         storeId: testStoreA,
         quarantinedDelta: 10,
         damagedDelta: 5,
-      });
+      }));
 
       expect(updated.quantity_on_hand).toBe(100);
       expect(updated.quantity_quarantined).toBe(10);
@@ -167,13 +167,13 @@ describe('Task 5 — Advanced Inventory Intelligence, Stocktake, Expiry, Recall 
       expect(updated.quantity_available).toBe(85); // 100 - (10 + 5)
     });
 
-    it('blocks damaged, quarantined, and recalled stock from sellable availability in InventoryAvailabilityService', () => {
-      const avail = InventoryAvailabilityService.getAvailability({
+    it('blocks damaged, quarantined, and recalled stock from sellable availability in InventoryAvailabilityService', async () => {
+      const avail = (await InventoryAvailabilityService.getAvailability({
         organizationId: testOrgId,
         medicineId: medParacetamolId,
         locationType: 'STORE',
         storeId: testStoreA,
-      });
+      }));
 
       // Total on hand: 100 (batch A) + 50 (batch B) + 20 (expired batch) = 170
       // Available: 85 (batch A) + 50 (batch B) + 0 (expired batch) = 135
@@ -185,12 +185,12 @@ describe('Task 5 — Advanced Inventory Intelligence, Stocktake, Expiry, Recall 
   });
 
   describe('2. Inventory Availability Service & Cross-Store Intelligence', () => {
-    it('discovers stock across other stores and central warehouses', () => {
-      const cross = InventoryAvailabilityService.getCrossLocationAvailability({
+    it('discovers stock across other stores and central warehouses', async () => {
+      const cross = (await InventoryAvailabilityService.getCrossLocationAvailability({
         organizationId: testOrgId,
         medicineId: medParacetamolId,
         currentStoreId: testStoreA,
-      });
+      }));
 
       expect(cross.currentStoreAvailable).toBe(135);
       expect(cross.otherLocations.length).toBeGreaterThanOrEqual(1);
@@ -204,8 +204,8 @@ describe('Task 5 — Advanced Inventory Intelligence, Stocktake, Expiry, Recall 
   describe('3. Stocktake Engine, Counting & Variance Workflows', () => {
     let stocktakeId: string;
 
-    it('creates a stocktake session in DRAFT status', () => {
-      const session = StocktakeEngine.createSession({
+    it('creates a stocktake session in DRAFT status', async () => {
+      const session = (await StocktakeEngine.createSession({
         organizationId: testOrgId,
         storeId: testStoreA,
         name: 'HYD-01 Comprehensive Stocktake',
@@ -214,7 +214,7 @@ describe('Task 5 — Advanced Inventory Intelligence, Stocktake, Expiry, Recall 
         isBlindCount: true,
         isDoubleCount: true,
         initiatedBy: 'user_pharmacist_01',
-      });
+      }));
 
       expect(session.id).toBeDefined();
       expect(session.status).toBe('DRAFT');
@@ -222,11 +222,11 @@ describe('Task 5 — Advanced Inventory Intelligence, Stocktake, Expiry, Recall 
       stocktakeId = session.id;
     });
 
-    it('starts session and captures exact inventory snapshots at reference_timestamp', () => {
-      const started = StocktakeEngine.startSession(stocktakeId, 'user_pharmacist_01');
+    it('starts session and captures exact inventory snapshots at reference_timestamp', async () => {
+      const started = (await StocktakeEngine.startSession(stocktakeId, 'user_pharmacist_01'));
       expect(started.status).toBe('IN_PROGRESS');
 
-      const items = StocktakeEngine.getSessionItems(stocktakeId, true);
+      const items = (await StocktakeEngine.getSessionItems(stocktakeId, true));
       expect(items.length).toBeGreaterThan(0);
 
       const paraItem = items.find((i) => i.batch_id === batchParaA);
@@ -234,73 +234,73 @@ describe('Task 5 — Advanced Inventory Intelligence, Stocktake, Expiry, Recall 
       expect(paraItem?.expected_quantity).toBe(100);
     });
 
-    it('supports blind counting by hiding expected quantities and variances from standard staff', () => {
-      const blindItems = StocktakeEngine.getSessionItems(stocktakeId, false);
+    it('supports blind counting by hiding expected quantities and variances from standard staff', async () => {
+      const blindItems = (await StocktakeEngine.getSessionItems(stocktakeId, false));
       const paraItem = blindItems.find((i) => i.batch_id === batchParaA);
       expect(paraItem?.expected_quantity).toBe(0); // Hidden
       expect(paraItem?.difference).toBe(0); // Hidden
     });
 
-    it('records physical barcode counts and calculates variance', () => {
+    it('records physical barcode counts and calculates variance', async () => {
       // Physical count for batchParaA is 96 (variance = -4)
-      const countRes = StocktakeEngine.recordCount({
+      const countRes = (await StocktakeEngine.recordCount({
         stocktakeId,
         medicineId: medParacetamolId,
         batchId: batchParaA,
         userId: 'user_pharmacist_01',
         rawQuantity: 96,
         counterRole: 'COUNTER_A',
-      });
+      }));
 
       // Also record physical count for other batches
-      StocktakeEngine.recordCount({
+      (await StocktakeEngine.recordCount({
         stocktakeId,
         medicineId: medParacetamolId,
         batchId: batchParaB,
         userId: 'user_pharmacist_01',
         rawQuantity: 50,
         counterRole: 'COUNTER_A',
-      });
+      }));
 
-      StocktakeEngine.recordCount({
+      (await StocktakeEngine.recordCount({
         stocktakeId,
         medicineId: medParacetamolId,
         batchId: batchParaExp,
         userId: 'user_pharmacist_01',
         rawQuantity: 20,
         counterRole: 'COUNTER_A',
-      });
+      }));
 
       expect(countRes.physicalQuantity).toBe(96);
       expect(countRes.difference).toBe(-4);
 
       // Check manager view items
-      const items = StocktakeEngine.getSessionItems(stocktakeId, true);
+      const items = (await StocktakeEngine.getSessionItems(stocktakeId, true));
       const paraItem = items.find((i) => i.batch_id === batchParaA);
       expect(paraItem?.physical_quantity).toBe(96);
       expect(paraItem?.difference).toBe(-4);
       expect(paraItem?.value_difference_paise).toBe(-6000); // -4 * 1500 paise (-₹60)
     });
 
-    it('approves session and posts compensating adjustment movements to ledger', () => {
-      StocktakeEngine.approveSession({
+    it('approves session and posts compensating adjustment movements to ledger', async () => {
+      (await StocktakeEngine.approveSession({
         sessionId: stocktakeId,
         approvedBy: 'user_owner_01',
         userRole: 'OWNER',
-      });
+      }));
 
-      const session = StocktakeEngine.getSession(stocktakeId);
+      const session = (await StocktakeEngine.getSession(stocktakeId));
       expect(session?.status).toBe('APPROVED');
 
-      const postRes = StocktakeEngine.postAdjustments({
+      const postRes = (await StocktakeEngine.postAdjustments({
         sessionId: stocktakeId,
         postedBy: 'user_owner_01',
         userRole: 'OWNER',
-      });
+      }));
 
       expect(postRes.postedMovementsCount).toBeGreaterThan(0);
 
-      const updatedSession = StocktakeEngine.getSession(stocktakeId);
+      const updatedSession = (await StocktakeEngine.getSession(stocktakeId));
       expect(updatedSession?.status).toBe('POSTED');
 
       // Verify stock ledger movement was created
@@ -317,18 +317,18 @@ describe('Task 5 — Advanced Inventory Intelligence, Stocktake, Expiry, Recall 
   });
 
   describe('4. Inventory Reconciliation V2', () => {
-    it('runs 3-way reconciliation and diagnoses matched vs mismatched records', () => {
-      const recon = InventoryReconciliationServiceV2.reconcile({
+    it('runs 3-way reconciliation and diagnoses matched vs mismatched records', async () => {
+      const recon = (await InventoryReconciliationServiceV2.reconcile({
         organizationId: testOrgId,
         storeId: testStoreA,
-      });
+      }));
 
       expect(recon.summary.totalBatchesChecked).toBeGreaterThan(0);
       expect(recon.diagnostics).toBeDefined();
     });
 
-    it('repairs diagnosed discrepancy through compensating ledger movement', () => {
-      const repairRes = InventoryReconciliationServiceV2.repairDiscrepancy({
+    it('repairs diagnosed discrepancy through compensating ledger movement', async () => {
+      const repairRes = (await InventoryReconciliationServiceV2.repairDiscrepancy({
         organizationId: testOrgId,
         medicineId: medAmoxicillinId,
         batchId: batchAmoxA,
@@ -337,18 +337,18 @@ describe('Task 5 — Advanced Inventory Intelligence, Stocktake, Expiry, Recall 
         targetPhysicalQuantity: 45, // +5 repair
         reason: 'Audit verified surplus stock',
         approvedBy: 'user_auditor_01',
-      });
+      }));
 
       expect(repairRes.repairedMovementId).toBeDefined();
       expect(repairRes.newOnHandQuantity).toBe(45);
 
-      const pos = InventoryPositionService.getOrCreatePosition({
+      const pos = (await InventoryPositionService.getOrCreatePosition({
         organizationId: testOrgId,
         medicineId: medAmoxicillinId,
         batchId: batchAmoxA,
         locationType: 'STORE',
         storeId: testStoreA,
-      });
+      }));
       expect(pos.quantity_on_hand).toBe(45);
     });
   });
@@ -371,11 +371,11 @@ describe('Task 5 — Advanced Inventory Intelligence, Stocktake, Expiry, Recall 
       `).run(saleItemId, saleItemId, testOrgId, testStoreA, saleId, medParacetamolId, batchParaA, nowIso);
     });
 
-    it('computes sales velocity, ABC classification, and days of stock cover', () => {
-      const classifications = InventoryClassificationEngine.computeClassifications({
+    it('computes sales velocity, ABC classification, and days of stock cover', async () => {
+      const classifications = (await InventoryClassificationEngine.computeClassifications({
         organizationId: testOrgId,
         storeId: testStoreA,
-      });
+      }));
 
       expect(classifications.length).toBeGreaterThan(0);
       const paraClass = classifications.find((c) => c.medicineId === medParacetamolId);
@@ -384,11 +384,11 @@ describe('Task 5 — Advanced Inventory Intelligence, Stocktake, Expiry, Recall 
       expect(paraClass?.daysOfCover).toBeGreaterThan(0);
     });
 
-    it('computes inventory ageing buckets', () => {
-      const ageing = InventoryClassificationEngine.getAgeingAnalysis({
+    it('computes inventory ageing buckets', async () => {
+      const ageing = (await InventoryClassificationEngine.getAgeingAnalysis({
         organizationId: testOrgId,
         storeId: testStoreA,
-      });
+      }));
 
       expect(ageing.buckets.length).toBe(6);
       expect(ageing.totalStockCostPaise).toBeGreaterThan(0);
@@ -397,12 +397,12 @@ describe('Task 5 — Advanced Inventory Intelligence, Stocktake, Expiry, Recall 
   });
 
   describe('6. Expiry Intelligence & Risk Exposure Valuation', () => {
-    it('identifies expired and near-expiry batches with cost exposure and action recommendations', () => {
-      const expiry = ExpiryIntelligenceEngine.getExpiryRiskItems({
+    it('identifies expired and near-expiry batches with cost exposure and action recommendations', async () => {
+      const expiry = (await ExpiryIntelligenceEngine.getExpiryRiskItems({
         organizationId: testOrgId,
         storeId: testStoreA,
         daysThreshold: 180,
-      });
+      }));
 
       expect(expiry.buckets.length).toBe(6);
       const expiredBucket = expiry.buckets.find((b) => b.bucket === 'EXPIRED');
@@ -417,8 +417,8 @@ describe('Task 5 — Advanced Inventory Intelligence, Stocktake, Expiry, Recall 
   describe('7. Product Recall Engine & Multi-Store Quarantine', () => {
     let recallId: string;
 
-    it('registers a product recall draft', () => {
-      const recall = ProductRecallEngine.createRecall({
+    it('registers a product recall draft', async () => {
+      const recall = (await ProductRecallEngine.createRecall({
         organizationId: testOrgId,
         recallReference: 'CDSCO-ALERT-2026-01',
         recallType: 'BATCH',
@@ -429,25 +429,25 @@ describe('Task 5 — Advanced Inventory Intelligence, Stocktake, Expiry, Recall 
         reason: 'Dissolution test failure during stability batch testing',
         severity: 'CLASS_I',
         createdBy: 'user_qa_officer_01',
-      });
+      }));
 
       expect(recall.id).toBeDefined();
       expect(recall.status).toBe('DRAFT');
       recallId = recall.id;
     });
 
-    it('activates recall, immediately locks stock in inventory positions and blocks from POS/FEFO', () => {
-      const active = ProductRecallEngine.activateRecall(recallId, 'user_qa_officer_01');
+    it('activates recall, immediately locks stock in inventory positions and blocks from POS/FEFO', async () => {
+      const active = (await ProductRecallEngine.activateRecall(recallId, 'user_qa_officer_01'));
       expect(active.status).toBe('ACTIVE');
       expect(active.tasks.length).toBeGreaterThan(0);
 
       // Verify batch is blocked in FEFO
-      const fefoPlan = FEFOEngine.planAllocations({
+      const fefoPlan = (await FEFOEngine.planAllocations({
         medicineId: medParacetamolId,
         storeId: testStoreA,
         organizationId: testOrgId,
         requestedQuantity: 10,
-      });
+      }));
 
       // The plan should NOT allocate batchParaB (recalled) or batchParaExp (expired)
       const allocatedBatches = fefoPlan.allocations.map((a) => a.batchId);
@@ -455,11 +455,11 @@ describe('Task 5 — Advanced Inventory Intelligence, Stocktake, Expiry, Recall 
       expect(allocatedBatches).not.toContain(batchParaExp);
     });
 
-    it('traces historical sales and invoices associated with the recalled product', () => {
-      const salesTrace = ProductRecallEngine.traceHistoricalSales({
+    it('traces historical sales and invoices associated with the recalled product', async () => {
+      const salesTrace = (await ProductRecallEngine.traceHistoricalSales({
         organizationId: testOrgId,
         productId: medParacetamolId,
-      });
+      }));
 
       expect(salesTrace.totalUnitsSold).toBeGreaterThanOrEqual(10);
       expect(salesTrace.totalInvoicesCount).toBeGreaterThanOrEqual(1);
@@ -469,8 +469,8 @@ describe('Task 5 — Advanced Inventory Intelligence, Stocktake, Expiry, Recall 
   describe('8. Inventory Reservation Lifecycle & Concurrency Control', () => {
     let reservationId: string;
 
-    it('creates a stock reservation and updates position reserved quantities', () => {
-      const res = InventoryReservationService.createReservation({
+    it('creates a stock reservation and updates position reserved quantities', async () => {
+      const res = (await InventoryReservationService.createReservation({
         organizationId: testOrgId,
         locationType: 'STORE',
         storeId: testStoreA,
@@ -479,43 +479,43 @@ describe('Task 5 — Advanced Inventory Intelligence, Stocktake, Expiry, Recall 
         sourceType: 'PRESCRIPTION',
         sourceId: 'RX-TEST-001',
         durationMinutes: 30,
-      });
+      }));
 
       expect(res.id).toBeDefined();
       expect(res.status).toBe('ACTIVE');
       reservationId = res.id;
 
-      const pos = InventoryPositionService.getOrCreatePosition({
+      const pos = (await InventoryPositionService.getOrCreatePosition({
         organizationId: testOrgId,
         medicineId: medAmoxicillinId,
         batchId: batchAmoxA,
         locationType: 'STORE',
         storeId: testStoreA,
-      });
+      }));
       expect(pos.quantity_reserved).toBe(5);
       expect(pos.quantity_available).toBe(40); // 45 on hand - 5 reserved
     });
 
-    it('consumes reservation on checkout completion', () => {
-      InventoryReservationService.consumeReservation(reservationId);
+    it('consumes reservation on checkout completion', async () => {
+      (await InventoryReservationService.consumeReservation(reservationId));
 
-      const pos = InventoryPositionService.getOrCreatePosition({
+      const pos = (await InventoryPositionService.getOrCreatePosition({
         organizationId: testOrgId,
         medicineId: medAmoxicillinId,
         batchId: batchAmoxA,
         locationType: 'STORE',
         storeId: testStoreA,
-      });
+      }));
       expect(pos.quantity_reserved).toBe(0);
     });
   });
 
   describe('9. Reorder & Replenishment Recommendations', () => {
-    it('calculates replenishment recommendations with pack rounding and warehouse candidate flags', () => {
-      const reorders = ReorderEngine.getReorderRecommendations({
+    it('calculates replenishment recommendations with pack rounding and warehouse candidate flags', async () => {
+      const reorders = (await ReorderEngine.getReorderRecommendations({
         organizationId: testOrgId,
         storeId: testStoreA,
-      });
+      }));
 
       expect(reorders).toBeDefined();
       expect(Array.isArray(reorders)).toBe(true);
@@ -523,24 +523,24 @@ describe('Task 5 — Advanced Inventory Intelligence, Stocktake, Expiry, Recall 
   });
 
   describe('10. Shortbook V2 Request Consolidation', () => {
-    it('records shortage requests and aggregates repeat requests into a consolidated entry', () => {
-      ShortbookV2Service.recordShortageRequest({
+    it('records shortage requests and aggregates repeat requests into a consolidated entry', async () => {
+      (await ShortbookV2Service.recordShortageRequest({
         clinicId: testStoreA,
         medicineId: medAmoxicillinId,
         quantityNeeded: 2,
         reason: 'Customer requested 2 strips',
         source: 'CUSTOMER_REQUEST',
-      });
+      }));
 
-      ShortbookV2Service.recordShortageRequest({
+      (await ShortbookV2Service.recordShortageRequest({
         clinicId: testStoreA,
         medicineId: medAmoxicillinId,
         quantityNeeded: 5,
         reason: 'Customer requested 5 strips',
         source: 'CUSTOMER_REQUEST',
-      });
+      }));
 
-      const consolidated = ShortbookV2Service.getConsolidatedShortbook(testStoreA);
+      const consolidated = (await ShortbookV2Service.getConsolidatedShortbook(testStoreA));
       const amoxItem = consolidated.find((c) => c.medicineId === medAmoxicillinId);
 
       expect(amoxItem).toBeDefined();
@@ -551,11 +551,11 @@ describe('Task 5 — Advanced Inventory Intelligence, Stocktake, Expiry, Recall 
   });
 
   describe('11. Valuation & Transparent Inventory Health Score', () => {
-    it('computes valuation, potential margin, and transparent formula-based health score', () => {
-      const val = InventoryValuationService.getValuation({
+    it('computes valuation, potential margin, and transparent formula-based health score', async () => {
+      const val = (await InventoryValuationService.getValuation({
         organizationId: testOrgId,
         storeId: testStoreA,
-      });
+      }));
 
       expect(val.totalCostValuePaise).toBeGreaterThan(0);
       expect(val.totalMrpValuePaise).toBeGreaterThan(0);
@@ -567,8 +567,8 @@ describe('Task 5 — Advanced Inventory Intelligence, Stocktake, Expiry, Recall 
   });
 
   describe('12. Inventory Alert Engine', () => {
-    it('creates and deduplicates structured inventory alerts', () => {
-      const alert1 = InventoryAlertEngine.createOrUpdateAlert({
+    it('creates and deduplicates structured inventory alerts', async () => {
+      const alert1 = (await InventoryAlertEngine.createOrUpdateAlert({
         organizationId: testOrgId,
         storeId: testStoreA,
         medicineId: medParacetamolId,
@@ -576,9 +576,9 @@ describe('Task 5 — Advanced Inventory Intelligence, Stocktake, Expiry, Recall 
         severity: 'WARNING',
         title: 'Low Stock Alert',
         message: 'Paracetamol 650mg is low on stock',
-      });
+      }));
 
-      const alert2 = InventoryAlertEngine.createOrUpdateAlert({
+      const alert2 = (await InventoryAlertEngine.createOrUpdateAlert({
         organizationId: testOrgId,
         storeId: testStoreA,
         medicineId: medParacetamolId,
@@ -586,14 +586,14 @@ describe('Task 5 — Advanced Inventory Intelligence, Stocktake, Expiry, Recall 
         severity: 'WARNING',
         title: 'Low Stock Alert',
         message: 'Paracetamol 650mg is low on stock',
-      });
+      }));
 
       expect(alert1.id).toBe(alert2.id); // Deduplicated
 
-      const alerts = InventoryAlertEngine.listAlerts({
+      const alerts = (await InventoryAlertEngine.listAlerts({
         organizationId: testOrgId,
         storeId: testStoreA,
-      });
+      }));
       expect(alerts.length).toBeGreaterThanOrEqual(1);
     });
   });

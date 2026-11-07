@@ -1,6 +1,6 @@
 // orderPickupService.ts — Click & Collect Pickup Verification Engine
 import crypto from 'crypto';
-import { localDb } from '../../local-db';
+import { businessDb as localDb } from '../../lib/businessDb';
 import { localMutate } from '../../lib/localMutate';
 import { AppError } from '../../lib/appError';
 
@@ -18,21 +18,21 @@ export class OrderPickupService {
   /**
    * Verify pickup code presented by customer at counter
    */
-  static verifyPickupCode(params: {
+  static async verifyPickupCode(params: {
     orderId: string;
     organizationId: string;
     storeId?: string | null;
     pickupCode: string;
     verifiedByUserId: string;
-  }): { valid: boolean; order: any } {
+  }): Promise<{ valid: boolean; order: any }> {
     const { orderId, organizationId, storeId, pickupCode, verifiedByUserId } = params;
 
-    const order: any = localDb
+    const order: any = (await localDb
       .prepare(
         `SELECT * FROM orders 
          WHERE (id = ? OR order_number = ?) AND organization_id = ? AND _deleted = 0`
       )
-      .get(orderId, orderId, organizationId);
+      .get(orderId, orderId, organizationId));
 
     if (!order) {
       throw new AppError(404, 'Order not found', 'ORDER_NOT_FOUND');
@@ -59,7 +59,7 @@ export class OrderPickupService {
 
     const nowIso = new Date().toISOString();
 
-    localMutate({
+    (await localMutate({
       table: 'orders',
       operation: 'UPDATE',
       data: {
@@ -68,7 +68,7 @@ export class OrderPickupService {
         pickup_verified_by: verifiedByUserId,
         updated_at: nowIso,
       },
-    });
+    }));
 
     return { valid: true, order };
   }

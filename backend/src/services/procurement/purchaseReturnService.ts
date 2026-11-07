@@ -1,5 +1,5 @@
 // purchaseReturnService.ts — Enterprise Purchase Return & Statutory Debit Note Engine
-import { localDb } from '../../local-db';
+import { businessDb as localDb } from '../../lib/businessDb';
 import { localMutate } from '../../lib/localMutate';
 import { Money } from '../../lib/money';
 import { v4 as uuidv4 } from 'uuid';
@@ -12,6 +12,7 @@ import {
 import { DocumentNumberingService } from '../documentNumbering';
 import { InventoryPositionService } from '../inventoryPosition';
 import { SupplierPayableService } from './supplierPayableService';
+import { tenantContext } from '../../lib/tenantContext';
 
 export interface CreatePurchaseReturnParams {
   organizationId: string;
@@ -37,7 +38,7 @@ export class PurchaseReturnService {
   /**
    * Create and execute a Purchase Return with Debit Note generation and ledger settlement
    */
-  static createPurchaseReturn(params: CreatePurchaseReturnParams): PurchaseReturnV2 {
+  static async createPurchaseReturn(params: CreatePurchaseReturnParams): Promise<PurchaseReturnV2> {
     const {
       organizationId,
       storeId = null,
@@ -56,18 +57,18 @@ export class PurchaseReturnService {
     }
 
     const returnId = uuidv4();
-    const returnNumber = DocumentNumberingService.generate({
+    const returnNumber = (await DocumentNumberingService.generate({
       organizationId,
       storeId,
       documentType: 'PURCHASE_RETURN',
-    });
+    }));
 
     const debitNoteId = uuidv4();
-    const debitNoteNumber = DocumentNumberingService.generate({
+    const debitNoteNumber = (await DocumentNumberingService.generate({
       organizationId,
       storeId,
       documentType: 'DEBIT_NOTE',
-    });
+    }));
 
     const nowIso = new Date().toISOString();
     const locationType = warehouseId ? 'WAREHOUSE' : 'STORE';
@@ -78,14 +79,14 @@ export class PurchaseReturnService {
 
     // Process each return line item: check batch stock, reduce stock, write ledger
     for (const ln of lines) {
-      const batch: any = localDb
+      const batch: any = (await localDb
         .prepare(
           `SELECT mb.*, m.name as medicine_name
            FROM medicine_batches mb
            JOIN medicines m ON m.id = mb.medicine_id OR m._local_id = mb.medicine_id
            WHERE (mb.id = ? OR mb._local_id = ?) AND (mb.organization_id = ?)`
         )
-        .get(ln.batchId, ln.batchId, organizationId);
+        .get(ln.batchId, ln.batchId, organizationId));
 
       if (!batch) {
         throw new Error(`Batch ID ${ln.batchId} not found in inventory`);
@@ -109,18 +110,18 @@ export class PurchaseReturnService {
       const newBatchRemaining = onHand - ln.quantity;
 
       // 1. Reduce Batch Stock
-      localMutate({
+      (await localMutate({
         table: 'medicine_batches',
         operation: 'UPDATE',
         data: {
           _local_id: batch._local_id || batch.id,
           quantity_remaining: newBatchRemaining,
         },
-      });
+      }));
 
       // 2. Adjust Multi-State Inventory Position
       try {
-        InventoryPositionService.adjustStock({
+        (await InventoryPositionService.adjustStock({
           organizationId,
           medicineId: batch.medicine_id,
           batchId: batch.id || batch._local_id,
@@ -128,11 +129,11 @@ export class PurchaseReturnService {
           storeId,
           warehouseId,
           quantityDelta: -ln.quantity,
-        });
+        }));
       } catch {}
 
       // 3. Append Immutable Stock Ledger Movement
-      localMutate({
+      (await localMutate({
         table: 'stock_ledger',
         operation: 'INSERT',
         data: {
@@ -150,23 +151,23 @@ export class PurchaseReturnService {
           notes: `Purchase Return ${returnNumber} (${reason}): Returned ${ln.quantity} units to supplier`,
           performed_by: createdBy,
         },
-      });
+      }));
 
       // 4. Save Return Line Record
-      const lineRecord = localMutate({
+      const lineRecord = (await localMutate({
         table: 'purchase_return_lines',
         operation: 'INSERT',
         data: {
           id: uuidv4(),
           _local_id: uuidv4(),
-          clinic_id: 'default-clinic',
+          clinic_id: tenantContext.getStore()?.clinicId || batch.clinic_id || null,
           return_id: returnId,
           batch_id: batch.id,
           medicine_id: batch.medicine_id,
           quantity: ln.quantity,
           rate: Money.toRupees(ratePaise),
         },
-      });
+      }));
 
       processedLines.push({
         id: lineRecord.id,
@@ -186,7 +187,7 @@ export class PurchaseReturnService {
     const netGrandTotalPaise = totalValuePaise + totalGstPaise;
 
     // 5. Create Purchase Return Document Header
-    const returnHeader = localMutate({
+    const returnHeader = (await localMutate({
       table: 'purchase_returns',
       operation: 'INSERT',
       data: {
@@ -208,10 +209,10 @@ export class PurchaseReturnService {
         created_by: createdBy,
         posted_at: nowIso,
       },
-    });
+    }));
 
     // 6. Generate Statutory Debit Note
-    localMutate({
+    (await localMutate({
       table: 'debit_notes',
       operation: 'INSERT',
       data: {
@@ -229,10 +230,10 @@ export class PurchaseReturnService {
         issued_at: nowIso,
         created_by: createdBy,
       },
-    });
+    }));
 
     // 7. Record DEBIT_NOTE in Supplier Payable Ledger (Reduces Liability)
-    SupplierPayableService.recordLedgerEntry({
+    (await SupplierPayableService.recordLedgerEntry({
       organizationId,
       storeId,
       supplierId,
@@ -244,7 +245,7 @@ export class PurchaseReturnService {
       creditPaise: 0,
       notes: `Debit Note ${debitNoteNumber} for Purchase Return ${returnNumber} (${reason})`,
       performedBy: createdBy,
-    });
+    }));
 
     return {
       ...returnHeader,
@@ -255,8 +256,8 @@ export class PurchaseReturnService {
   /**
    * Fetch Purchase Return by ID
    */
-  static getPurchaseReturnById(id: string, organizationId: string): PurchaseReturnV2 | null {
-    const row: any = localDb
+  static async getPurchaseReturnById(id: string, organizationId: string): Promise<PurchaseReturnV2 | null> {
+    const row: any = (await localDb
       .prepare(
         `SELECT pr.*, sup.name as supplier_name, dn.debit_note_number
          FROM purchase_returns pr
@@ -264,11 +265,11 @@ export class PurchaseReturnService {
          LEFT JOIN debit_notes dn ON dn.id = pr.debit_note_id OR dn.return_id = pr.id
          WHERE (pr.id = ? OR pr._local_id = ?) AND (pr.organization_id = ?) AND pr._deleted = 0`
       )
-      .get(id, id, organizationId);
+      .get(id, id, organizationId));
 
     if (!row) return null;
 
-    const lines: any[] = localDb
+    const lines: any[] = (await localDb
       .prepare(
         `SELECT prl.*, mb.batch_number, m.name as medicine_name
          FROM purchase_return_lines prl
@@ -276,7 +277,7 @@ export class PurchaseReturnService {
          LEFT JOIN medicines m ON m.id = prl.medicine_id OR m._local_id = prl.medicine_id
          WHERE prl.return_id = ? OR prl.return_id = ?`
       )
-      .all(row.id, row._local_id || row.id);
+      .all(row.id, row._local_id || row.id));
 
     return {
       ...row,
@@ -287,13 +288,13 @@ export class PurchaseReturnService {
   /**
    * List Purchase Returns
    */
-  static listPurchaseReturns(params: {
+  static async listPurchaseReturns(params: {
     organizationId: string;
     storeId?: string | null;
     supplierId?: string | null;
     limit?: number;
     offset?: number;
-  }): { data: PurchaseReturnV2[]; total: number } {
+  }): Promise<{ data: PurchaseReturnV2[]; total: number }> {
     const { organizationId, storeId, supplierId, limit = 50, offset = 0 } = params;
 
     let query = `
@@ -313,14 +314,14 @@ export class PurchaseReturnService {
       values.push(supplierId, supplierId);
     }
 
-    const countRow: any = localDb.prepare(`SELECT COUNT(*) as total FROM (${query})`).get(...values);
+    const countRow: any = (await localDb.prepare(`SELECT COUNT(*) as total FROM (${query})`).get(...values));
     const total = Number(countRow?.total || 0);
 
     query += ` ORDER BY pr.created_at DESC LIMIT ? OFFSET ?`;
     values.push(limit, offset);
 
-    const rows: any[] = localDb.prepare(query).all(...values);
-    const data = rows.map(r => this.getPurchaseReturnById(r.id, organizationId)!);
+    const rows: any[] = (await localDb.prepare(query).all(...values));
+    const data = (await Promise.all(rows.map(async r => (await this.getPurchaseReturnById(r.id, organizationId))!)));
 
     return { data, total };
   }
@@ -328,10 +329,10 @@ export class PurchaseReturnService {
   /**
    * List Debit Notes
    */
-  static listDebitNotes(params: {
+  static async listDebitNotes(params: {
     organizationId: string;
     supplierId?: string;
-  }): DebitNote[] {
+  }): Promise<DebitNote[]> {
     const { organizationId, supplierId } = params;
     let query = `
       SELECT dn.*, sup.name as supplier_name
@@ -347,6 +348,6 @@ export class PurchaseReturnService {
     }
 
     query += ` ORDER BY dn.issued_at DESC`;
-    return localDb.prepare(query).all(...values) as DebitNote[];
+    return (await localDb.prepare(query).all(...values)) as DebitNote[];
   }
 }

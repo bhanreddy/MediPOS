@@ -12,7 +12,7 @@ export async function importMedicines(input: unknown, clinicId: string) {
     return { row, index, key: importIdentity(clinicId, `medicine:${canonical}`) };
   });
 
-  return withPostgresTransaction(async () => {
+  return (await withPostgresTransaction(async () => {
     // Serialize concurrent imports for this clinic, including duplicate/retry checks.
     await queryRaw('SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?))', ['medicine-import', clinicId]);
     const placeholders = entries.map(() => '?').join(',');
@@ -54,5 +54,5 @@ export async function importMedicines(input: unknown, clinicId: string) {
       await localInsertMany('medicines', inserts.slice(offset, offset + 200));
     }
     return { success: inserts.length, skipped: rows.length - inserts.length, failed: 0, errors: [] };
-  });
+  }));
 }

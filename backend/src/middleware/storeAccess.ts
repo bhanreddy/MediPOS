@@ -1,5 +1,6 @@
+import { selectedCloudStore, validateRequestedCloudStore } from '../services/cloudStoreContext';
 import { Request, Response, NextFunction } from 'express';
-import { localDb } from '../local-db';
+import { businessDb as localDb } from '../lib/businessDb';
 import { AppError } from '../lib/appError';
 
 export interface StoreContext {
@@ -40,26 +41,31 @@ export function requireStoreAccess(options: RequireStoreAccessOptions = {}) {
         req.body?.[paramName] ||
         req.params?.[paramName] ||
         (req.query?.[paramName] as string) ||
-        null;
+        selectedCloudStore();
+
+      if (process.env.DATABASE_URL && requestedStoreId && clinicId) {
+        await validateRequestedCloudStore(clinicId, { userId, role: req.user.role }, requestedStoreId);
+      }
 
       // 1. Resolve Organization ID
       let organizationId: string | null = null;
       if (clinicId) {
-        const clinicRow: any = localDb
+        const clinicRow: any = (await localDb
           .prepare('SELECT organization_id FROM clinics WHERE id = ? OR _local_id = ?')
-          .get(clinicId, clinicId);
+          .get(clinicId, clinicId));
         organizationId = clinicRow?.organization_id || null;
       }
 
       // Check User Organization Access
       const uoaRow: any = organizationId
-        ? localDb
+        ? (await localDb
             .prepare(
-              'SELECT role, is_active FROM user_organization_access WHERE user_id = ? AND organization_id = ?'
+              'SELECT role, is_active FROM user_organization_access WHERE user_id = ? AND organization_id = ? AND is_active = 1 AND _deleted = 0'
             )
-            .get(userId, organizationId)
+            .get(userId, organizationId))
         : null;
 
+      if (!organizationId) return next(new AppError(403, 'No organization assigned to this account', 'ORGANIZATION_NOT_ASSIGNED'));
       const isSuperAdmin = req.user.role === 'SUPER_ADMIN';
       const isOrgOwner =
         req.user.role === 'OWNER' ||
@@ -73,11 +79,11 @@ export function requireStoreAccess(options: RequireStoreAccessOptions = {}) {
 
       if (!targetStoreId) {
         // Fetch default store from user_store_access
-        const defaultAccess: any = localDb
+        const defaultAccess: any = (await localDb
           .prepare(
-            'SELECT store_id, counter_id, role FROM user_store_access WHERE user_id = ? AND is_active = 1 ORDER BY is_default DESC LIMIT 1'
+            'SELECT store_id, counter_id, role FROM user_store_access WHERE user_id = ? AND organization_id = ? AND is_active = 1 AND _deleted = 0 ORDER BY is_default DESC LIMIT 1'
           )
-          .get(userId);
+          .get(userId, organizationId));
 
         if (defaultAccess) {
           targetStoreId = defaultAccess.store_id;
@@ -85,9 +91,9 @@ export function requireStoreAccess(options: RequireStoreAccessOptions = {}) {
           userStoreRole = defaultAccess.role;
         } else if (clinicId) {
           // Fallback to clinic default store
-          const storeRow: any = localDb
-            .prepare('SELECT id FROM stores WHERE clinic_id = ? OR organization_id = ? LIMIT 1')
-            .get(clinicId, organizationId);
+          const storeRow: any = (await localDb
+            .prepare('SELECT id FROM stores WHERE organization_id = ? AND _deleted = 0 LIMIT 1')
+            .get(organizationId));
           if (storeRow) {
             targetStoreId = storeRow.id;
           }
@@ -98,11 +104,17 @@ export function requireStoreAccess(options: RequireStoreAccessOptions = {}) {
         return next(new AppError(400, 'Store context could not be resolved', 'STORE_REQUIRED'));
       }
 
+      // An owner bypasses individual store grants only inside the resolved organization.
+      const store = (await localDb.prepare('SELECT id FROM stores WHERE (id = ? OR _local_id = ?) AND organization_id = ? AND _deleted = 0')
+        .get(targetStoreId, targetStoreId, organizationId)) as { id: string } | undefined;
+      if (!store) return next(new AppError(403, 'Store access denied', 'FORBIDDEN_STORE_ACCESS'));
+      targetStoreId = store.id;
+
       // 3. Verify user access to the specific store
       if (isSuperAdmin || (isOrgOwner && allowOrgAdminBypass)) {
         // Full org-wide access
         req.storeContext = {
-          organizationId: organizationId || 'default-org',
+          organizationId,
           storeId: targetStoreId,
           counterId,
           role: userStoreRole,
@@ -112,11 +124,11 @@ export function requireStoreAccess(options: RequireStoreAccessOptions = {}) {
       }
 
       // Check specific store access grant
-      const storeAccessRow: any = localDb
+      const storeAccessRow: any = (await localDb
         .prepare(
-          'SELECT role, counter_id, is_active FROM user_store_access WHERE user_id = ? AND store_id = ?'
+          'SELECT role, counter_id, is_active FROM user_store_access WHERE user_id = ? AND store_id = ? AND organization_id = ? AND _deleted = 0'
         )
-        .get(userId, targetStoreId);
+        .get(userId, targetStoreId, organizationId));
 
       if (!storeAccessRow || storeAccessRow.is_active !== 1) {
         return next(
@@ -129,7 +141,7 @@ export function requireStoreAccess(options: RequireStoreAccessOptions = {}) {
       }
 
       req.storeContext = {
-        organizationId: organizationId || 'default-org',
+        organizationId,
         storeId: targetStoreId,
         counterId: storeAccessRow.counter_id || counterId,
         role: storeAccessRow.role || userStoreRole,

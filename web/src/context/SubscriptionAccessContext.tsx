@@ -1,6 +1,7 @@
 import React, { createContext, useCallback, useContext, useEffect, useMemo, useState } from 'react';
 import { CloudAuthService } from '../services/cloudAuthService';
 import { getSubscriptionCache, type SubscriptionEntitlementCache } from '../lib/store';
+import { useAuth } from '../lib/auth';
 import type { AuthGate } from '../services/authGateService';
 import { supabase } from '../lib/supabase';
 
@@ -37,7 +38,8 @@ export function SubscriptionAccessProvider({
 
   useEffect(() => {
     void (async () => {
-      setCache(await getSubscriptionCache());
+      const { user, clinic_id } = useAuth.getState();
+      setCache(await getSubscriptionCache(user?.id, sessionStorage.getItem('impersonate_clinic_id') || clinic_id));
     })();
   }, []);
 

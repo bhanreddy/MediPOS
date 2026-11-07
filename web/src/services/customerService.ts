@@ -23,7 +23,7 @@ export const CustomerService = {
         if (existing) return { ...existing, id: existing._local_id || existing.id };
         return CustomerService.addCustomer(input);
     },
-    async addCustomer(input: { name: string; phone: string; email?: string; address?: string; credit_limit?: number }): Promise<Customer> {
+    async addCustomer(input: { name: string; phone: string; email?: string; address?: string; gstin?: string | null; credit_limit?: number }): Promise<Customer> {
         const res = await api.post('/customers', input);
         const data = res.data?.data;
         return {
@@ -39,6 +39,7 @@ export const CustomerService = {
             phone?: string;
             email?: string;
             address?: string;
+            gstin?: string | null;
             state?: string;
             credit_limit?: number;
             credit_balance?: number;

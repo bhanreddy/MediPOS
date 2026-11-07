@@ -1,4 +1,4 @@
-import { localDb } from '../../local-db';
+import { businessDb as localDb } from '../../lib/businessDb';
 import { localMutate } from '../../lib/localMutate';
 import { Money } from '../../lib/money';
 import { v4 as uuidv4 } from 'uuid';
@@ -50,13 +50,13 @@ export class PromotionEngine {
   /**
    * Evaluates all eligible promotions for a cart and returns optimal applied promotion set.
    */
-  static evaluateCartPromotions(context: EvaluatePromotionsContext): {
+  static async evaluateCartPromotions(context: EvaluatePromotionsContext): Promise<{
     appliedPromotions: Array<{ id: string; code: string; name: string; discountPaise: number; freeQty: number }>;
     rejectedPromotions: Array<{ id: string; code: string; name: string; reason: string }>;
     lineDiscounts: Map<string, { discountPaise: number; promoId: string; promoCode: string; promoName: string; freeQty: number }>;
     totalPromoDiscountPaise: number;
     freeItems: Array<{ medicineId: string; quantity: number }>;
-  } {
+  }> {
     const {
       organizationId,
       storeId,
@@ -86,7 +86,7 @@ export class PromotionEngine {
     const nowIso = asOfDate.toISOString();
 
     // 1. Fetch active promotions for organization
-    const activePromos: any[] = localDb
+    const activePromos: any[] = (await localDb
       .prepare(
         `SELECT * FROM promotions
          WHERE (organization_id = ?)
@@ -95,7 +95,7 @@ export class PromotionEngine {
            AND (end_at IS NULL OR end_at >= ?)
          ORDER BY priority DESC, created_at ASC`
       )
-      .all(organizationId, nowIso, nowIso);
+      .all(organizationId, nowIso, nowIso));
 
     if (activePromos.length === 0) {
       return {
@@ -132,14 +132,14 @@ export class PromotionEngine {
 
       // Check per-customer limit
       if (customerId && pRow.per_customer_limit != null && pRow.per_customer_limit > 0) {
-        const custAppsRow: any = localDb
+        const custAppsRow: any = (await localDb
           .prepare(
             `SELECT COUNT(*) as count 
              FROM promotion_applications pa
              JOIN sales s ON s.id = pa.sale_id OR s._local_id = pa.sale_id
              WHERE (pa.promotion_id = ? OR pa.promotion_id = ?) AND (s.customer_id = ? OR s.customer_id = ?) AND pa._deleted = 0`
           )
-          .get(pId, pId, customerId, customerId);
+          .get(pId, pId, customerId, customerId));
 
         if (Number(custAppsRow?.count || 0) >= pRow.per_customer_limit) {
           rejectedPromotions.push({ id: pId, code: pRow.code, name: pRow.name, reason: 'Per-customer limit reached' });
@@ -154,9 +154,9 @@ export class PromotionEngine {
       }
 
       // Check store/region target scoping
-      const targets: any[] = localDb
+      const targets: any[] = (await localDb
         .prepare('SELECT * FROM promotion_targets WHERE (promotion_id = ? OR promotion_id = ?) AND _deleted = 0')
-        .all(pId, pId);
+        .all(pId, pId));
 
       const storeTargets = targets.filter(t => t.target_type === 'STORE');
       if (storeTargets.length > 0 && storeId) {
@@ -168,14 +168,14 @@ export class PromotionEngine {
       }
 
       // 3. Evaluate Promotion Rules by Type
-      const outcome = this.evaluateSinglePromotion({
+      const outcome = (await this.evaluateSinglePromotion({
         promotion: pRow,
         config,
         targets,
         cartLines,
         organizationId,
         storeId,
-      });
+      }));
 
       if (outcome.isApplicable && outcome.totalDiscountPaise > 0 || outcome.freeItems.length > 0) {
         // Cap with max_discount_paise if defined
@@ -270,14 +270,14 @@ export class PromotionEngine {
   /**
    * Helper: Evaluates a single promotion type against matched cart lines
    */
-  private static evaluateSinglePromotion(params: {
+  private static async evaluateSinglePromotion(params: {
     promotion: any;
     config: PromotionConfig;
     targets: any[];
     cartLines: any[];
     organizationId: string;
     storeId?: string | null;
-  }): EvaluatedPromotionOutcome {
+  }): Promise<EvaluatedPromotionOutcome> {
     const { promotion, config, targets, cartLines, storeId } = params;
     const pId = promotion.id || promotion._local_id;
     const pType = promotion.promotion_type;
@@ -390,7 +390,7 @@ export class PromotionEngine {
 
           if (freeUnits > 0) {
             // Check physical stock availability before giving free quantity
-            const stockRow: any = localDb
+            const stockRow: any = (await localDb
               .prepare(
                 `SELECT SUM(quantity_remaining) as total_stock 
                  FROM medicine_batches 
@@ -398,7 +398,7 @@ export class PromotionEngine {
                    AND (store_id = ? OR store_id IS NULL) 
                    AND quantity_remaining > 0 AND _deleted = 0`
               )
-              .get(line.medicineId, line.medicineId, storeId || null);
+              .get(line.medicineId, line.medicineId, storeId || null));
 
             const totalAvailable = Number(stockRow?.total_stock || 0);
             if (totalAvailable >= (line.quantity + (line.quantity < setSize ? freeUnits : 0))) {
@@ -415,7 +415,7 @@ export class PromotionEngine {
             const rewardQty = sets * getFreeQty;
 
             // Check stock of reward product
-            const rewardStockRow: any = localDb
+            const rewardStockRow: any = (await localDb
               .prepare(
                 `SELECT SUM(quantity_remaining) as total_stock 
                  FROM medicine_batches 
@@ -423,7 +423,7 @@ export class PromotionEngine {
                    AND (store_id = ? OR store_id IS NULL) 
                    AND quantity_remaining > 0 AND _deleted = 0`
               )
-              .get(rewardMedId, rewardMedId, storeId || null);
+              .get(rewardMedId, rewardMedId, storeId || null));
 
             const rewardStock = Number(rewardStockRow?.total_stock || 0);
             if (rewardStock >= rewardQty) {
@@ -531,7 +531,7 @@ export class PromotionEngine {
   /**
    * Records applied promotions on sale completion
    */
-  static recordApplications(params: {
+  static async recordApplications(params: {
     organizationId: string;
     storeId?: string | null;
     saleId: string;
@@ -540,7 +540,7 @@ export class PromotionEngine {
     const { organizationId, storeId, saleId, applications } = params;
     for (const app of applications) {
       const appId = uuidv4();
-      localMutate({
+      (await localMutate({
         table: 'promotion_applications',
         operation: 'INSERT',
         data: {
@@ -555,33 +555,33 @@ export class PromotionEngine {
           discount_amount_paise: app.discountPaise,
           free_quantity: app.freeQty,
         },
-      });
+      }));
 
       // Increment current_uses on promotion
-      localDb
+      (await localDb
         .prepare('UPDATE promotions SET current_uses = current_uses + 1 WHERE id = ? OR _local_id = ?')
-        .run(app.id, app.id);
+        .run(app.id, app.id));
     }
   }
 
   /**
    * Promotions CRUD
    */
-  static listPromotions(organizationId: string): Promotion[] {
-    return localDb
+  static async listPromotions(organizationId: string): Promise<Promotion[]> {
+    return (await localDb
       .prepare(
         `SELECT p.*,
           (SELECT COUNT(*) FROM promotion_applications WHERE promotion_id = p.id OR promotion_id = p._local_id) as total_applications
          FROM promotions p
-         WHERE (p.organization_id = ?) AND p._deleted = 0
+         WHERE (p.organization_id = ?) AND ${process.env.DATABASE_URL ? 'p.deleted_at IS NULL' : 'p._deleted = 0'}
          ORDER BY p.priority DESC, p.created_at DESC`
       )
-      .all(organizationId) as Promotion[];
+      .all(organizationId)) as Promotion[];
   }
 
-  static createPromotion(data: Partial<Promotion> & { targets?: PromotionTarget[]; rewards?: any[] }): Promotion {
+  static async createPromotion(data: Partial<Promotion> & { targets?: PromotionTarget[]; rewards?: any[] }): Promise<Promotion> {
     const id = data.id || uuidv4();
-    const created = localMutate({
+    const created = (await localMutate({
       table: 'promotions',
       operation: 'INSERT',
       data: {
@@ -607,12 +607,12 @@ export class PromotionEngine {
         rule_version: 1,
         config_json: typeof data.config_json === 'object' ? JSON.stringify(data.config_json) : (data.config_json || '{}'),
       },
-    });
+    }));
 
     if (Array.isArray(data.targets) && data.targets.length > 0) {
       for (const t of data.targets) {
         const tId = uuidv4();
-        localMutate({
+        (await localMutate({
           table: 'promotion_targets',
           operation: 'INSERT',
           data: {
@@ -624,7 +624,7 @@ export class PromotionEngine {
             target_id: t.target_id,
             is_excluded: t.is_excluded ? 1 : 0,
           },
-        });
+        }));
       }
     }
 

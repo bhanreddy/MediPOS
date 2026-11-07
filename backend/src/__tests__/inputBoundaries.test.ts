@@ -2,6 +2,7 @@ import express from 'express';
 import request from 'supertest';
 import { dateOnlySchema } from '../schemas/date.schema';
 import { createExpenseSchema } from '../schemas/expense.schema';
+import { createMedicineSchema, updateMedicineSchema } from '../schemas/medicine.schema';
 import { createPurchaseSchema } from '../schemas/purchase.schema';
 import { purchasesRouter } from '../routes/purchases';
 import { errorHandler } from '../middleware/errorHandler';
@@ -16,4 +17,11 @@ test('non-finite monetary values and impossible purchase expiry dates are invali
 test('oversize CSV uploads return an actionable 413 response',async()=>{
  const response=await request(app).post('/purchases/import-csv').attach('file',Buffer.alloc(10*1024*1024+1),{filename:'oversize.csv',contentType:'text/csv'});
  expect(response.status).toBe(413);expect(response.body.error.code).toBe('LIMIT_FILE_SIZE');
+});
+test('medicine writes cannot reassign tenant identifiers from client input', () => {
+  for (const schema of [createMedicineSchema, updateMedicineSchema]) {
+    const parsed = schema.parse({ name: 'Tenant QA medicine', clinic_id: 'foreign-clinic', organization_id: 'foreign-org' });
+    expect(parsed).not.toHaveProperty('clinic_id');
+    expect(parsed).not.toHaveProperty('organization_id');
+  }
 });

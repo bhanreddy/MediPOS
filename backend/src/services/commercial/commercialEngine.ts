@@ -1,4 +1,5 @@
-import { localDb } from '../../local-db';
+import { tenantRecord } from '../../lib/tenantRecords';
+import { businessDb as localDb } from '../../lib/businessDb';
 import { Money } from '../../lib/money';
 import {
   CommercialQuoteContext,
@@ -18,7 +19,7 @@ export class CommercialEngine {
   /**
    * Generates authoritative server-side commercial quote for cart lines in a store/channel context.
    */
-  static quoteCommercialCart(context: CommercialQuoteContext): CommercialQuoteResult {
+  static async quoteCommercialCart(context: CommercialQuoteContext): Promise<CommercialQuoteResult> {
     const {
       organizationId,
       storeId,
@@ -35,6 +36,16 @@ export class CommercialEngine {
     } = context;
 
     assertNoLegacyLoyalty(redeemLoyaltyCredits);
+    if (storeId) (await tenantRecord('stores', storeId, organizationId));
+    if (customerId) (await tenantRecord('customers', customerId, organizationId));
+    for (const item of items || []) {
+      const medicine = (await tenantRecord('medicines', item.medicine_id, organizationId));
+      if (item.batch_id) {
+        const batch = (await tenantRecord('medicine_batches', item.batch_id, organizationId));
+        if (![medicine.id, medicine._local_id].includes(batch.medicine_id))
+          throw new AppError(404, 'Batch not found', 'BATCH_NOT_FOUND');
+      }
+    }
 
     if (!items || items.length === 0) {
       return this.emptyQuoteResult();
@@ -45,17 +56,17 @@ export class CommercialEngine {
     // 1. Resolve Store, Region, and Customer Context
     let regionId: string | null = null;
     if (storeId) {
-      const storeRow: any = localDb
+      const storeRow: any = (await localDb
         .prepare('SELECT region_id FROM stores WHERE id = ? OR _local_id = ?')
-        .get(storeId, storeId);
+        .get(storeId, storeId));
       regionId = storeRow?.region_id || null;
     }
 
     const customerGroup = customerId
-      ? CustomerGroupService.resolveCustomerGroup(customerId, organizationId)
+      ? (await CustomerGroupService.resolveCustomerGroup(customerId, organizationId))
       : null;
     const membership = customerId
-      ? CustomerGroupService.getActiveMembership(customerId, organizationId)
+      ? (await CustomerGroupService.getActiveMembership(customerId, organizationId))
       : null;
 
     // 2. Pre-process each line: resolve medicine master & base price hierarchy
@@ -85,9 +96,9 @@ export class CommercialEngine {
         throw new AppError(400, `Item quantity must be > 0 (received ${item.quantity})`, 'INVALID_QUANTITY');
       }
 
-      const medRow: any = localDb
-        .prepare('SELECT * FROM medicines WHERE (id = ? OR _local_id = ?) AND _deleted = 0')
-        .get(item.medicine_id, item.medicine_id);
+      const medRow: any = (await localDb
+        .prepare('SELECT * FROM medicines WHERE (id = ? OR _local_id = ?) AND organization_id = ? AND _deleted = 0')
+        .get(item.medicine_id, item.medicine_id, organizationId));
 
       if (!medRow) {
         throw new AppError(404, `Medicine not found: ${item.medicine_id}`, 'MEDICINE_NOT_FOUND');
@@ -101,7 +112,7 @@ export class CommercialEngine {
       const baseQuantity = item.quantity * conversionFactor;
 
       // Base Price Hierarchy Resolution
-      const priceHierarchy = PriceBookService.resolveHierarchy({
+      const priceHierarchy = (await PriceBookService.resolveHierarchy({
         organizationId,
         storeId,
         regionId,
@@ -112,7 +123,7 @@ export class CommercialEngine {
         unitType,
         conversionFactor,
         asOfDate,
-      });
+      }));
 
       const effectiveBasePricePaise = item.manual_unit_price != null
         ? Money.toPaise(item.manual_unit_price * conversionFactor)
@@ -164,7 +175,7 @@ export class CommercialEngine {
       isOffline,
     };
 
-    const promoResult = PromotionEngine.evaluateCartPromotions(promoContext);
+    const promoResult = (await PromotionEngine.evaluateCartPromotions(promoContext));
 
     // 4. Calculate Intermediate Lines (incorporating member discount and promo discount)
     const quoteLines: CommercialLineCalculation[] = [];
@@ -223,7 +234,7 @@ export class CommercialEngine {
       const lineTotalPaise = netLineTotalPaise;
 
       // Margin Guard Check
-      const marginResult = MarginGuard.evaluate({
+      const marginResult = (await MarginGuard.evaluate({
         organizationId,
         storeId,
         medicineId: line.medicineId,
@@ -232,7 +243,7 @@ export class CommercialEngine {
         mrpPaise: line.mrpPaise,
         discountPct: line.requestedDiscountPct,
         conversionFactor: line.conversionFactor,
-      });
+      }));
 
       const lineWarnings: Array<{ code: string; message: string; severity: 'INFO' | 'WARNING' | 'BLOCKING' }> = [];
       const lineApprovalReasons: string[] = [];
@@ -308,7 +319,7 @@ export class CommercialEngine {
 
     if (couponCode && couponCode.trim()) {
       const intermediateSubtotal = quoteLines.reduce((sum, l) => sum + l.lineTotalPaise, 0);
-      couponValidation = CouponEngine.validateCoupon({
+      couponValidation = (await CouponEngine.validateCoupon({
         organizationId,
         storeId,
         customerId,
@@ -317,7 +328,7 @@ export class CommercialEngine {
         eligibleMedicineIds: quoteLines.map(l => l.medicineId),
         isOffline,
         asOfDate,
-      });
+      }));
 
       if (couponValidation.isValid) {
         couponDiscountPaise = couponValidation.discountAmountPaise;

@@ -34,7 +34,7 @@ describe('Task 7 — Multi-Store Transfers, Warehouse Operations & Central Reple
   let batchDoloBId: string;
   let batchAmoxAId: string;
 
-  beforeAll(() => {
+  beforeAll(async () => {
     // 1. Setup Organizations
     localDb.prepare('INSERT INTO organizations (id, _local_id, legal_name, display_name, code, _updated_at) VALUES (?, ?, ?, ?, ?, ?)').run(
       orgId, orgId, 'Apollo Central Health Org', 'Apollo Pharmacy Hub', `ORG-${Date.now()}`, new Date().toISOString()
@@ -102,38 +102,38 @@ describe('Task 7 — Multi-Store Transfers, Warehouse Operations & Central Reple
     );
 
     // 5. Seed Inventory Positions: Warehouse has 1000 units Dolo Batch A, Store A has 500 units Dolo Batch B, Store B has 5 units Dolo Batch A
-    InventoryPositionService.adjustStock({
+    (await InventoryPositionService.adjustStock({
       organizationId: orgId,
       medicineId: medicineDoloId,
       batchId: batchDoloAId,
       locationType: 'WAREHOUSE',
       warehouseId,
       quantityDelta: 1000,
-    });
-    InventoryPositionService.adjustStock({
+    }));
+    (await InventoryPositionService.adjustStock({
       organizationId: orgId,
       medicineId: medicineDoloId,
       batchId: batchDoloBId,
       locationType: 'STORE',
       storeId: storeAId,
       quantityDelta: 500,
-    });
-    InventoryPositionService.adjustStock({
+    }));
+    (await InventoryPositionService.adjustStock({
       organizationId: orgId,
       medicineId: medicineDoloId,
       batchId: batchDoloAId,
       locationType: 'STORE',
       storeId: storeBId,
       quantityDelta: 5,
-    });
+    }));
   });
 
   // ──────────────────────────────────────────
   // 1. Transfer Creation & Routing Tests
   // ──────────────────────────────────────────
   describe('1. Transfer Creation & Multi-Direction Routing', () => {
-    test('1. Creates Warehouse to Store transfer request (Warehouse -> Store B)', () => {
-      const trf = StockTransferService.createTransfer({
+    test('1. Creates Warehouse to Store transfer request (Warehouse -> Store B)', async () => {
+      const trf = (await StockTransferService.createTransfer({
         organizationId: orgId,
         transferType: 'WAREHOUSE_TO_STORE',
         sourceLocationType: 'WAREHOUSE',
@@ -144,7 +144,7 @@ describe('Task 7 — Multi-Store Transfers, Warehouse Operations & Central Reple
         reason: 'WAREHOUSE_REPLENISHMENT',
         requestedBy: userId,
         items: [{ medicineId: medicineDoloId, requestedQuantity: 45 }],
-      });
+      }));
 
       expect(trf).toBeDefined();
       expect(trf.transfer_number).toContain('TRF');
@@ -153,8 +153,8 @@ describe('Task 7 — Multi-Store Transfers, Warehouse Operations & Central Reple
       expect(trf.status).toBe('REQUESTED');
     });
 
-    test('2. Creates Store to Store transfer request (Store A -> Store B)', () => {
-      const trf = StockTransferService.createTransfer({
+    test('2. Creates Store to Store transfer request (Store A -> Store B)', async () => {
+      const trf = (await StockTransferService.createTransfer({
         organizationId: orgId,
         transferType: 'STORE_TO_STORE',
         sourceLocationType: 'STORE',
@@ -165,15 +165,15 @@ describe('Task 7 — Multi-Store Transfers, Warehouse Operations & Central Reple
         reason: 'STORE_REBALANCING',
         requestedBy: userId,
         items: [{ medicineId: medicineDoloId, requestedQuantity: 20 }],
-      });
+      }));
 
       expect(trf).toBeDefined();
       expect(trf.transfer_type).toBe('STORE_TO_STORE');
       expect(trf.status).toBe('REQUESTED');
     });
 
-    test('3. Creates Store to Warehouse return transfer request', () => {
-      const trf = StockTransferService.createTransfer({
+    test('3. Creates Store to Warehouse return transfer request', async () => {
+      const trf = (await StockTransferService.createTransfer({
         organizationId: orgId,
         transferType: 'STORE_TO_WAREHOUSE',
         sourceLocationType: 'STORE',
@@ -182,14 +182,14 @@ describe('Task 7 — Multi-Store Transfers, Warehouse Operations & Central Reple
         destinationLocationId: warehouseId,
         requestedBy: userId,
         items: [{ medicineId: medicineDoloId, requestedQuantity: 10 }],
-      });
+      }));
 
       expect(trf.transfer_type).toBe('STORE_TO_WAREHOUSE');
     });
 
-    test('4. Blocks cross-organization transfers between different legal entities', () => {
-      expect(() => {
-        StockTransferService.createTransfer({
+    test('4. Blocks cross-organization transfers between different legal entities', async () => {
+      await expect((async () => {
+        (await StockTransferService.createTransfer({
           organizationId: orgId,
           transferType: 'STORE_TO_STORE',
           sourceLocationType: 'STORE',
@@ -198,8 +198,8 @@ describe('Task 7 — Multi-Store Transfers, Warehouse Operations & Central Reple
           destinationLocationId: otherOrgStoreId,
           requestedBy: userId,
           items: [{ medicineId: medicineDoloId, requestedQuantity: 10 }],
-        });
-      }).toThrow(); // Destination store not found in source organization — cross-org blocked at resolution
+        }));
+      })()).rejects.toThrow(); // Destination store not found in source organization — cross-org blocked at resolution
     });
   });
 
@@ -209,8 +209,8 @@ describe('Task 7 — Multi-Store Transfers, Warehouse Operations & Central Reple
   describe('2. Request, Approval & Maker-Checker Policies', () => {
     let testTrfId: string;
 
-    beforeEach(() => {
-      const trf = StockTransferService.createTransfer({
+    beforeEach(async () => {
+      const trf = (await StockTransferService.createTransfer({
         organizationId: orgId,
         transferType: 'WAREHOUSE_TO_STORE',
         sourceLocationType: 'WAREHOUSE',
@@ -220,16 +220,16 @@ describe('Task 7 — Multi-Store Transfers, Warehouse Operations & Central Reple
         priority: 'NORMAL',
         requestedBy: userId,
         items: [{ medicineId: medicineDoloId, requestedQuantity: 25 }],
-      });
+      }));
       testTrfId = trf.id;
     });
 
-    test('5. Approves transfer and advances status to READY_TO_PICK with FEFO allocation', () => {
-      const approved = StockTransferService.approveTransfer({
+    test('5. Approves transfer and advances status to READY_TO_PICK with FEFO allocation', async () => {
+      const approved = (await StockTransferService.approveTransfer({
         transferId: testTrfId,
         organizationId: orgId,
         approvedBy: userId,
-      });
+      }));
 
       expect(approved.status).toBe('READY_TO_PICK');
       expect(approved.approved_by).toBe(userId);
@@ -237,37 +237,37 @@ describe('Task 7 — Multi-Store Transfers, Warehouse Operations & Central Reple
       expect(approved.allocations![0].quantity_allocated).toBe(25);
     });
 
-    test('6. Rejects transfer request with audit reason', () => {
-      const rejected = StockTransferService.rejectTransfer({
+    test('6. Rejects transfer request with audit reason', async () => {
+      const rejected = (await StockTransferService.rejectTransfer({
         transferId: testTrfId,
         organizationId: orgId,
         rejectedBy: userId,
         rejectionReason: 'Exceeds branch allocation quota',
-      });
+      }));
 
       expect(rejected.status).toBe('REJECTED');
       expect(rejected.rejection_reason).toBe('Exceeds branch allocation quota');
     });
 
-    test('7. Enforces Maker-Checker policy when configured', () => {
-      TransferPolicyService.setPolicy({
+    test('7. Enforces Maker-Checker policy when configured', async () => {
+      (await TransferPolicyService.setPolicy({
         organizationId: orgId,
         enforceMakerChecker: true,
-      });
+      }));
 
-      expect(() => {
-        StockTransferService.approveTransfer({
+      await expect((async () => {
+        (await StockTransferService.approveTransfer({
           transferId: testTrfId,
           organizationId: orgId,
           approvedBy: userId, // Same as requestedBy
-        });
-      }).toThrow(/Maker-Checker Violation/);
+        }));
+      })()).rejects.toThrow(/Maker-Checker Violation/);
 
       // Reset policy
-      TransferPolicyService.setPolicy({
+      (await TransferPolicyService.setPolicy({
         organizationId: orgId,
         enforceMakerChecker: false,
-      });
+      }));
     });
   });
 
@@ -275,15 +275,15 @@ describe('Task 7 — Multi-Store Transfers, Warehouse Operations & Central Reple
   // 3. Concurrency-Safe Allocation & FEFO Tests
   // ──────────────────────────────────────────
   describe('3. Concurrency-Safe Allocation & FEFO Batch Selection', () => {
-    test('8. Decrements source available stock while physical on-hand remains unchanged before dispatch', () => {
-      const initialPos = InventoryAvailabilityService.getAvailability({
+    test('8. Decrements source available stock while physical on-hand remains unchanged before dispatch', async () => {
+      const initialPos = (await InventoryAvailabilityService.getAvailability({
         organizationId: orgId,
         medicineId: medicineDoloId,
         locationType: 'WAREHOUSE',
         warehouseId,
-      });
+      }));
 
-      const trf = StockTransferService.createTransfer({
+      const trf = (await StockTransferService.createTransfer({
         organizationId: orgId,
         transferType: 'WAREHOUSE_TO_STORE',
         sourceLocationType: 'WAREHOUSE',
@@ -292,20 +292,20 @@ describe('Task 7 — Multi-Store Transfers, Warehouse Operations & Central Reple
         destinationLocationId: storeBId,
         requestedBy: userId,
         items: [{ medicineId: medicineDoloId, requestedQuantity: 30 }],
-      });
+      }));
 
-      StockTransferService.approveTransfer({
+      (await StockTransferService.approveTransfer({
         transferId: trf.id,
         organizationId: orgId,
         approvedBy: userId,
-      });
+      }));
 
-      const afterAllocPos = InventoryAvailabilityService.getAvailability({
+      const afterAllocPos = (await InventoryAvailabilityService.getAvailability({
         organizationId: orgId,
         medicineId: medicineDoloId,
         locationType: 'WAREHOUSE',
         warehouseId,
-      });
+      }));
 
       // Available decreased by reserved 30 units
       expect(afterAllocPos.totalAvailable).toBe(initialPos.totalAvailable - 30);
@@ -321,8 +321,8 @@ describe('Task 7 — Multi-Store Transfers, Warehouse Operations & Central Reple
     let pickTrfId: string;
     let allocId: string;
 
-    beforeEach(() => {
-      const trf = StockTransferService.createTransfer({
+    beforeEach(async () => {
+      const trf = (await StockTransferService.createTransfer({
         organizationId: orgId,
         transferType: 'WAREHOUSE_TO_STORE',
         sourceLocationType: 'WAREHOUSE',
@@ -331,59 +331,59 @@ describe('Task 7 — Multi-Store Transfers, Warehouse Operations & Central Reple
         destinationLocationId: storeBId,
         requestedBy: userId,
         items: [{ medicineId: medicineDoloId, requestedQuantity: 20 }],
-      });
-      const approved = StockTransferService.approveTransfer({
+      }));
+      const approved = (await StockTransferService.approveTransfer({
         transferId: trf.id,
         organizationId: orgId,
         approvedBy: userId,
-      });
+      }));
       pickTrfId = trf.id;
       allocId = approved.allocations![0].id;
     });
 
-    test('9. Generates pick list with bin sequencing', () => {
-      const pickList = TransferPickPackService.generatePickList(pickTrfId, orgId);
+    test('9. Generates pick list with bin sequencing', async () => {
+      const pickList = (await TransferPickPackService.generatePickList(pickTrfId, orgId));
       expect(pickList.allocations.length).toBe(1);
       expect(pickList.allocations[0].quantityAllocated).toBe(20);
     });
 
-    test('10. Rejects wrong barcode during pick scan', () => {
-      expect(() => {
-        TransferPickPackService.recordPick({
+    test('10. Rejects wrong barcode during pick scan', async () => {
+      await expect((async () => {
+        (await TransferPickPackService.recordPick({
           transferId: pickTrfId,
           allocationId: allocId,
           organizationId: orgId,
           scannedBarcode: 'INVALID-BARCODE-9999',
           quantityPicked: 20,
           pickedBy: pickerId,
-        });
-      }).toThrow(/Scanned barcode/);
+        }));
+      })()).rejects.toThrow(/Scanned barcode/);
     });
 
-    test('11. Records successful pick scan and advances status to PICKING', () => {
-      const pickRes = TransferPickPackService.recordPick({
+    test('11. Records successful pick scan and advances status to PICKING', async () => {
+      const pickRes = (await TransferPickPackService.recordPick({
         transferId: pickTrfId,
         allocationId: allocId,
         organizationId: orgId,
         quantityPicked: 20,
         pickedBy: pickerId,
-      });
+      }));
 
       expect(pickRes.status).toBe('PICKED');
       expect(pickRes.quantityPicked).toBe(20);
     });
 
-    test('12. Completes picking and creates packaging containers with PKG-01 label', () => {
-      TransferPickPackService.recordPick({
+    test('12. Completes picking and creates packaging containers with PKG-01 label', async () => {
+      (await TransferPickPackService.recordPick({
         transferId: pickTrfId,
         allocationId: allocId,
         organizationId: orgId,
         quantityPicked: 20,
         pickedBy: pickerId,
-      });
-      TransferPickPackService.completePicking(pickTrfId, orgId, pickerId);
+      }));
+      (await TransferPickPackService.completePicking(pickTrfId, orgId, pickerId));
 
-      const pkg = TransferPickPackService.createPackage({
+      const pkg = (await TransferPickPackService.createPackage({
         transferId: pickTrfId,
         organizationId: orgId,
         packageType: 'BOX',
@@ -398,7 +398,7 @@ describe('Task 7 — Multi-Store Transfers, Warehouse Operations & Central Reple
           },
         ],
         packedBy: pickerId,
-      });
+      }));
 
       expect(pkg.package_identifier).toContain('PKG-01');
       expect(pkg.is_cold_chain).toBe(1);
@@ -409,21 +409,21 @@ describe('Task 7 — Multi-Store Transfers, Warehouse Operations & Central Reple
   // 5. Critical Stock Movement: Dispatch & In-Transit
   // ──────────────────────────────────────────
   describe('5. Authoritative Dispatch & Critical Stock In-Transit Flow', () => {
-    test('13. Strictly decrements source stock, increments IN_TRANSIT, and leaves destination stock UNCHANGED at dispatch', () => {
-      const srcBefore = InventoryAvailabilityService.getAvailability({
+    test('13. Strictly decrements source stock, increments IN_TRANSIT, and leaves destination stock UNCHANGED at dispatch', async () => {
+      const srcBefore = (await InventoryAvailabilityService.getAvailability({
         organizationId: orgId,
         medicineId: medicineDoloId,
         locationType: 'WAREHOUSE',
         warehouseId,
-      });
-      const destBefore = InventoryAvailabilityService.getAvailability({
+      }));
+      const destBefore = (await InventoryAvailabilityService.getAvailability({
         organizationId: orgId,
         medicineId: medicineDoloId,
         locationType: 'STORE',
         storeId: storeBId,
-      });
+      }));
 
-      const trf = StockTransferService.createTransfer({
+      const trf = (await StockTransferService.createTransfer({
         organizationId: orgId,
         transferType: 'WAREHOUSE_TO_STORE',
         sourceLocationType: 'WAREHOUSE',
@@ -432,33 +432,33 @@ describe('Task 7 — Multi-Store Transfers, Warehouse Operations & Central Reple
         destinationLocationId: storeBId,
         requestedBy: userId,
         items: [{ medicineId: medicineDoloId, requestedQuantity: 40 }],
-      });
+      }));
 
-      StockTransferService.approveTransfer({ transferId: trf.id, organizationId: orgId, approvedBy: userId });
+      (await StockTransferService.approveTransfer({ transferId: trf.id, organizationId: orgId, approvedBy: userId }));
 
       // Dispatch Transfer
-      const dispatched = TransferDispatchService.dispatchTransfer({
+      const dispatched = (await TransferDispatchService.dispatchTransfer({
         transferId: trf.id,
         organizationId: orgId,
         dispatchedBy: userId,
         carrierName: 'Apollo Dedicated Fleet',
         trackingReference: 'TRK-HYD-001',
-      });
+      }));
 
       expect(dispatched.status).toBe('DISPATCHED');
 
-      const srcAfter = InventoryAvailabilityService.getAvailability({
+      const srcAfter = (await InventoryAvailabilityService.getAvailability({
         organizationId: orgId,
         medicineId: medicineDoloId,
         locationType: 'WAREHOUSE',
         warehouseId,
-      });
-      const destAfter = InventoryAvailabilityService.getAvailability({
+      }));
+      const destAfter = (await InventoryAvailabilityService.getAvailability({
         organizationId: orgId,
         medicineId: medicineDoloId,
         locationType: 'STORE',
         storeId: storeBId,
-      });
+      }));
 
       // 1. Source physical on-hand decremented by 40
       expect(srcAfter.totalOnHand).toBe(srcBefore.totalOnHand - 40);
@@ -481,8 +481,8 @@ describe('Task 7 — Multi-Store Transfers, Warehouse Operations & Central Reple
       expect(ledgerEntry.quantity_delta).toBe(-40);
     });
 
-    test('14. Duplicate dispatch is idempotent', () => {
-      const trf = StockTransferService.createTransfer({
+    test('14. Duplicate dispatch is idempotent', async () => {
+      const trf = (await StockTransferService.createTransfer({
         organizationId: orgId,
         transferType: 'WAREHOUSE_TO_STORE',
         sourceLocationType: 'WAREHOUSE',
@@ -492,23 +492,23 @@ describe('Task 7 — Multi-Store Transfers, Warehouse Operations & Central Reple
         requestedBy: userId,
         idempotencyKey: `IDEMP-CR-${Date.now()}`,
         items: [{ medicineId: medicineDoloId, requestedQuantity: 10 }],
-      });
-      StockTransferService.approveTransfer({ transferId: trf.id, organizationId: orgId, approvedBy: userId });
+      }));
+      (await StockTransferService.approveTransfer({ transferId: trf.id, organizationId: orgId, approvedBy: userId }));
 
-      TransferDispatchService.dispatchTransfer({
+      (await TransferDispatchService.dispatchTransfer({
         transferId: trf.id,
         organizationId: orgId,
         dispatchedBy: userId,
         idempotencyKey: 'IDEMP-DISP-001',
-      });
+      }));
 
       // Second identical call returns without duplicate ledger writes
-      const secondCall = TransferDispatchService.dispatchTransfer({
+      const secondCall = (await TransferDispatchService.dispatchTransfer({
         transferId: trf.id,
         organizationId: orgId,
         dispatchedBy: userId,
         idempotencyKey: 'IDEMP-DISP-001',
-      });
+      }));
 
       expect(secondCall.status).toBe('DISPATCHED');
     });
@@ -518,8 +518,8 @@ describe('Task 7 — Multi-Store Transfers, Warehouse Operations & Central Reple
   // 6. Receiving & Variance Tests
   // ──────────────────────────────────────────
   describe('6. Destination Receipt, Partial Inward & Discrepancies', () => {
-    test('15. Full sound receipt: clears IN_TRANSIT, increments destination AVAILABLE, and logs TRANSFER_IN', () => {
-      const trf = StockTransferService.createTransfer({
+    test('15. Full sound receipt: clears IN_TRANSIT, increments destination AVAILABLE, and logs TRANSFER_IN', async () => {
+      const trf = (await StockTransferService.createTransfer({
         organizationId: orgId,
         transferType: 'WAREHOUSE_TO_STORE',
         sourceLocationType: 'WAREHOUSE',
@@ -528,19 +528,19 @@ describe('Task 7 — Multi-Store Transfers, Warehouse Operations & Central Reple
         destinationLocationId: storeBId,
         requestedBy: userId,
         items: [{ medicineId: medicineDoloId, requestedQuantity: 15 }],
-      });
-      const approved = StockTransferService.approveTransfer({ transferId: trf.id, organizationId: orgId, approvedBy: userId });
-      TransferDispatchService.dispatchTransfer({ transferId: trf.id, organizationId: orgId, dispatchedBy: userId });
+      }));
+      const approved = (await StockTransferService.approveTransfer({ transferId: trf.id, organizationId: orgId, approvedBy: userId }));
+      (await TransferDispatchService.dispatchTransfer({ transferId: trf.id, organizationId: orgId, dispatchedBy: userId }));
 
-      const destBefore = InventoryAvailabilityService.getAvailability({
+      const destBefore = (await InventoryAvailabilityService.getAvailability({
         organizationId: orgId,
         medicineId: medicineDoloId,
         locationType: 'STORE',
         storeId: storeBId,
-      });
+      }));
 
       // Execute Destination Receipt
-      const { transfer: receivedTrf } = TransferReceivingService.receiveTransfer({
+      const { transfer: receivedTrf } = (await TransferReceivingService.receiveTransfer({
         transferId: trf.id,
         organizationId: orgId,
         receivedBy: receiverId,
@@ -553,16 +553,16 @@ describe('Task 7 — Multi-Store Transfers, Warehouse Operations & Central Reple
             quantityAccepted: 15,
           },
         ],
-      });
+      }));
 
       expect(receivedTrf.status).toBe('RECEIVED');
 
-      const destAfter = InventoryAvailabilityService.getAvailability({
+      const destAfter = (await InventoryAvailabilityService.getAvailability({
         organizationId: orgId,
         medicineId: medicineDoloId,
         locationType: 'STORE',
         storeId: storeBId,
-      });
+      }));
 
       expect(destAfter.totalAvailable).toBe(destBefore.totalAvailable + 15);
 
@@ -574,8 +574,8 @@ describe('Task 7 — Multi-Store Transfers, Warehouse Operations & Central Reple
       expect(inLedger.quantity_delta).toBe(15);
     });
 
-    test('16. Damaged and Short Receipt (Integration Scenario 3: 45 Good, 3 Damaged, 2 Short)', () => {
-      const trf = StockTransferService.createTransfer({
+    test('16. Damaged and Short Receipt (Integration Scenario 3: 45 Good, 3 Damaged, 2 Short)', async () => {
+      const trf = (await StockTransferService.createTransfer({
         organizationId: orgId,
         transferType: 'WAREHOUSE_TO_STORE',
         sourceLocationType: 'WAREHOUSE',
@@ -584,18 +584,18 @@ describe('Task 7 — Multi-Store Transfers, Warehouse Operations & Central Reple
         destinationLocationId: storeBId,
         requestedBy: userId,
         items: [{ medicineId: medicineDoloId, requestedQuantity: 50 }],
-      });
-      const approved = StockTransferService.approveTransfer({ transferId: trf.id, organizationId: orgId, approvedBy: userId });
-      TransferDispatchService.dispatchTransfer({ transferId: trf.id, organizationId: orgId, dispatchedBy: userId });
+      }));
+      const approved = (await StockTransferService.approveTransfer({ transferId: trf.id, organizationId: orgId, approvedBy: userId }));
+      (await TransferDispatchService.dispatchTransfer({ transferId: trf.id, organizationId: orgId, dispatchedBy: userId }));
 
-      const destBefore = InventoryAvailabilityService.getAvailability({
+      const destBefore = (await InventoryAvailabilityService.getAvailability({
         organizationId: orgId,
         medicineId: medicineDoloId,
         locationType: 'STORE',
         storeId: storeBId,
-      });
+      }));
 
-      const { transfer: receivedTrf } = TransferReceivingService.receiveTransfer({
+      const { transfer: receivedTrf } = (await TransferReceivingService.receiveTransfer({
         transferId: trf.id,
         organizationId: orgId,
         receivedBy: receiverId,
@@ -610,16 +610,16 @@ describe('Task 7 — Multi-Store Transfers, Warehouse Operations & Central Reple
             quantityShort: 2,
           },
         ],
-      });
+      }));
 
       expect(receivedTrf.status).toBe('VARIANCE_REVIEW');
 
-      const destAfter = InventoryAvailabilityService.getAvailability({
+      const destAfter = (await InventoryAvailabilityService.getAvailability({
         organizationId: orgId,
         medicineId: medicineDoloId,
         locationType: 'STORE',
         storeId: storeBId,
-      });
+      }));
 
       // 45 sound units become AVAILABLE for POS
       expect(destAfter.totalAvailable).toBe(destBefore.totalAvailable + 45);
@@ -631,10 +631,10 @@ describe('Task 7 — Multi-Store Transfers, Warehouse Operations & Central Reple
       expect(Number(posRow?.quantity_damaged)).toBe(3);
 
       // Discrepancy recorded in transfer_variances
-      const variances = TransferVarianceService.listVariances({
+      const variances = (await TransferVarianceService.listVariances({
         organizationId: orgId,
         transferId: trf.id,
-      });
+      }));
       expect(variances.length).toBeGreaterThanOrEqual(2); // SHORT and DAMAGED
     });
   });
@@ -643,15 +643,15 @@ describe('Task 7 — Multi-Store Transfers, Warehouse Operations & Central Reple
   // 7. Cancellation & Return to Source Tests
   // ──────────────────────────────────────────
   describe('7. Stage-Aware Cancellation & Return to Source', () => {
-    test('17. Cancelling approved transfer safely releases all reservations', () => {
-      const availBefore = InventoryAvailabilityService.getAvailability({
+    test('17. Cancelling approved transfer safely releases all reservations', async () => {
+      const availBefore = (await InventoryAvailabilityService.getAvailability({
         organizationId: orgId,
         medicineId: medicineDoloId,
         locationType: 'STORE',
         storeId: storeAId,
-      });
+      }));
 
-      const trf = StockTransferService.createTransfer({
+      const trf = (await StockTransferService.createTransfer({
         organizationId: orgId,
         transferType: 'STORE_TO_STORE',
         sourceLocationType: 'STORE',
@@ -660,30 +660,30 @@ describe('Task 7 — Multi-Store Transfers, Warehouse Operations & Central Reple
         destinationLocationId: storeBId,
         requestedBy: userId,
         items: [{ medicineId: medicineDoloId, requestedQuantity: 20 }],
-      });
-      StockTransferService.approveTransfer({ transferId: trf.id, organizationId: orgId, approvedBy: userId });
+      }));
+      (await StockTransferService.approveTransfer({ transferId: trf.id, organizationId: orgId, approvedBy: userId }));
 
       // Cancel transfer
-      StockTransferService.cancelTransfer({
+      (await StockTransferService.cancelTransfer({
         transferId: trf.id,
         organizationId: orgId,
         cancelledBy: userId,
         cancellationReason: 'Order cancelled by regional manager',
-      });
+      }));
 
-      const availAfter = InventoryAvailabilityService.getAvailability({
+      const availAfter = (await InventoryAvailabilityService.getAvailability({
         organizationId: orgId,
         medicineId: medicineDoloId,
         locationType: 'STORE',
         storeId: storeAId,
-      });
+      }));
 
       // Available stock fully restored
       expect(availAfter.totalAvailable).toBe(availBefore.totalAvailable);
     });
 
-    test('18. Dispatched transfer cannot be simply cancelled; generates Return to Source transfer', () => {
-      const trf = StockTransferService.createTransfer({
+    test('18. Dispatched transfer cannot be simply cancelled; generates Return to Source transfer', async () => {
+      const trf = (await StockTransferService.createTransfer({
         organizationId: orgId,
         transferType: 'STORE_TO_STORE',
         sourceLocationType: 'STORE',
@@ -692,25 +692,25 @@ describe('Task 7 — Multi-Store Transfers, Warehouse Operations & Central Reple
         destinationLocationId: storeBId,
         requestedBy: userId,
         items: [{ medicineId: medicineDoloId, requestedQuantity: 10 }],
-      });
-      StockTransferService.approveTransfer({ transferId: trf.id, organizationId: orgId, approvedBy: userId });
-      TransferDispatchService.dispatchTransfer({ transferId: trf.id, organizationId: orgId, dispatchedBy: userId });
+      }));
+      (await StockTransferService.approveTransfer({ transferId: trf.id, organizationId: orgId, approvedBy: userId }));
+      (await TransferDispatchService.dispatchTransfer({ transferId: trf.id, organizationId: orgId, dispatchedBy: userId }));
 
-      expect(() => {
-        StockTransferService.cancelTransfer({
+      await expect((async () => {
+        (await StockTransferService.cancelTransfer({
           transferId: trf.id,
           organizationId: orgId,
           cancelledBy: userId,
-        });
-      }).toThrow(/Cannot directly cancel transfer in DISPATCHED status/);
+        }));
+      })()).rejects.toThrow(/Cannot directly cancel transfer in DISPATCHED status/);
 
       // Create Return Transfer instead
-      const returnTrf = StockTransferService.createReturnTransfer({
+      const returnTrf = (await StockTransferService.createReturnTransfer({
         originalTransferId: trf.id,
         organizationId: orgId,
         reason: 'Destination counter closed unexpectedly',
         returnedBy: receiverId,
-      });
+      }));
 
       expect(returnTrf.transfer_type).toBe('RETURN_TO_SOURCE');
       expect(returnTrf.source_location_id).toBe(storeBId);
@@ -722,11 +722,11 @@ describe('Task 7 — Multi-Store Transfers, Warehouse Operations & Central Reple
   // 8. Central Replenishment & Rebalancing Tests
   // ──────────────────────────────────────────
   describe('8. Central Replenishment & Cross-Store Rebalancing', () => {
-    test('19. Evaluates Store B replenishment deficit and recommends replenishment from Central WH', () => {
-      const decisions = InternalReplenishmentEngine.evaluateStoreReplenishment({
+    test('19. Evaluates Store B replenishment deficit and recommends replenishment from Central WH', async () => {
+      const decisions = (await InternalReplenishmentEngine.evaluateStoreReplenishment({
         organizationId: orgId,
         destinationStoreId: storeBId,
-      });
+      }));
 
       const doloDecision = decisions.find((d) => d.medicineId === medicineDoloId);
       expect(doloDecision).toBeDefined();
@@ -735,11 +735,11 @@ describe('Task 7 — Multi-Store Transfers, Warehouse Operations & Central Reple
       expect(['WAREHOUSE_TRANSFER', 'WAIT_FOR_INCOMING']).toContain(doloDecision?.decisionType);
     });
 
-    test('20. Cross-store rebalancing respects source protected stock buffer', () => {
-      const recs = StoreRebalancingEngine.evaluateRebalancing({
+    test('20. Cross-store rebalancing respects source protected stock buffer', async () => {
+      const recs = (await StoreRebalancingEngine.evaluateRebalancing({
         organizationId: orgId,
         safetyStockDays: 7,
-      });
+      }));
 
       expect(Array.isArray(recs)).toBe(true);
       for (const r of recs) {
@@ -747,11 +747,11 @@ describe('Task 7 — Multi-Store Transfers, Warehouse Operations & Central Reple
       }
     });
 
-    test('21. Near-expiry redistribution engine matches velocity and rejects slow destination', () => {
-      const plans = ExpiryRedistributionEngine.evaluateExpiryRedistribution({
+    test('21. Near-expiry redistribution engine matches velocity and rejects slow destination', async () => {
+      const plans = (await ExpiryRedistributionEngine.evaluateExpiryRedistribution({
         organizationId: orgId,
         nearExpiryDaysThreshold: 180,
-      });
+      }));
 
       expect(Array.isArray(plans)).toBe(true);
     });
@@ -761,19 +761,19 @@ describe('Task 7 — Multi-Store Transfers, Warehouse Operations & Central Reple
   // 9. Recall Consolidation & State Preservation
   // ──────────────────────────────────────────
   describe('9. Product Recall Consolidation & State Preservation', () => {
-    test('22. Recalled stock transfer preserves RECALLED state and remains unsellable at destination', () => {
+    test('22. Recalled stock transfer preserves RECALLED state and remains unsellable at destination', async () => {
       // 1. Add stock at Store A first
-      InventoryPositionService.adjustStock({
+      (await InventoryPositionService.adjustStock({
         organizationId: orgId,
         medicineId: medicineAmoxId,
         batchId: batchAmoxAId,
         locationType: 'STORE',
         storeId: storeAId,
         quantityDelta: 20,
-      });
+      }));
 
       // Create and activate recall on Amoxicillin
-      const recallDraft = ProductRecallEngine.createRecall({
+      const recallDraft = (await ProductRecallEngine.createRecall({
         organizationId: orgId,
         recallReference: `REC-${Date.now()}`,
         recallType: 'BATCH',
@@ -783,27 +783,27 @@ describe('Task 7 — Multi-Store Transfers, Warehouse Operations & Central Reple
         batchNumber: 'AMOX-LOT-01',
         reason: 'Packaging defect inspection',
         createdBy: userId,
-      });
+      }));
 
-      ProductRecallEngine.activateRecall(recallDraft.id, userId);
+      (await ProductRecallEngine.activateRecall(recallDraft.id, userId));
 
       // 2. Create Recall Consolidation Transfer to Central Warehouse
-      const recallTrf = RecallTransferService.createRecallConsolidationTransfer({
+      const recallTrf = (await RecallTransferService.createRecallConsolidationTransfer({
         organizationId: orgId,
         recallId: recallDraft.id,
         sourceStoreId: storeAId,
         centralWarehouseId: warehouseId,
         requestedBy: userId,
-      });
+      }));
 
       expect(recallTrf.stock_state_transferred).toBe('RECALLED');
       expect(recallTrf.priority).toBe('CRITICAL');
 
       // 3. Approve, Dispatch, Receive
-      const approved = StockTransferService.approveTransfer({ transferId: recallTrf.id, organizationId: orgId, approvedBy: userId });
-      TransferDispatchService.dispatchTransfer({ transferId: recallTrf.id, organizationId: orgId, dispatchedBy: userId });
+      const approved = (await StockTransferService.approveTransfer({ transferId: recallTrf.id, organizationId: orgId, approvedBy: userId }));
+      (await TransferDispatchService.dispatchTransfer({ transferId: recallTrf.id, organizationId: orgId, dispatchedBy: userId }));
 
-      TransferReceivingService.receiveTransfer({
+      (await TransferReceivingService.receiveTransfer({
         transferId: recallTrf.id,
         organizationId: orgId,
         receivedBy: receiverId,
@@ -816,15 +816,15 @@ describe('Task 7 — Multi-Store Transfers, Warehouse Operations & Central Reple
             quantityAccepted: 20,
           },
         ],
-      });
+      }));
 
       // 4. Verify Destination Warehouse Position: Units are in quantity_recalled, NOT quantity_available
-      const whAvail = InventoryAvailabilityService.getAvailability({
+      const whAvail = (await InventoryAvailabilityService.getAvailability({
         organizationId: orgId,
         medicineId: medicineAmoxId,
         locationType: 'WAREHOUSE',
         warehouseId,
-      });
+      }));
 
       expect(whAvail.totalAvailable).toBe(0); // Strictly unsellable
       expect(whAvail.totalBlocked).toBeGreaterThanOrEqual(20);
@@ -835,8 +835,8 @@ describe('Task 7 — Multi-Store Transfers, Warehouse Operations & Central Reple
   // 10. Warehouse Operations & Bin Grid
   // ──────────────────────────────────────────
   describe('10. Warehouse Bins, Operations Dashboard & Sequences', () => {
-    test('23. Creates storage bin and retrieves warehouse operational queues', () => {
-      const bin = WarehouseOperationsService.createBin({
+    test('23. Creates storage bin and retrieves warehouse operational queues', async () => {
+      const bin = (await WarehouseOperationsService.createBin({
         organizationId: orgId,
         warehouseId,
         binCode: `BIN-${Date.now()}`,
@@ -846,11 +846,11 @@ describe('Task 7 — Multi-Store Transfers, Warehouse Operations & Central Reple
         shelf: 'S-01',
         binType: 'PICKING',
         pickSequence: 10,
-      });
+      }));
 
       expect(bin.bin_code).toContain('BIN-');
 
-      const dashboard = WarehouseOperationsService.getWarehouseDashboard(orgId, warehouseId);
+      const dashboard = (await WarehouseOperationsService.getWarehouseDashboard(orgId, warehouseId));
       expect(dashboard).toBeDefined();
       expect(dashboard.warehouseId).toBe(warehouseId);
       expect(dashboard.pickQueueCount).toBeDefined();
@@ -861,14 +861,14 @@ describe('Task 7 — Multi-Store Transfers, Warehouse Operations & Central Reple
   // 11. Security & Stock Integrity
   // ──────────────────────────────────────────
   describe('11. Security Permissions & Zero-Stock-Loss Integrity', () => {
-    test('24. Total organization stock remains perfectly constant across transfers', () => {
+    test('24. Total organization stock remains perfectly constant across transfers', async () => {
       const medId = medicineDoloId;
 
       const totalOrgStockBefore: any = localDb
         .prepare(`SELECT SUM(quantity_on_hand) as total FROM inventory_positions WHERE (organization_id = ? OR organization_id = 'default-org') AND medicine_id = ?`)
         .get(orgId, medId);
 
-      const trf = StockTransferService.createTransfer({
+      const trf = (await StockTransferService.createTransfer({
         organizationId: orgId,
         transferType: 'STORE_TO_STORE',
         sourceLocationType: 'STORE',
@@ -877,11 +877,11 @@ describe('Task 7 — Multi-Store Transfers, Warehouse Operations & Central Reple
         destinationLocationId: storeBId,
         requestedBy: userId,
         items: [{ medicineId: medId, requestedQuantity: 10 }],
-      });
-      const approved = StockTransferService.approveTransfer({ transferId: trf.id, organizationId: orgId, approvedBy: userId });
-      TransferDispatchService.dispatchTransfer({ transferId: trf.id, organizationId: orgId, dispatchedBy: userId });
+      }));
+      const approved = (await StockTransferService.approveTransfer({ transferId: trf.id, organizationId: orgId, approvedBy: userId }));
+      (await TransferDispatchService.dispatchTransfer({ transferId: trf.id, organizationId: orgId, dispatchedBy: userId }));
 
-      TransferReceivingService.receiveTransfer({
+      (await TransferReceivingService.receiveTransfer({
         transferId: trf.id,
         organizationId: orgId,
         receivedBy: receiverId,
@@ -894,7 +894,7 @@ describe('Task 7 — Multi-Store Transfers, Warehouse Operations & Central Reple
             quantityAccepted: 10,
           },
         ],
-      });
+      }));
 
       const totalOrgStockAfter: any = localDb
         .prepare(`SELECT SUM(quantity_on_hand) as total FROM inventory_positions WHERE (organization_id = ? OR organization_id = 'default-org') AND medicine_id = ?`)

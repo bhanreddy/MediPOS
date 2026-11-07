@@ -7,7 +7,8 @@ const baseCustomerSchema = z.object({
   email: z.string().email().optional().nullable(),
   credit_limit: z.number().finite().min(0).optional(),
   doctor_name: z.string().optional().nullable(),
-  address: z.string().optional().nullable(),
+  address: z.string().trim().max(500).optional().nullable(),
+  gstin: z.string().trim().toUpperCase().regex(/^[0-9]{2}[A-Z]{5}[0-9]{4}[A-Z][A-Z0-9]Z[A-Z0-9]$/).optional().nullable(),
   clinic_id: z.string().optional(),
 });
 

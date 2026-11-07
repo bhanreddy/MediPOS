@@ -1,5 +1,6 @@
+import { tenantRecord } from '../../lib/tenantRecords';
 // purchaseRequisitionService.ts — Demand Consolidation & Requisition Lifecycle Engine
-import { localDb } from '../../local-db';
+import { businessDb as localDb } from '../../lib/businessDb';
 import { localMutate } from '../../lib/localMutate';
 import { Money } from '../../lib/money';
 import { v4 as uuidv4 } from 'uuid';
@@ -41,7 +42,7 @@ export class PurchaseRequisitionService {
   /**
    * Create a new purchase requisition with line items
    */
-  static createRequisition(params: CreateRequisitionParams): PurchaseRequisition {
+  static async createRequisition(params: CreateRequisitionParams): Promise<PurchaseRequisition> {
     const {
       organizationId,
       regionId = null,
@@ -59,16 +60,24 @@ export class PurchaseRequisitionService {
       throw new Error('Requisition must contain at least one item');
     }
 
+    if (storeId) (await tenantRecord('stores', storeId, organizationId));
+    if (warehouseId) (await tenantRecord('warehouses', warehouseId, organizationId));
+    if (regionId) (await tenantRecord('regions', regionId, organizationId));
+    for (const item of items) {
+      (await tenantRecord('medicines', item.medicineId, organizationId));
+      if (item.preferredSupplierId) (await tenantRecord('suppliers', item.preferredSupplierId, organizationId));
+    }
+
     const requisitionId = uuidv4();
-    const reqNumber = DocumentNumberingService.generate({
+    const reqNumber = (await DocumentNumberingService.generate({
       organizationId,
       storeId,
       documentType: 'PURCHASE_REQUISITION',
-    });
+    }));
 
     const nowIso = new Date().toISOString();
 
-    const createdReq = localMutate({
+    const createdReq = (await localMutate({
       table: 'purchase_requisitions',
       operation: 'INSERT',
       data: {
@@ -87,7 +96,7 @@ export class PurchaseRequisitionService {
         status: 'DRAFT',
         notes,
       },
-    });
+    }));
 
     const createdItems: PurchaseRequisitionItem[] = [];
 
@@ -103,14 +112,14 @@ export class PurchaseRequisitionService {
       let reservedStock = 0;
       let incomingStock = 0;
 
-      const posRow: any = localDb
+      const posRow: any = (await localDb
         .prepare(
           `SELECT SUM(quantity_on_hand) as on_hand, SUM(quantity_available) as avail,
                   SUM(quantity_reserved) as reserved, SUM(quantity_in_transit) as transit
            FROM inventory_positions
            WHERE organization_id = ? AND medicine_id = ? ${storeId ? 'AND store_id = ?' : ''}`
         )
-        .get(storeId ? [organizationId, it.medicineId, storeId] : [organizationId, it.medicineId]);
+        .get(storeId ? [organizationId, it.medicineId, storeId] : [organizationId, it.medicineId]));
 
       if (posRow) {
         stockOnHold = Number(posRow.on_hand || 0);
@@ -122,13 +131,13 @@ export class PurchaseRequisitionService {
       // Lookup standard or last rate from medicine or catalog
       let estCostPaise = it.estimatedCostPaise || 0;
       if (!estCostPaise) {
-        const medRow: any = localDb.prepare('SELECT purchase_price FROM medicines WHERE id = ? OR _local_id = ?').get(it.medicineId, it.medicineId);
+        const medRow: any = (await localDb.prepare('SELECT purchase_price FROM medicines WHERE id = ? OR _local_id = ?').get(it.medicineId, it.medicineId));
         if (medRow?.purchase_price) {
           estCostPaise = Money.toPaise(medRow.purchase_price) * it.requestedQuantity;
         }
       }
 
-      const itemRecord = localMutate({
+      const itemRecord = (await localMutate({
         table: 'purchase_requisition_items',
         operation: 'INSERT',
         data: {
@@ -154,7 +163,7 @@ export class PurchaseRequisitionService {
           source_reference: it.sourceReference || null,
           status: 'PENDING',
         },
-      });
+      }));
 
       createdItems.push(itemRecord as any);
     }
@@ -168,36 +177,36 @@ export class PurchaseRequisitionService {
   /**
    * Submit requisition for approval
    */
-  static submitRequisition(requisitionId: string, organizationId: string): PurchaseRequisition {
-    const req = this.getRequisitionById(requisitionId, organizationId);
+  static async submitRequisition(requisitionId: string, organizationId: string): Promise<PurchaseRequisition> {
+    const req = (await this.getRequisitionById(requisitionId, organizationId));
     if (!req) throw new Error('Requisition not found');
     if (req.status !== 'DRAFT') {
       throw new Error(`Cannot submit requisition in status: ${req.status}`);
     }
 
-    const updated = localMutate({
+    const updated = (await localMutate({
       table: 'purchase_requisitions',
       operation: 'UPDATE',
       data: {
         _local_id: req._local_id || req.id,
         status: 'PENDING_APPROVAL',
       },
-    });
+    }));
 
-    return this.getRequisitionById(requisitionId, organizationId)!;
+    return (await this.getRequisitionById(requisitionId, organizationId))!;
   }
 
   /**
    * Approve a requisition with threshold verification
    */
-  static approveRequisition(params: {
+  static async approveRequisition(params: {
     requisitionId: string;
     organizationId: string;
     approvedBy: string;
     userRole: string; // e.g., 'STORE_MANAGER', 'REGIONAL_MANAGER', 'HQ_PROCUREMENT', 'OWNER', 'ADMIN'
-  }): PurchaseRequisition {
+  }): Promise<PurchaseRequisition> {
     const { requisitionId, organizationId, approvedBy, userRole } = params;
-    const req = this.getRequisitionById(requisitionId, organizationId);
+    const req = (await this.getRequisitionById(requisitionId, organizationId));
     if (!req) throw new Error('Requisition not found');
     if (req.status !== 'PENDING_APPROVAL' && req.status !== 'DRAFT') {
       throw new Error(`Cannot approve requisition in status: ${req.status}`);
@@ -205,7 +214,7 @@ export class PurchaseRequisitionService {
 
     // Calculate total estimated value
     const totalEstPaise = (req.items || []).reduce((acc, item) => acc + (item.estimated_cost_paise || 0), 0);
-    const requiredRole = ProcurementPolicyService.getRequiredApprovalRole(organizationId, totalEstPaise);
+    const requiredRole = (await ProcurementPolicyService.getRequiredApprovalRole(organizationId, totalEstPaise));
 
     // Verify role authority
     const roleWeight: Record<string, number> = {
@@ -226,7 +235,7 @@ export class PurchaseRequisitionService {
     }
 
     const nowIso = new Date().toISOString();
-    localMutate({
+    (await localMutate({
       table: 'purchase_requisitions',
       operation: 'UPDATE',
       data: {
@@ -235,22 +244,22 @@ export class PurchaseRequisitionService {
         approved_by: approvedBy,
         approved_at: nowIso,
       },
-    });
+    }));
 
-    return this.getRequisitionById(requisitionId, organizationId)!;
+    return (await this.getRequisitionById(requisitionId, organizationId))!;
   }
 
   /**
    * Reject a requisition with reason
    */
-  static rejectRequisition(params: {
+  static async rejectRequisition(params: {
     requisitionId: string;
     organizationId: string;
     rejectedBy: string;
     rejectionReason: string;
-  }): PurchaseRequisition {
+  }): Promise<PurchaseRequisition> {
     const { requisitionId, organizationId, rejectedBy, rejectionReason } = params;
-    const req = this.getRequisitionById(requisitionId, organizationId);
+    const req = (await this.getRequisitionById(requisitionId, organizationId));
     if (!req) throw new Error('Requisition not found');
 
     if (!rejectionReason || !rejectionReason.trim()) {
@@ -258,7 +267,7 @@ export class PurchaseRequisitionService {
     }
 
     const nowIso = new Date().toISOString();
-    localMutate({
+    (await localMutate({
       table: 'purchase_requisitions',
       operation: 'UPDATE',
       data: {
@@ -268,21 +277,21 @@ export class PurchaseRequisitionService {
         rejected_at: nowIso,
         rejection_reason: rejectionReason,
       },
-    });
+    }));
 
-    return this.getRequisitionById(requisitionId, organizationId)!;
+    return (await this.getRequisitionById(requisitionId, organizationId))!;
   }
 
   /**
    * Consolidate multi-store demand into a central warehouse requisition
    */
-  static consolidateRequisitions(params: {
+  static async consolidateRequisitions(params: {
     organizationId: string;
     warehouseId: string;
     sourceRequisitionIds: string[];
     requestedBy: string;
     notes?: string;
-  }): PurchaseRequisition {
+  }): Promise<PurchaseRequisition> {
     const { organizationId, warehouseId, sourceRequisitionIds, requestedBy, notes } = params;
     if (!sourceRequisitionIds || sourceRequisitionIds.length === 0) {
       throw new Error('Must specify source requisitions to consolidate');
@@ -297,7 +306,7 @@ export class PurchaseRequisitionService {
     }>();
 
     for (const reqId of sourceRequisitionIds) {
-      const req = this.getRequisitionById(reqId, organizationId);
+      const req = (await this.getRequisitionById(reqId, organizationId));
       if (!req) continue;
 
       for (const it of req.items || []) {
@@ -327,7 +336,7 @@ export class PurchaseRequisitionService {
       sourceReference: entry.sourceRefs.join('; '),
     }));
 
-    return this.createRequisition({
+    return (await this.createRequisition({
       organizationId,
       warehouseId,
       source: 'WAREHOUSE_REPLENISHMENT',
@@ -335,23 +344,23 @@ export class PurchaseRequisitionService {
       requestedBy,
       notes: notes || `Consolidation of ${sourceRequisitionIds.length} store requisitions`,
       items: consolidatedItems,
-    });
+    }));
   }
 
   /**
    * Fetch requisition with items & medicine names
    */
-  static getRequisitionById(id: string, organizationId: string): PurchaseRequisition | null {
-    const row: any = localDb
+  static async getRequisitionById(id: string, organizationId: string): Promise<PurchaseRequisition | null> {
+    const row: any = (await localDb
       .prepare(
         `SELECT * FROM purchase_requisitions
          WHERE (id = ? OR _local_id = ?) AND (organization_id = ?) AND _deleted = 0`
       )
-      .get(id, id, organizationId);
+      .get(id, id, organizationId));
 
     if (!row) return null;
 
-    const items: any[] = localDb
+    const items: any[] = (await localDb
       .prepare(
         `SELECT pri.*, m.name as medicine_name, s.name as preferred_supplier_name
          FROM purchase_requisition_items pri
@@ -359,7 +368,7 @@ export class PurchaseRequisitionService {
          LEFT JOIN suppliers s ON s.id = pri.preferred_supplier_id OR s._local_id = pri.preferred_supplier_id
          WHERE (pri.requisition_id = ? OR pri.requisition_id = ?) AND pri._deleted = 0`
       )
-      .all(row.id, row._local_id || row.id);
+      .all(row.id, row._local_id || row.id));
 
     return {
       ...row,
@@ -370,7 +379,7 @@ export class PurchaseRequisitionService {
   /**
    * List requisitions with filtering
    */
-  static listRequisitions(params: {
+  static async listRequisitions(params: {
     organizationId: string;
     storeId?: string | null;
     warehouseId?: string | null;
@@ -378,7 +387,7 @@ export class PurchaseRequisitionService {
     source?: RequisitionSource;
     limit?: number;
     offset?: number;
-  }): { data: PurchaseRequisition[]; total: number } {
+  }): Promise<{ data: PurchaseRequisition[]; total: number }> {
     const { organizationId, storeId, warehouseId, status, source, limit = 50, offset = 0 } = params;
 
     let query = `SELECT * FROM purchase_requisitions WHERE (organization_id = ?) AND _deleted = 0`;
@@ -401,22 +410,22 @@ export class PurchaseRequisitionService {
       values.push(source);
     }
 
-    const countRow: any = localDb.prepare(`SELECT COUNT(*) as total FROM (${query})`).get(...values);
+    const countRow: any = (await localDb.prepare(`SELECT COUNT(*) as total FROM (${query})`).get(...values));
     const total = Number(countRow?.total || 0);
 
     query += ` ORDER BY created_at DESC LIMIT ? OFFSET ?`;
     values.push(limit, offset);
 
-    const rows: any[] = localDb.prepare(query).all(...values);
+    const rows: any[] = (await localDb.prepare(query).all(...values));
 
-    const data = rows.map(r => this.getRequisitionById(r.id, organizationId)!);
+    const data = (await Promise.all(rows.map(async r => (await this.getRequisitionById(r.id, organizationId))!)));
     return { data, total };
   }
 
   /**
    * Bulk generate purchase requisition draft from Reorder Recommendations
    */
-  static createRequisitionFromRecommendations(params: {
+  static async createRequisitionFromRecommendations(params: {
     organizationId: string;
     storeId?: string | null;
     recommendations: Array<{
@@ -426,7 +435,7 @@ export class PurchaseRequisitionService {
       packSize?: number;
     }>;
     requestedBy: string;
-  }): PurchaseRequisition {
+  }): Promise<PurchaseRequisition> {
     const { organizationId, storeId = null, recommendations, requestedBy } = params;
 
     const items = recommendations.map(rec => ({
@@ -437,7 +446,7 @@ export class PurchaseRequisitionService {
       urgency: 'HIGH' as RequisitionPriority,
     }));
 
-    return this.createRequisition({
+    return (await this.createRequisition({
       organizationId,
       storeId,
       source: 'REORDER_ENGINE',
@@ -445,13 +454,13 @@ export class PurchaseRequisitionService {
       requestedBy,
       notes: `Auto-generated draft from ${recommendations.length} reorder recommendations`,
       items,
-    });
+    }));
   }
 
   /**
    * Generate purchase requisition draft from Shortbook items
    */
-  static createRequisitionFromShortbook(params: {
+  static async createRequisitionFromShortbook(params: {
     organizationId: string;
     storeId?: string | null;
     shortbookItems: Array<{
@@ -461,7 +470,7 @@ export class PurchaseRequisitionService {
       preferredSupplierId?: string | null;
     }>;
     requestedBy: string;
-  }): PurchaseRequisition {
+  }): Promise<PurchaseRequisition> {
     const { organizationId, storeId = null, shortbookItems, requestedBy } = params;
 
     const items = shortbookItems.map(s => ({
@@ -473,7 +482,7 @@ export class PurchaseRequisitionService {
       urgency: 'HIGH' as RequisitionPriority,
     }));
 
-    return this.createRequisition({
+    return (await this.createRequisition({
       organizationId,
       storeId,
       source: 'SHORTBOOK',
@@ -481,6 +490,6 @@ export class PurchaseRequisitionService {
       requestedBy,
       notes: `Requisition generated from ${shortbookItems.length} Shortbook customer demand entries`,
       items,
-    });
+    }));
   }
 }

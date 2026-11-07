@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import api from '../../lib/api';
 
 export const SupplierPayablesView: React.FC = () => {
@@ -9,6 +9,8 @@ export const SupplierPayablesView: React.FC = () => {
   const [isLoading, setIsLoading] = useState<boolean>(true);
   const [isPaymentModalOpen, setIsPaymentModalOpen] = useState<boolean>(false);
 
+  const paymentRequest=useRef(crypto.randomUUID());
+  const [paymentSaving,setPaymentSaving]=useState(false);
   // Payment Form State
   const [paymentAmountRupees, setPaymentAmountRupees] = useState<number>(0);
   const [paymentMode, setPaymentMode] = useState<string>('BANK_TRANSFER');
@@ -63,15 +65,19 @@ export const SupplierPayablesView: React.FC = () => {
       alert('Valid supplier and payment amount required');
       return;
     }
+    if(paymentSaving)return;
+    setPaymentSaving(true);
     try {
       await api.post('/procurement/payments', {
         supplierId: selectedSupplierId,
+        idempotencyKey:paymentRequest.current,
         paymentDate: new Date().toISOString().slice(0, 10),
         paymentMode,
         referenceNumber,
         amountPaise: Math.round(paymentAmountRupees * 100),
         notes,
       });
+      paymentRequest.current=crypto.randomUUID();
       setIsPaymentModalOpen(false);
       setPaymentAmountRupees(0);
       setReferenceNumber('');
@@ -79,8 +85,8 @@ export const SupplierPayablesView: React.FC = () => {
       fetchLedger(selectedSupplierId);
       alert('Payment recorded and allocated successfully!');
     } catch (err: any) {
-      alert(err.response?.data?.error || 'Failed to record payment');
-    }
+      alert(err.response?.data?.error?.message || 'Failed to record payment');
+    } finally {setPaymentSaving(false);}
   };
 
   const formatRupees = (paise: number) => {
@@ -298,6 +304,7 @@ export const SupplierPayablesView: React.FC = () => {
                 Cancel
               </button>
               <button
+                disabled={paymentSaving}
                 onClick={handleRecordPayment}
                 className="px-3 py-1.5 text-xs font-bold rounded bg-success hover:bg-success text-on-primary"
               >

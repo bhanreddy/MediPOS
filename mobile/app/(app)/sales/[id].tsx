@@ -156,7 +156,7 @@ export default function SaleDetailScreen() {
                 <Text style={{ color: theme.colors.success, fontFamily: theme.typography.family.medium }}>-{formatCurrency(sale.discount)}</Text>
              </View>
              <View style={styles.totalRow}>
-                <Text style={{ color: theme.colors.text.secondary }}>GST Total</Text>
+                <Text style={{ color: theme.colors.text.secondary }}>{sale.priceIncludesTax ? 'GST (included)' : 'GST Total'}</Text>
                 <Text style={{ color: theme.colors.text.primary, fontFamily: theme.typography.family.medium }}>{formatCurrency(sale.gstTotal || 0)}</Text>
              </View>
              <View style={styles.divider} />

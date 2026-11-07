@@ -78,6 +78,8 @@ describe('Task 2 — Enterprise POS Counter Engine V2 Test Suite', () => {
       supervisorUserId, 'Dr. Sarah Supervisor', '9876543211', 'OWNER', 1, supervisorUserId, new Date().toISOString()
     );
 
+    localDb.prepare('UPDATE users SET clinic_id = ? WHERE id IN (?, ?)').run('default-clinic', cashierUserId, supervisorUserId);
+
     localDb.prepare('INSERT OR REPLACE INTO user_organization_access (id, user_id, organization_id, role, is_active, _local_id, _updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)').run(
       'uoa-1', cashierUserId, orgId, 'CASHIER', 1, 'uoa-1', new Date().toISOString()
     );
@@ -173,13 +175,13 @@ describe('Task 2 — Enterprise POS Counter Engine V2 Test Suite', () => {
   // 1. POS SESSION & CONTEXT RESOLUTION
   // ──────────────────────────────────────────────────────────────────────────
   describe('1. POS Session Context Resolution', () => {
-    it('Scenario 1: resolves cashier user, store, counter, and terminal context accurately', () => {
-      const session = POSSessionService.resolveSession({
+    it('Scenario 1: resolves cashier user, store, counter, and terminal context accurately', async () => {
+      const session = (await POSSessionService.resolveSession({
         userId: cashierUserId,
         requestedStoreId: storeAId,
         requestedCounterId: counterAId,
         requestedTerminalId: terminalAId,
-      });
+      }));
 
       expect(session.userId).toBe(cashierUserId);
       expect(session.organizationId).toBe(orgId);
@@ -189,13 +191,13 @@ describe('Task 2 — Enterprise POS Counter Engine V2 Test Suite', () => {
       expect(session.permissions.canPark).toBe(true);
     });
 
-    it('Scenario 2: rejects cross-store spoofing by unauthorized cashiers', () => {
-      expect(() => {
-        POSSessionService.resolveSession({
+    it('Scenario 2: rejects cross-store spoofing by unauthorized cashiers', async () => {
+      await expect((async () => {
+        (await POSSessionService.resolveSession({
           userId: cashierUserId,
           requestedStoreId: storeBId, // Cashier is only assigned to storeAId
-        });
-      }).toThrow('Cross-store access denied');
+        }));
+      })()).rejects.toThrow('Cross-store access denied');
     });
 
     it('Scenario 3: GET /api/pos/session endpoint returns complete session JSON', async () => {
@@ -216,53 +218,53 @@ describe('Task 2 — Enterprise POS Counter Engine V2 Test Suite', () => {
   // 2. UNIFIED PRODUCT SEARCH & MULTI-BARCODE ENGINE
   // ──────────────────────────────────────────────────────────────────────────
   describe('2. Unified Product Search & Barcodes', () => {
-    it('Scenario 4: finds medicine by primary barcode', () => {
-      const result = POSSearchService.search({
+    it('Scenario 4: finds medicine by primary barcode', async () => {
+      const result = (await POSSearchService.search({
         barcode: '8901234567890',
         organizationId: orgId,
         storeId: storeAId,
-      });
+      }));
       expect(result.results.length).toBeGreaterThan(0);
       expect(result.results[0].name).toContain('Paracetamol');
       expect(result.results[0].matched_barcode?.barcode).toBe('8901234567890');
     });
 
-    it('Scenario 5: finds medicine by alternate pack barcode with conversion factor', () => {
-      const result = POSSearchService.search({
+    it('Scenario 5: finds medicine by alternate pack barcode with conversion factor', async () => {
+      const result = (await POSSearchService.search({
         barcode: '8901111111111',
         organizationId: orgId,
         storeId: storeAId,
-      });
+      }));
       expect(result.results.length).toBeGreaterThan(0);
       expect(result.results[0].matched_barcode?.unit_type).toBe('BOX');
       expect(result.results[0].matched_barcode?.conversion_factor).toBe(100.0);
     });
 
-    it('Scenario 6: finds medicine by exact name and generic composition', () => {
-      const result = POSSearchService.search({
+    it('Scenario 6: finds medicine by exact name and generic composition', async () => {
+      const result = (await POSSearchService.search({
         query: 'Paracetamol',
         organizationId: orgId,
         storeId: storeAId,
-      });
+      }));
       expect(result.results.some(r => r.name.includes('Paracetamol'))).toBe(true);
     });
 
-    it('Scenario 7: typo-tolerant search matches misspelled terms (e.g. "paracetmol")', () => {
-      const result = POSSearchService.search({
+    it('Scenario 7: typo-tolerant search matches misspelled terms (e.g. "paracetmol")', async () => {
+      const result = (await POSSearchService.search({
         query: 'paracetmol',
         organizationId: orgId,
         storeId: storeAId,
-      });
+      }));
       expect(result.results.length).toBeGreaterThan(0);
       expect(result.results.some(r => r.name.includes('Paracetamol'))).toBe(true);
     });
 
-    it('Scenario 8: returns generic substitutes for queried medication', () => {
-      const result = POSSearchService.search({
+    it('Scenario 8: returns generic substitutes for queried medication', async () => {
+      const result = (await POSSearchService.search({
         query: 'Calpol',
         organizationId: orgId,
         storeId: storeAId,
-      });
+      }));
       expect(result.results.length).toBeGreaterThan(0);
       expect(result.substitutes.length).toBeGreaterThan(0);
       expect(result.substitutes.some(s => s.name.includes('Dolo'))).toBe(true);
@@ -286,27 +288,27 @@ describe('Task 2 — Enterprise POS Counter Engine V2 Test Suite', () => {
   // 3. FEFO MULTI-BATCH ALLOCATION & EXPIRY SAFETY
   // ──────────────────────────────────────────────────────────────────────────
   describe('3. FEFO Multi-Batch Allocation Engine', () => {
-    it('Scenario 10: automatically selects earliest non-expired batch first', () => {
-      const plan = FEFOEngine.planAllocations({
+    it('Scenario 10: automatically selects earliest non-expired batch first', async () => {
+      const plan = (await FEFOEngine.planAllocations({
         medicineId: paracetamolMedId,
         storeId: storeAId,
         organizationId: orgId,
         requestedQuantity: 3,
-      });
+      }));
 
       expect(plan.allocations.length).toBe(1);
       expect(plan.allocations[0].batchNumber).toBe('B-EARLY-26');
       expect(plan.allocations[0].allocatedQuantity).toBe(3);
     });
 
-    it('Scenario 11: splits quantity across multiple batches when requested qty exceeds earliest batch stock', () => {
+    it('Scenario 11: splits quantity across multiple batches when requested qty exceeds earliest batch stock', async () => {
       // B-EARLY-26 has 5 units, B-LATE-27 has 20 units. Requesting 8 units:
-      const plan = FEFOEngine.planAllocations({
+      const plan = (await FEFOEngine.planAllocations({
         medicineId: paracetamolMedId,
         storeId: storeAId,
         organizationId: orgId,
         requestedQuantity: 8,
-      });
+      }));
 
       expect(plan.allocations.length).toBe(2);
       expect(plan.allocations[0].batchNumber).toBe('B-EARLY-26');
@@ -315,37 +317,37 @@ describe('Task 2 — Enterprise POS Counter Engine V2 Test Suite', () => {
       expect(plan.allocations[1].allocatedQuantity).toBe(3);
     });
 
-    it('Scenario 12: strictly ignores expired batches (B-EXPIRED-24) from automatic FEFO plan', () => {
-      const plan = FEFOEngine.planAllocations({
+    it('Scenario 12: strictly ignores expired batches (B-EXPIRED-24) from automatic FEFO plan', async () => {
+      const plan = (await FEFOEngine.planAllocations({
         medicineId: paracetamolMedId,
         storeId: storeAId,
         organizationId: orgId,
         requestedQuantity: 25, // Total active: 5 + 20 = 25
-      });
+      }));
 
       expect(plan.allocations.every(a => a.batchNumber !== 'B-EXPIRED-24')).toBe(true);
     });
 
-    it('Scenario 13: strictly ignores disposed batches (B-DISPOSED)', () => {
-      const plan = FEFOEngine.planAllocations({
+    it('Scenario 13: strictly ignores disposed batches (B-DISPOSED)', async () => {
+      const plan = (await FEFOEngine.planAllocations({
         medicineId: paracetamolMedId,
         storeId: storeAId,
         organizationId: orgId,
         requestedQuantity: 25,
-      });
+      }));
 
       expect(plan.allocations.every(a => a.batchNumber !== 'B-DISPOSED')).toBe(true);
     });
 
-    it('Scenario 14: throws INSUFFICIENT_STOCK if requested quantity exceeds total non-expired stock', () => {
-      expect(() => {
-        FEFOEngine.planAllocations({
+    it('Scenario 14: throws INSUFFICIENT_STOCK if requested quantity exceeds total non-expired stock', async () => {
+      await expect((async () => {
+        (await FEFOEngine.planAllocations({
           medicineId: paracetamolMedId,
           storeId: storeAId,
           organizationId: orgId,
           requestedQuantity: 100,
-        });
-      }).toThrow('Insufficient non-expired stock');
+        }));
+      })()).rejects.toThrow('Insufficient non-expired stock');
     });
 
     it('Scenario 15: correctly tags near-expiry warning thresholds', () => {
@@ -360,14 +362,14 @@ describe('Task 2 — Enterprise POS Counter Engine V2 Test Suite', () => {
   // 4. PRICING & SERVER-SIDE CART QUOTES
   // ──────────────────────────────────────────────────────────────────────────
   describe('4. Pricing Boundary & Cart Quotes', () => {
-    it('Scenario 16: computes line item prices with GST and discount using Money engine', () => {
-      const price = PricingService.resolvePrice({
+    it('Scenario 16: computes line item prices with GST and discount using Money engine', async () => {
+      const price = (await PricingService.resolvePrice({
         organizationId: orgId,
         storeId: storeAId,
         medicineId: paracetamolMedId,
         quantity: 2,
         requestedDiscountPct: 10,
-      });
+      }));
 
       expect(price.mrp).toBe(30.0);
       expect(price.discountPct).toBe(10);
@@ -377,14 +379,14 @@ describe('Task 2 — Enterprise POS Counter Engine V2 Test Suite', () => {
       expect(price.requiresSupervisorApproval).toBe(false);
     });
 
-    it('Scenario 17: flags high discounts (>15%) for mandatory supervisor authorization', () => {
-      const price = PricingService.resolvePrice({
+    it('Scenario 17: flags high discounts (>15%) for mandatory supervisor authorization', async () => {
+      const price = (await PricingService.resolvePrice({
         organizationId: orgId,
         storeId: storeAId,
         medicineId: paracetamolMedId,
         quantity: 1,
         requestedDiscountPct: 20,
-      });
+      }));
 
       expect(price.requiresSupervisorApproval).toBe(true);
       expect(price.approvalReason).toContain('exceeds standard authorization threshold');
@@ -477,14 +479,14 @@ describe('Task 2 — Enterprise POS Counter Engine V2 Test Suite', () => {
       expect(res.status).toBe(403);
     });
 
-    it('Scenario 23: authorizes override with manager PIN and creates audit record', async () => {
+    it('Scenario 23: authorizes override with an authenticated supervisor and creates audit record', async () => {
       const res = await request(app)
         .post('/api/pos/authorize')
-        .set('Authorization', `Bearer ${cashierToken}`)
+        .set('Authorization', `Bearer ${supervisorToken}`)
         .set('x-store-id', storeAId)
         .send({
           action_type: 'HIGH_DISCOUNT',
-          supervisor_pin: '9999', // Default test manager PIN
+          supervisor_user_id: supervisorUserId,
           reason: 'Store manager approved 25% promo discount',
           new_value: '25%',
         });

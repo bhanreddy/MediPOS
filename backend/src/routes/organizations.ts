@@ -1,8 +1,9 @@
+import { listAccessibleCloudStores } from '../services/cloudStoreContext';
 import { Router, type Request } from 'express';
 import { AppError } from '../lib/appError';
 import { requireAuth } from '../middleware/auth';
 import { requireRole } from '../middleware/rbac';
-import { localDb } from '../local-db';
+import { businessDb as localDb } from '../lib/businessDb';
 import { v4 as uuidv4 } from 'uuid';
 import { InventoryReconciliationService } from '../services/inventoryReconciliation';
 import { OrganizationMigrationService } from '../services/organizationMigration';
@@ -10,30 +11,30 @@ import { OrganizationMigrationService } from '../services/organizationMigration'
 export const organizationsRouter = Router();
 organizationsRouter.use(requireAuth);
 
-function currentOrganization(req: Request): string | null {
-  const clinic = localDb.prepare('SELECT organization_id FROM clinics WHERE (id = ? OR _local_id = ?) AND _deleted = 0')
-    .get(req.user!.clinic_id, req.user!.clinic_id) as { organization_id?: string } | undefined;
+async function currentOrganization(req: Request): Promise<string | null> {
+  const clinic = (await localDb.prepare('SELECT organization_id FROM clinics WHERE (id = ? OR _local_id = ?) AND _deleted = 0')
+    .get(req.user!.clinic_id, req.user!.clinic_id)) as { organization_id?: string } | undefined;
   return clinic?.organization_id || req.user?.organization_id || null;
 }
-function hasOrganizationAccess(req: Request, orgId: string): boolean {
+async function hasOrganizationAccess(req: Request, orgId: string): Promise<boolean> {
   if (req.user!.role === 'SUPER_ADMIN' && !req.user!.isImpersonating) return true;
-  return currentOrganization(req) === orgId || !!localDb.prepare(
+  return (await currentOrganization(req)) === orgId || !!(await localDb.prepare(
     'SELECT id FROM user_organization_access WHERE user_id = ? AND organization_id = ? AND is_active = 1 AND _deleted = 0'
-  ).get(req.user!.id, orgId);
+  ).get(req.user!.id, orgId));
 }
 // Resource IDs are untrusted, even when the caller is an OWNER of another shop.
-organizationsRouter.param('id', (req, _res, next, id) => {
+organizationsRouter.param('id', async (req, _res, next, id) => {
   try {
     const storePath = req.path.startsWith('/stores/');
-    const resource = localDb.prepare(storePath
+    const resource = (await localDb.prepare(storePath
       ? 'SELECT id, organization_id FROM stores WHERE (id = ? OR _local_id = ?) AND _deleted = 0'
       : 'SELECT id, id AS organization_id FROM organizations WHERE (id = ? OR _local_id = ?) AND _deleted = 0'
-    ).get(id, id) as { id: string; organization_id: string } | undefined;
-    if (!resource || !hasOrganizationAccess(req, resource.organization_id)) throw new AppError(404, storePath ? 'Store not found' : 'Organization not found');
+    ).get(id, id)) as { id: string; organization_id: string } | undefined;
+    if (!resource || !(await hasOrganizationAccess(req, resource.organization_id))) throw new AppError(404, storePath ? 'Store not found' : 'Organization not found');
     req.params.id = resource.id;
     for (const [field, table] of [['region_id', 'regions'], ['parent_region_id', 'regions'], ['counter_id', 'counters']] as const) {
-      if (req.body?.[field] && !localDb.prepare(`SELECT id FROM ${table} WHERE id = ? AND organization_id = ? AND _deleted = 0`)
-        .get(req.body[field], resource.organization_id)) throw new AppError(400, `${field} does not belong to this organization`);
+      if (req.body?.[field] && !(await localDb.prepare(`SELECT id FROM ${table} WHERE id = ? AND organization_id = ? AND _deleted = 0`)
+        .get(req.body[field], resource.organization_id))) throw new AppError(400, `${field} does not belong to this organization`);
     }
     next();
   } catch (error) { next(error); }
@@ -43,11 +44,11 @@ organizationsRouter.param('id', (req, _res, next, id) => {
 organizationsRouter.get('/', requireAuth, async (req, res, next) => {
   try {
     const orgs = req.user!.role === 'SUPER_ADMIN' && !req.user!.isImpersonating
-      ? localDb.prepare('SELECT * FROM organizations WHERE _deleted = 0').all()
-      : localDb.prepare(`SELECT o.* FROM organizations o WHERE o._deleted = 0 AND
+      ? (await localDb.prepare('SELECT * FROM organizations WHERE _deleted = 0').all())
+      : (await localDb.prepare(`SELECT o.* FROM organizations o WHERE o._deleted = 0 AND
           (o.id = ? OR EXISTS (SELECT 1 FROM user_organization_access a
             WHERE a.organization_id = o.id AND a.user_id = ? AND a.is_active = 1 AND a._deleted = 0))`)
-        .all(currentOrganization(req), req.user!.id);
+        .all((await currentOrganization(req)), req.user!.id));
     res.json({ data: orgs });
   } catch (err) {
     next(err);
@@ -80,7 +81,7 @@ organizationsRouter.post('/', requireAuth, requireRole('SUPER_ADMIN', 'OWNER'), 
     const id = uuidv4();
     const now = new Date().toISOString();
 
-    localDb
+    (await localDb
       .prepare(
         `INSERT INTO organizations (
            id, _local_id, legal_name, display_name, code, gstin, pan, registered_address, billing_address,
@@ -107,9 +108,9 @@ organizationsRouter.post('/', requireAuth, requireRole('SUPER_ADMIN', 'OWNER'), 
         now,
         now,
         now
-      );
+      ));
 
-    const created = localDb.prepare('SELECT * FROM organizations WHERE id = ?').get(id);
+    const created = (await localDb.prepare('SELECT * FROM organizations WHERE id = ?').get(id));
     res.status(201).json({ data: created });
   } catch (err) {
     next(err);
@@ -120,9 +121,14 @@ organizationsRouter.post('/', requireAuth, requireRole('SUPER_ADMIN', 'OWNER'), 
 organizationsRouter.get('/:id/stores', requireAuth, async (req, res, next) => {
   try {
     const orgId = req.params.id;
-    const stores = localDb
+    if (process.env.DATABASE_URL && !['OWNER','SUPER_ADMIN'].includes(req.user!.role)) {
+      const actor = req.user!;
+      const stores = await listAccessibleCloudStores(actor.clinic_id!, {userId:actor.id,role:actor.role});
+      return void res.json({ data: stores.filter(store => store.organization_id === orgId) });
+    }
+    const stores = (await localDb
       .prepare('SELECT * FROM stores WHERE (organization_id = ? OR organization_id IN (SELECT id FROM organizations WHERE _local_id = ?)) AND _deleted = 0')
-      .all(orgId, orgId);
+      .all(orgId, orgId));
     res.json({ data: stores });
   } catch (err) {
     next(err);
@@ -160,7 +166,7 @@ organizationsRouter.post('/:id/stores', requireAuth, requireRole('SUPER_ADMIN', 
     const id = uuidv4();
     const now = new Date().toISOString();
 
-    localDb
+    (await localDb
       .prepare(
         `INSERT INTO stores (
            id, _local_id, organization_id, region_id, store_code, name, display_name,
@@ -193,9 +199,9 @@ organizationsRouter.post('/:id/stores', requireAuth, requireRole('SUPER_ADMIN', 
         now,
         now,
         now
-      );
+      ));
 
-    const created = localDb.prepare('SELECT * FROM stores WHERE id = ?').get(id);
+    const created = (await localDb.prepare('SELECT * FROM stores WHERE id = ?').get(id));
     res.status(201).json({ data: created });
   } catch (err) {
     next(err);
@@ -206,7 +212,7 @@ organizationsRouter.post('/:id/stores', requireAuth, requireRole('SUPER_ADMIN', 
 organizationsRouter.get('/:id/regions', requireAuth, async (req, res, next) => {
   try {
     const orgId = req.params.id;
-    const regions = localDb.prepare('SELECT * FROM regions WHERE organization_id = ? AND _deleted = 0').all(orgId);
+    const regions = (await localDb.prepare('SELECT * FROM regions WHERE organization_id = ? AND _deleted = 0').all(orgId));
     res.json({ data: regions });
   } catch (err) {
     next(err);
@@ -225,16 +231,16 @@ organizationsRouter.post('/:id/regions', requireAuth, requireRole('SUPER_ADMIN',
     const id = uuidv4();
     const now = new Date().toISOString();
 
-    localDb
+    (await localDb
       .prepare(
         `INSERT INTO regions (
            id, _local_id, organization_id, code, name, parent_region_id, manager_user_id,
            status, created_at, updated_at, _updated_at
          ) VALUES (?, ?, ?, ?, ?, ?, ?, 'active', ?, ?, ?)`
       )
-      .run(id, id, orgId, code, name, parent_region_id || null, manager_user_id || null, now, now, now);
+      .run(id, id, orgId, code, name, parent_region_id || null, manager_user_id || null, now, now, now));
 
-    const created = localDb.prepare('SELECT * FROM regions WHERE id = ?').get(id);
+    const created = (await localDb.prepare('SELECT * FROM regions WHERE id = ?').get(id));
     res.status(201).json({ data: created });
   } catch (err) {
     next(err);
@@ -245,7 +251,7 @@ organizationsRouter.post('/:id/regions', requireAuth, requireRole('SUPER_ADMIN',
 organizationsRouter.get('/:id/warehouses', requireAuth, async (req, res, next) => {
   try {
     const orgId = req.params.id;
-    const warehouses = localDb.prepare('SELECT * FROM warehouses WHERE organization_id = ? AND _deleted = 0').all(orgId);
+    const warehouses = (await localDb.prepare('SELECT * FROM warehouses WHERE organization_id = ? AND _deleted = 0').all(orgId));
     res.json({ data: warehouses });
   } catch (err) {
     next(err);
@@ -264,7 +270,7 @@ organizationsRouter.post('/:id/warehouses', requireAuth, requireRole('SUPER_ADMI
     const id = uuidv4();
     const now = new Date().toISOString();
 
-    localDb
+    (await localDb
       .prepare(
         `INSERT INTO warehouses (
            id, _local_id, organization_id, warehouse_code, name, address, gstin,
@@ -284,9 +290,9 @@ organizationsRouter.post('/:id/warehouses', requireAuth, requireRole('SUPER_ADMI
         now,
         now,
         now
-      );
+      ));
 
-    const created = localDb.prepare('SELECT * FROM warehouses WHERE id = ?').get(id);
+    const created = (await localDb.prepare('SELECT * FROM warehouses WHERE id = ?').get(id));
     res.status(201).json({ data: created });
   } catch (err) {
     next(err);
@@ -297,7 +303,7 @@ organizationsRouter.post('/:id/warehouses', requireAuth, requireRole('SUPER_ADMI
 organizationsRouter.get('/stores/:id/counters', requireAuth, async (req, res, next) => {
   try {
     const storeId = req.params.id;
-    const counters = localDb.prepare('SELECT * FROM counters WHERE store_id = ? AND _deleted = 0').all(storeId);
+    const counters = (await localDb.prepare('SELECT * FROM counters WHERE store_id = ? AND _deleted = 0').all(storeId));
     res.json({ data: counters });
   } catch (err) {
     next(err);
@@ -313,21 +319,22 @@ organizationsRouter.post('/stores/:id/counters', requireAuth, requireRole('SUPER
       return res.status(400).json({ error: 'counter_code and name are required' });
     }
 
-    const store: any = localDb.prepare('SELECT organization_id FROM stores WHERE id = ? OR _local_id = ?').get(storeId, storeId);
-    const orgId = store?.organization_id || 'default-org';
+    const store: any = (await localDb.prepare('SELECT organization_id FROM stores WHERE id = ? OR _local_id = ?').get(storeId, storeId));
+    if (!store?.organization_id) throw new AppError(404, 'Store not found');
+    const orgId = store.organization_id;
     const id = uuidv4();
     const now = new Date().toISOString();
 
-    localDb
+    (await localDb
       .prepare(
         `INSERT INTO counters (
            id, _local_id, organization_id, store_id, counter_code, name, status,
            created_at, updated_at, _updated_at
          ) VALUES (?, ?, ?, ?, ?, ?, 'active', ?, ?, ?)`
       )
-      .run(id, id, orgId, storeId, counter_code, name, now, now, now);
+      .run(id, id, orgId, storeId, counter_code, name, now, now, now));
 
-    const created = localDb.prepare('SELECT * FROM counters WHERE id = ?').get(id);
+    const created = (await localDb.prepare('SELECT * FROM counters WHERE id = ?').get(id));
     res.status(201).json({ data: created });
   } catch (err) {
     next(err);
@@ -338,7 +345,7 @@ organizationsRouter.post('/stores/:id/counters', requireAuth, requireRole('SUPER
 organizationsRouter.get('/stores/:id/terminals', requireAuth, async (req, res, next) => {
   try {
     const storeId = req.params.id;
-    const terminals = localDb.prepare('SELECT * FROM terminals WHERE store_id = ? AND _deleted = 0').all(storeId);
+    const terminals = (await localDb.prepare('SELECT * FROM terminals WHERE store_id = ? AND _deleted = 0').all(storeId));
     res.json({ data: terminals });
   } catch (err) {
     next(err);
@@ -354,12 +361,13 @@ organizationsRouter.post('/stores/:id/terminals', requireAuth, async (req, res, 
       return res.status(400).json({ error: 'device_uuid, terminal_code, and terminal_name are required' });
     }
 
-    const store: any = localDb.prepare('SELECT organization_id FROM stores WHERE id = ? OR _local_id = ?').get(storeId, storeId);
-    const orgId = store?.organization_id || 'default-org';
+    const store: any = (await localDb.prepare('SELECT organization_id FROM stores WHERE id = ? OR _local_id = ?').get(storeId, storeId));
+    if (!store?.organization_id) throw new AppError(404, 'Store not found');
+    const orgId = store.organization_id;
     const id = uuidv4();
     const now = new Date().toISOString();
 
-    localDb
+    (await localDb
       .prepare(
         `INSERT INTO terminals (
            id, _local_id, organization_id, store_id, counter_id, device_uuid,
@@ -382,9 +390,9 @@ organizationsRouter.post('/stores/:id/terminals', requireAuth, async (req, res, 
         now,
         now,
         now
-      );
+      ));
 
-    const created = localDb.prepare('SELECT * FROM terminals WHERE id = ?').get(id);
+    const created = (await localDb.prepare('SELECT * FROM terminals WHERE id = ?').get(id));
     res.status(201).json({ data: created });
   } catch (err) {
     next(err);
@@ -400,27 +408,27 @@ organizationsRouter.post('/stores/:id/users', requireAuth, requireRole('SUPER_AD
       return res.status(400).json({ error: 'user_id is required' });
     }
 
-    const store: any = localDb.prepare('SELECT organization_id FROM stores WHERE id = ? OR _local_id = ?').get(storeId, storeId);
+    const store: any = (await localDb.prepare('SELECT organization_id FROM stores WHERE id = ? OR _local_id = ?').get(storeId, storeId));
     const orgId = store.organization_id;
     if (!['STORE_MANAGER', 'PHARMACIST', 'CASHIER', 'DOCTOR', 'STAFF', 'VIEWER'].includes(role)) throw new AppError(400, 'Invalid store role');
-    const member = localDb.prepare(`SELECT u.id FROM users u LEFT JOIN clinics c ON c.id = u.clinic_id
+    const member = (await localDb.prepare(`SELECT u.id FROM users u LEFT JOIN clinics c ON c.id = u.clinic_id
       WHERE u.id = ? AND u._deleted = 0 AND (c.organization_id = ? OR EXISTS (
         SELECT 1 FROM user_organization_access a WHERE a.user_id = u.id AND a.organization_id = ? AND a.is_active = 1 AND a._deleted = 0))`)
-      .get(user_id, orgId, orgId);
+      .get(user_id, orgId, orgId));
     if (!member) throw new AppError(404, 'Organization member not found');
     const id = uuidv4();
     const now = new Date().toISOString();
 
-    localDb
+    (await localDb
       .prepare(
         `INSERT OR REPLACE INTO user_store_access (
            id, _local_id, user_id, organization_id, store_id, counter_id, role,
            is_default, is_active, created_at, updated_at, _updated_at
          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?)`
       )
-      .run(id, id, user_id, orgId, storeId, counter_id, role, is_default ? 1 : 0, now, now, now);
+      .run(id, id, user_id, orgId, storeId, counter_id, role, is_default ? 1 : 0, now, now, now));
 
-    const created = localDb.prepare('SELECT * FROM user_store_access WHERE id = ?').get(id);
+    const created = (await localDb.prepare('SELECT * FROM user_store_access WHERE id = ?').get(id));
     res.status(201).json({ data: created });
   } catch (err) {
     next(err);
@@ -436,14 +444,14 @@ organizationsRouter.get('/inventory/reconciliation', requireAuth, async (req, re
       return res.status(400).json({ error: 'batch_id query parameter is required' });
     }
 
-    const batch = localDb.prepare('SELECT organization_id, clinic_id FROM medicine_batches WHERE (id = ? OR _local_id = ?) AND _deleted = 0')
-      .get(batchId, batchId) as { organization_id: string; clinic_id: string } | undefined;
-    if (!batch || !(batch.clinic_id === req.user!.clinic_id || hasOrganizationAccess(req, batch.organization_id))) throw new AppError(404, 'Batch not found');
+    const batch = (await localDb.prepare('SELECT organization_id, clinic_id FROM medicine_batches WHERE (id = ? OR _local_id = ?) AND _deleted = 0')
+      .get(batchId, batchId)) as { organization_id: string; clinic_id: string } | undefined;
+    if (!batch || !(batch.clinic_id === req.user!.clinic_id || (await hasOrganizationAccess(req, batch.organization_id)))) throw new AppError(404, 'Batch not found');
     if (storeId) {
-      const store = localDb.prepare('SELECT organization_id FROM stores WHERE id = ? AND _deleted = 0').get(storeId) as { organization_id: string } | undefined;
-      if (!store || !hasOrganizationAccess(req, store.organization_id)) throw new AppError(404, 'Store not found');
+      const store = (await localDb.prepare('SELECT organization_id FROM stores WHERE id = ? AND _deleted = 0').get(storeId)) as { organization_id: string } | undefined;
+      if (!store || !(await hasOrganizationAccess(req, store.organization_id))) throw new AppError(404, 'Store not found');
     }
-    const report = InventoryReconciliationService.reconcileBatch({ batchId, storeId });
+    const report = (await InventoryReconciliationService.reconcileBatch({ batchId, storeId }));
     res.json({ data: report });
   } catch (err) {
     next(err);
@@ -457,7 +465,7 @@ organizationsRouter.post('/migrate-tenant', requireAuth, requireRole('SUPER_ADMI
     if (!clinicId) {
       return res.status(400).json({ error: 'clinic_id is required' });
     }
-    const result = OrganizationMigrationService.migrateClinic(clinicId);
+    const result = (await OrganizationMigrationService.migrateClinic(clinicId));
     res.json({ data: result });
   } catch (err) {
     next(err);

@@ -27,17 +27,17 @@ describe('Foundation Hardening & Transaction Integrity (Task 0)', () => {
   });
 
   // ── 1. NORMAL SALE ────────────────────────────────────────────────────────
-  test('1. Normal Sale: item checkout, stock deduction, sale items, and stock ledger movement', () => {
+  test('1. Normal Sale: item checkout, stock deduction, sale items, and stock ledger movement', async () => {
     const medId = uuidv4();
     const batchId = uuidv4();
 
-    localMutate({
+    (await localMutate({
       table: 'medicines',
       operation: 'INSERT',
       data: { id: medId, _local_id: medId, clinic_id: clinicId, name: 'Paracetamol 650mg', gst_rate: 12, is_active: 1 },
-    });
+    }));
 
-    localMutate({
+    (await localMutate({
       table: 'medicine_batches',
       operation: 'INSERT',
       data: {
@@ -53,7 +53,7 @@ describe('Foundation Hardening & Transaction Integrity (Task 0)', () => {
         mrp: 30,
         is_disposed: 0,
       },
-    });
+    }));
 
     // Execute Sale of 10 units
     const qtyToSell = 10;
@@ -61,7 +61,7 @@ describe('Foundation Hardening & Transaction Integrity (Task 0)', () => {
     const grandCalc = Money.calculateGrandTotal({ items: [{ quantity: qtyToSell, unitPrice: 30, gstRate: 12 }] });
 
     const saleId = uuidv4();
-    const sale: any = localMutate({
+    const sale: any = (await localMutate({
       table: 'sales',
       operation: 'INSERT',
       data: {
@@ -79,9 +79,9 @@ describe('Foundation Hardening & Transaction Integrity (Task 0)', () => {
         paid_amount: grandCalc.grandTotal,
         balance_due: 0,
       },
-    });
+    }));
 
-    localMutate({
+    (await localMutate({
       table: 'sale_items',
       operation: 'INSERT',
       data: {
@@ -96,17 +96,17 @@ describe('Foundation Hardening & Transaction Integrity (Task 0)', () => {
         gst_rate: 12,
         total: lineCalc.total,
       },
-    });
+    }));
 
     // Deduct stock
-    const updatedBatch: any = localMutate({
+    const updatedBatch: any = (await localMutate({
       table: 'medicine_batches',
       operation: 'UPDATE',
       data: { _local_id: batchId, quantity_remaining: 100 - qtyToSell },
-    });
+    }));
 
     // Record Stock Ledger
-    localMutate({
+    (await localMutate({
       table: 'stock_ledger',
       operation: 'INSERT',
       data: {
@@ -118,7 +118,7 @@ describe('Foundation Hardening & Transaction Integrity (Task 0)', () => {
         balance_after: 90,
         reference_id: saleId,
       },
-    });
+    }));
 
     expect(updatedBatch.quantity_remaining).toBe(90);
 
@@ -130,17 +130,17 @@ describe('Foundation Hardening & Transaction Integrity (Task 0)', () => {
   });
 
   // ── 2. CONCURRENT SALE (Overselling Prevention) ───────────────────────────
-  test('2. Concurrent Sale: prevents negative stock when stock is depleted', () => {
+  test('2. Concurrent Sale: prevents negative stock when stock is depleted', async () => {
     const medId = uuidv4();
     const batchId = uuidv4();
 
-    localMutate({
+    (await localMutate({
       table: 'medicines',
       operation: 'INSERT',
       data: { id: medId, _local_id: medId, clinic_id: clinicId, name: 'Amoxicillin 500mg', is_active: 1 },
-    });
+    }));
 
-    localMutate({
+    (await localMutate({
       table: 'medicine_batches',
       operation: 'INSERT',
       data: {
@@ -154,18 +154,18 @@ describe('Foundation Hardening & Transaction Integrity (Task 0)', () => {
         purchase_price: 40,
         mrp: 80,
       },
-    });
+    }));
 
     // Terminal 1 requests 5 units
     const batchBefore1 = localDb.prepare('SELECT quantity_remaining FROM medicine_batches WHERE _local_id = ?').get(batchId) as any;
     const req1 = 5;
     expect(batchBefore1.quantity_remaining >= req1).toBe(true);
 
-    localMutate({
+    (await localMutate({
       table: 'medicine_batches',
       operation: 'UPDATE',
       data: { _local_id: batchId, quantity_remaining: batchBefore1.quantity_remaining - req1 },
-    });
+    }));
 
     // Terminal 2 tries to sell 2 units simultaneously
     const batchBefore2 = localDb.prepare('SELECT quantity_remaining FROM medicine_batches WHERE _local_id = ?').get(batchId) as any;
@@ -212,19 +212,19 @@ describe('Foundation Hardening & Transaction Integrity (Task 0)', () => {
   });
 
   // ── 5. RETURNED SALE ──────────────────────────────────────────────────────
-  test('5. Returned Sale: full return restores batch stock and marks return', () => {
+  test('5. Returned Sale: full return restores batch stock and marks return', async () => {
     const medId = uuidv4();
     const batchId = uuidv4();
     const saleId = uuidv4();
     const saleItemId = uuidv4();
 
-    localMutate({
+    (await localMutate({
       table: 'medicines',
       operation: 'INSERT',
       data: { id: medId, _local_id: medId, clinic_id: clinicId, name: 'Cetirizine 10mg', is_active: 1 },
-    });
+    }));
 
-    localMutate({
+    (await localMutate({
       table: 'medicine_batches',
       operation: 'INSERT',
       data: {
@@ -238,15 +238,15 @@ describe('Foundation Hardening & Transaction Integrity (Task 0)', () => {
         purchase_price: 10,
         mrp: 20,
       },
-    });
+    }));
 
-    localMutate({
+    (await localMutate({
       table: 'sales',
       operation: 'INSERT',
       data: { id: saleId, _local_id: saleId, clinic_id: clinicId, invoice_number: 'INV-ORIG-01', grand_total: 100 },
-    });
+    }));
 
-    localMutate({
+    (await localMutate({
       table: 'sale_items',
       operation: 'INSERT',
       data: {
@@ -260,11 +260,11 @@ describe('Foundation Hardening & Transaction Integrity (Task 0)', () => {
         unit_price: 20,
         total: 100,
       },
-    });
+    }));
 
     // Execute Return of 5 units
     const returnSaleId = uuidv4();
-    localMutate({
+    (await localMutate({
       table: 'sales',
       operation: 'INSERT',
       data: {
@@ -277,16 +277,16 @@ describe('Foundation Hardening & Transaction Integrity (Task 0)', () => {
         payment_status: 'returned',
         grand_total: 100,
       },
-    });
+    }));
 
     // Restore stock
-    localMutate({
+    (await localMutate({
       table: 'medicine_batches',
       operation: 'UPDATE',
       data: { _local_id: batchId, quantity_remaining: 15 + 5 },
-    });
+    }));
 
-    localMutate({
+    (await localMutate({
       table: 'stock_ledger',
       operation: 'INSERT',
       data: {
@@ -298,7 +298,7 @@ describe('Foundation Hardening & Transaction Integrity (Task 0)', () => {
         balance_after: 20,
         reference_id: returnSaleId,
       },
-    });
+    }));
 
     const batch = localDb.prepare('SELECT quantity_remaining FROM medicine_batches WHERE _local_id = ?').get(batchId) as any;
     expect(batch.quantity_remaining).toBe(20);
@@ -310,12 +310,12 @@ describe('Foundation Hardening & Transaction Integrity (Task 0)', () => {
   });
 
   // ── 6. PARTIAL RETURN ─────────────────────────────────────────────────────
-  test('6. Partial Return: returning 2 of 5 units recalculates refund and restores 2 units', () => {
+  test('6. Partial Return: returning 2 of 5 units recalculates refund and restores 2 units', async () => {
     const medId = uuidv4();
     const batchId = uuidv4();
     const saleId = uuidv4();
 
-    localMutate({
+    (await localMutate({
       table: 'medicine_batches',
       operation: 'INSERT',
       data: {
@@ -329,7 +329,7 @@ describe('Foundation Hardening & Transaction Integrity (Task 0)', () => {
         purchase_price: 20,
         mrp: 50,
       },
-    });
+    }));
 
     // Original sale had 5 units @ 50 = 250
     // Customer returns 2 units -> refund = 2 * 50 = 100
@@ -340,23 +340,23 @@ describe('Foundation Hardening & Transaction Integrity (Task 0)', () => {
     expect(refundTotal).toBe(100);
 
     // Restore 2 units
-    localMutate({
+    (await localMutate({
       table: 'medicine_batches',
       operation: 'UPDATE',
       data: { _local_id: batchId, quantity_remaining: 8 + returnQty },
-    });
+    }));
 
     const batch = localDb.prepare('SELECT quantity_remaining FROM medicine_batches WHERE _local_id = ?').get(batchId) as any;
     expect(batch.quantity_remaining).toBe(10);
   });
 
   // ── 7. PURCHASE INWARD & BLENDED COST ─────────────────────────────────────
-  test('7. Purchase Inward: creates batch, increments stock, and blends weighted purchase rate', () => {
+  test('7. Purchase Inward: creates batch, increments stock, and blends weighted purchase rate', async () => {
     const medId = uuidv4();
     const batchId = uuidv4();
 
     // Initial batch: 10 units @ 50 INR
-    localMutate({
+    (await localMutate({
       table: 'medicine_batches',
       operation: 'INSERT',
       data: {
@@ -371,7 +371,7 @@ describe('Foundation Hardening & Transaction Integrity (Task 0)', () => {
         purchase_price: 50,
         mrp: 80,
       },
-    });
+    }));
 
     // Inward purchase: 20 units @ 80 INR
     const newQty = 20;
@@ -386,7 +386,7 @@ describe('Foundation Hardening & Transaction Integrity (Task 0)', () => {
     expect(blendedPrice).toBe(70); // (10*50 + 20*80) / 30 = 2100 / 30 = 70.00
 
     const purchaseId = uuidv4();
-    localMutate({
+    (await localMutate({
       table: 'medicine_batches',
       operation: 'UPDATE',
       data: {
@@ -394,9 +394,9 @@ describe('Foundation Hardening & Transaction Integrity (Task 0)', () => {
         quantity_remaining: 10 + newQty,
         purchase_price: blendedPrice,
       },
-    });
+    }));
 
-    localMutate({
+    (await localMutate({
       table: 'stock_ledger',
       operation: 'INSERT',
       data: {
@@ -408,7 +408,7 @@ describe('Foundation Hardening & Transaction Integrity (Task 0)', () => {
         balance_after: 30,
         reference_id: purchaseId,
       },
-    });
+    }));
 
     const batch = localDb.prepare('SELECT quantity_remaining, purchase_price FROM medicine_batches WHERE _local_id = ?').get(batchId) as any;
     expect(batch.quantity_remaining).toBe(30);
@@ -416,10 +416,10 @@ describe('Foundation Hardening & Transaction Integrity (Task 0)', () => {
   });
 
   // ── 8. SUPPLIER BALANCE & PAYABLES ────────────────────────────────────────
-  test('8. Supplier Balance: inward purchases increase payable debt; payments reduce it', () => {
+  test('8. Supplier Balance: inward purchases increase payable debt; payments reduce it', async () => {
     const supplierId = uuidv4();
 
-    localMutate({
+    (await localMutate({
       table: 'suppliers',
       operation: 'INSERT',
       data: {
@@ -429,18 +429,18 @@ describe('Foundation Hardening & Transaction Integrity (Task 0)', () => {
         name: 'Apollo Pharmaceuticals Dist.',
         outstanding_balance: 0,
       },
-    });
+    }));
 
     // Inward purchase of 5,000 INR unpaid
     const billTotal = 5000;
     const supp1 = localDb.prepare('SELECT outstanding_balance FROM suppliers WHERE _local_id = ?').get(supplierId) as any;
     const newBalance = Money.add(supp1.outstanding_balance || 0, billTotal);
 
-    localMutate({
+    (await localMutate({
       table: 'suppliers',
       operation: 'UPDATE',
       data: { _local_id: supplierId, outstanding_balance: newBalance },
-    });
+    }));
 
     let supp = localDb.prepare('SELECT outstanding_balance FROM suppliers WHERE _local_id = ?').get(supplierId) as any;
     expect(supp.outstanding_balance).toBe(5000);
@@ -448,21 +448,21 @@ describe('Foundation Hardening & Transaction Integrity (Task 0)', () => {
     // Partial payment of 2,000 INR
     const payment = 2000;
     const balanceAfterPay = Money.subtract(supp.outstanding_balance, payment);
-    localMutate({
+    (await localMutate({
       table: 'suppliers',
       operation: 'UPDATE',
       data: { _local_id: supplierId, outstanding_balance: balanceAfterPay },
-    });
+    }));
 
     supp = localDb.prepare('SELECT outstanding_balance FROM suppliers WHERE _local_id = ?').get(supplierId) as any;
     expect(supp.outstanding_balance).toBe(3000);
   });
 
   // ── 9. CUSTOMER CREDIT & RECEIVABLES ──────────────────────────────────────
-  test('9. Customer Credit: unpaid credit sales increment balance; payments settle it', () => {
+  test('9. Customer Credit: unpaid credit sales increment balance; payments settle it', async () => {
     const customerId = uuidv4();
 
-    localMutate({
+    (await localMutate({
       table: 'customers',
       operation: 'INSERT',
       data: {
@@ -472,18 +472,18 @@ describe('Foundation Hardening & Transaction Integrity (Task 0)', () => {
         name: 'Sharma Patient',
         outstanding_balance: 0,
       },
-    });
+    }));
 
     // Credit sale of 1,250 INR
     const creditSaleDue = 1250;
     const cust1 = localDb.prepare('SELECT outstanding_balance FROM customers WHERE _local_id = ?').get(customerId) as any;
     const balanceAfterCredit = Money.add(cust1.outstanding_balance || 0, creditSaleDue);
 
-    localMutate({
+    (await localMutate({
       table: 'customers',
       operation: 'UPDATE',
       data: { _local_id: customerId, outstanding_balance: balanceAfterCredit },
-    });
+    }));
 
     let cust = localDb.prepare('SELECT outstanding_balance FROM customers WHERE _local_id = ?').get(customerId) as any;
     expect(cust.outstanding_balance).toBe(1250);
@@ -491,22 +491,22 @@ describe('Foundation Hardening & Transaction Integrity (Task 0)', () => {
     // Customer settles 1,000 INR
     const settledAmount = 1000;
     const remainingBalance = Money.subtract(cust.outstanding_balance, settledAmount);
-    localMutate({
+    (await localMutate({
       table: 'customers',
       operation: 'UPDATE',
       data: { _local_id: customerId, outstanding_balance: remainingBalance },
-    });
+    }));
 
     cust = localDb.prepare('SELECT outstanding_balance FROM customers WHERE _local_id = ?').get(customerId) as any;
     expect(cust.outstanding_balance).toBe(250);
   });
 
   // ── 10. OFFLINE BILL IDEMPOTENCY ──────────────────────────────────────────
-  test('10. Offline Bill Idempotency: repeated sync push with same _local_id does not duplicate sale', () => {
+  test('10. Offline Bill Idempotency: repeated sync push with same _local_id does not duplicate sale', async () => {
     const localBillId = 'offline-uuid-999';
 
     // First push
-    localMutate({
+    (await localMutate({
       table: 'sales',
       operation: 'INSERT',
       data: {
@@ -516,10 +516,10 @@ describe('Foundation Hardening & Transaction Integrity (Task 0)', () => {
         invoice_number: 'OFFLINE-BILL-01',
         grand_total: 450,
       },
-    });
+    }));
 
     // Re-push of same bill (idempotency simulation)
-    localMutate({
+    (await localMutate({
       table: 'sales',
       operation: 'INSERT',
       data: {
@@ -529,7 +529,7 @@ describe('Foundation Hardening & Transaction Integrity (Task 0)', () => {
         invoice_number: 'OFFLINE-BILL-01',
         grand_total: 450,
       },
-    });
+    }));
 
     const matchingSales = localDb.prepare('SELECT * FROM sales WHERE _local_id = ?').all(localBillId);
     expect(matchingSales.length).toBe(1); // INSERT OR REPLACE maintains single entity

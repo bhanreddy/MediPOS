@@ -1,4 +1,5 @@
 import api from '../lib/api';
+import { loadInventoryCatalogue } from './inventoryCatalogue';
 import { RADAR_CONFIG } from '../config/appContent';
 import { AppSettingsService } from './appSettingsService';
 
@@ -89,9 +90,7 @@ export async function buildRadarItemsWithStats(): Promise<{
 }> {
     const { today: todayStr, warning: warningStr } = await attentionWindow();
 
-    // Fetch all medicines with nested medicine_batches from backend
-    const res = await api.get('/inventory/medicines');
-    const medicines: any[] = res.data?.data || res.data || [];
+    const medicines = await loadInventoryCatalogue();
 
     return classifyInventory(medicines, todayStr, warningStr);
 }

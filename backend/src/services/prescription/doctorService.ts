@@ -1,10 +1,10 @@
-import { localDb } from '../../local-db';
+import { businessDb as localDb } from '../../lib/businessDb';
 import { localMutate } from '../../lib/localMutate';
 import { Doctor } from '../../domain/prescriptionTypes';
 import { v4 as uuidv4 } from 'uuid';
 
 export class DoctorService {
-  static createDoctor(params: {
+  static async createDoctor(params: {
     organizationId?: string | null;
     name: string;
     registrationNumber: string;
@@ -13,11 +13,11 @@ export class DoctorService {
     phone?: string;
     clinicHospital?: string;
     address?: string;
-  }): Doctor {
+  }): Promise<Doctor> {
     const id = uuidv4();
     const cleanReg = params.registrationNumber.trim().toUpperCase();
 
-    const record = localMutate({
+    const record = (await localMutate({
       table: 'doctors',
       operation: 'INSERT',
       data: {
@@ -34,19 +34,19 @@ export class DoctorService {
         active: 1,
         created_at: new Date().toISOString(),
       },
-    });
+    }));
 
     return record as Doctor;
   }
 
-  static getDoctorById(id: string): Doctor | null {
-    const doc: any = localDb
+  static async getDoctorById(id: string): Promise<Doctor | null> {
+    const doc: any = (await localDb
       .prepare('SELECT * FROM doctors WHERE (id = ? OR _local_id = ?) AND _deleted = 0')
-      .get(id, id);
+      .get(id, id));
     return doc || null;
   }
 
-  static getDoctors(params: { organizationId?: string | null; query?: string }): Doctor[] {
+  static async getDoctors(params: { organizationId?: string | null; query?: string }): Promise<Doctor[]> {
     const { organizationId, query } = params;
     let sql = 'SELECT * FROM doctors WHERE _deleted = 0 AND active = 1';
     const sqlParams: any[] = [];
@@ -63,27 +63,27 @@ export class DoctorService {
     }
 
     sql += ' ORDER BY name ASC LIMIT 100';
-    return localDb.prepare(sql).all(...sqlParams) as Doctor[];
+    return (await localDb.prepare(sql).all(...sqlParams)) as Doctor[];
   }
 
-  static findOrCreateByRegistration(params: {
+  static async findOrCreateByRegistration(params: {
     organizationId?: string | null;
     name: string;
     registrationNumber: string;
-  }): Doctor {
+  }): Promise<Doctor> {
     const cleanReg = params.registrationNumber.trim().toUpperCase();
-    const existing: any = localDb
+    const existing: any = (await localDb
       .prepare('SELECT * FROM doctors WHERE UPPER(registration_number) = ? AND _deleted = 0 AND ' + (params.organizationId ? 'organization_id = ?' : 'organization_id IS NULL'))
-      .get(cleanReg, ...(params.organizationId ? [params.organizationId] : []));
+      .get(cleanReg, ...(params.organizationId ? [params.organizationId] : [])));
 
     if (existing) {
       return existing as Doctor;
     }
 
-    return this.createDoctor({
+    return (await this.createDoctor({
       organizationId: params.organizationId,
       name: params.name,
       registrationNumber: cleanReg,
-    });
+    }));
   }
 }

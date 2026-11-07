@@ -80,6 +80,7 @@ export interface Inventory extends BaseEntity {
 
 // 6. customers
 export interface Customer extends BaseEntity {
+    gstin?: string | null;
     name: string;
     phone: string;
     email?: string;

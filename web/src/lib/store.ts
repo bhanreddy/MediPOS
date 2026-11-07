@@ -46,6 +46,8 @@ export type PersistedSupabaseSession = {
 };
 
 export type SubscriptionEntitlementCache = {
+  ownerId?: string;
+  clinicId?: string | null;
   /** True after a successful server-side payment verification (or webhook-confirmed active period). */
   entitled: boolean;
   plan?: 'monthly' | 'yearly';
@@ -138,8 +140,10 @@ export async function setPersistedSupabaseSession(
   await writeJson(STORE_KEYS.SUPABASE_SESSION, session);
 }
 
-export async function getSubscriptionCache(): Promise<SubscriptionEntitlementCache | null> {
-  return readJson<SubscriptionEntitlementCache>(STORE_KEYS.SUBSCRIPTION_CACHE);
+export async function getSubscriptionCache(ownerId?: string, clinicId?: string | null): Promise<SubscriptionEntitlementCache | null> {
+  if (!ownerId || !clinicId) return null;
+  const cache = await readJson<SubscriptionEntitlementCache>(STORE_KEYS.SUBSCRIPTION_CACHE);
+  return cache?.ownerId === ownerId && cache.clinicId === clinicId ? cache : null;
 }
 
 export async function setSubscriptionCache(

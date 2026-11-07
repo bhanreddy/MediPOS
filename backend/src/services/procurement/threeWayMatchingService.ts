@@ -1,5 +1,5 @@
 // threeWayMatchingService.ts — Enterprise Three-Way Matching (PO vs GRN vs Invoice) & Variance Engine
-import { localDb } from '../../local-db';
+import { businessDb as localDb } from '../../lib/businessDb';
 import { localMutate } from '../../lib/localMutate';
 import { Money } from '../../lib/money';
 import { v4 as uuidv4 } from 'uuid';
@@ -32,14 +32,14 @@ export class ThreeWayMatchingService {
   /**
    * Evaluates Three-Way Match between PO, GRN, and Supplier Invoice
    */
-  static evaluateThreeWayMatch(params: EvaluateMatchParams): PurchaseMatchResult {
+  static async evaluateThreeWayMatch(params: EvaluateMatchParams): Promise<PurchaseMatchResult> {
     const { organizationId, invoiceId, poId, grnId, invoiceLines } = params;
-    const policy = ProcurementPolicyService.getPolicy(organizationId);
+    const policy = (await ProcurementPolicyService.getPolicy(organizationId));
 
     // Fetch PO items if poId exists
     const poItemMap = new Map<string, any>();
     if (poId) {
-      const poItems: any[] = localDb.prepare('SELECT * FROM purchase_order_items WHERE po_id = ? AND _deleted = 0').all(poId);
+      const poItems: any[] = (await localDb.prepare('SELECT * FROM purchase_order_items WHERE po_id = ? AND _deleted = 0').all(poId));
       for (const p of poItems) {
         poItemMap.set(p.id, p);
         poItemMap.set(p.medicine_id, p);
@@ -49,7 +49,7 @@ export class ThreeWayMatchingService {
     // Fetch GRN items if grnId exists
     const grnItemMap = new Map<string, any>();
     if (grnId) {
-      const grnItems: any[] = localDb.prepare('SELECT * FROM goods_receipt_items WHERE grn_id = ? AND _deleted = 0').all(grnId);
+      const grnItems: any[] = (await localDb.prepare('SELECT * FROM goods_receipt_items WHERE grn_id = ? AND _deleted = 0').all(grnId));
       for (const g of grnItems) {
         grnItemMap.set(g.id, g);
         grnItemMap.set(g.medicine_id, g);
@@ -164,7 +164,7 @@ export class ThreeWayMatchingService {
     }
 
     const matchResultId = uuidv4();
-    const matchRecord = localMutate({
+    const matchRecord = (await localMutate({
       table: 'purchase_match_results',
       operation: 'INSERT',
       data: {
@@ -183,7 +183,7 @@ export class ThreeWayMatchingService {
         is_exception: isException ? 1 : 0,
         match_details_json: JSON.stringify(lineDetails),
       },
-    });
+    }));
 
     return matchRecord as any;
   }
@@ -191,15 +191,15 @@ export class ThreeWayMatchingService {
   /**
    * Approve a match variance exception with supervisor authorization
    */
-  static approveMatchException(params: {
+  static async approveMatchException(params: {
     matchResultId: string;
     organizationId: string;
     approvedBy: string;
     userRole: string;
     reason: string;
-  }): PurchaseMatchResult {
+  }): Promise<PurchaseMatchResult> {
     const { matchResultId, organizationId, approvedBy, userRole, reason } = params;
-    const matchRow: any = localDb.prepare('SELECT * FROM purchase_match_results WHERE id = ? OR _local_id = ?').get(matchResultId, matchResultId);
+    const matchRow: any = (await localDb.prepare('SELECT m.* FROM purchase_match_results m JOIN purchase_invoices i ON i.id = m.invoice_id WHERE (m.id = ? OR m._local_id = ?) AND i.organization_id = ? AND i._deleted = 0 AND m._deleted = 0').get(matchResultId, matchResultId, organizationId));
     if (!matchRow) throw new Error('Match result not found');
 
     if (!reason || !reason.trim()) {
@@ -220,7 +220,7 @@ export class ThreeWayMatchingService {
     }
 
     const nowIso = new Date().toISOString();
-    const updated = localMutate({
+    const updated = (await localMutate({
       table: 'purchase_match_results',
       operation: 'UPDATE',
       data: {
@@ -231,17 +231,17 @@ export class ThreeWayMatchingService {
         exception_approved_at: nowIso,
         exception_reason: reason,
       },
-    });
+    }));
 
     // Also update invoice match status
-    localMutate({
+    (await localMutate({
       table: 'purchase_invoices',
       operation: 'UPDATE',
       data: {
         _local_id: matchRow.invoice_id,
         match_status: 'MATCHED',
       },
-    });
+    }));
 
     return updated as any;
   }

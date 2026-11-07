@@ -1,5 +1,5 @@
 // orderPickPackService.ts — Store Pick & Pack Operations Engine
-import { localDb } from '../../local-db';
+import { businessDb as localDb } from '../../lib/businessDb';
 import { localMutate } from '../../lib/localMutate';
 import { v4 as uuidv4 } from 'uuid';
 import { OrderStateMachine } from './orderStateMachine';
@@ -26,13 +26,13 @@ export class OrderPickPackService {
   /**
    * Get store picking queue prioritized by urgency, SLA, and prescription ready state
    */
-  static getStorePickQueue(params: {
+  static async getStorePickQueue(params: {
     organizationId: string;
     storeId: string;
-  }): PickQueueItem[] {
+  }): Promise<PickQueueItem[]> {
     const { organizationId, storeId } = params;
 
-    const rows: any[] = localDb
+    const rows: any[] = (await localDb
       .prepare(
         `SELECT o.id as order_id, o.order_number, of.id as fulfilment_id, c.name as customer_name,
                 o.fulfilment_type, o.status, o.priority, o.prescription_status, o.placed_at,
@@ -54,7 +54,7 @@ export class OrderPickPackService {
            END ASC,
            o.placed_at ASC`
       )
-      .all(organizationId, storeId);
+      .all(organizationId, storeId));
 
     return rows.map(r => ({
       orderId: r.order_id,
@@ -75,17 +75,17 @@ export class OrderPickPackService {
   /**
    * Start picking an order
    */
-  static startPicking(params: {
+  static async startPicking(params: {
     orderId: string;
     organizationId: string;
     pickerUserId: string;
     pickerName?: string;
-  }): void {
+  }): Promise<void> {
     const { orderId, organizationId, pickerUserId, pickerName = 'Staff' } = params;
 
-    const order: any = localDb
+    const order: any = (await localDb
       .prepare('SELECT * FROM orders WHERE id = ? AND organization_id = ?')
-      .get(orderId, organizationId);
+      .get(orderId, organizationId));
 
     if (!order) {
       throw new AppError(404, 'Order not found', 'ORDER_NOT_FOUND');
@@ -103,7 +103,7 @@ export class OrderPickPackService {
 
     const nowIso = new Date().toISOString();
 
-    localMutate({
+    (await localMutate({
       table: 'orders',
       operation: 'UPDATE',
       data: {
@@ -112,25 +112,25 @@ export class OrderPickPackService {
         fulfilment_status: 'PICKING',
         updated_at: nowIso,
       },
-    });
+    }));
 
-    localDb
+    (await localDb
       .prepare(
         `UPDATE order_fulfilments 
          SET status = 'PICKING', pick_started_at = ?, updated_at = ?, _updated_at = ?
          WHERE order_id = ?`
       )
-      .run(nowIso, nowIso, nowIso, orderId);
+      .run(nowIso, nowIso, nowIso, orderId));
 
-    localDb
+    (await localDb
       .prepare(
         `UPDATE order_items 
          SET status = 'PICKING', updated_at = ?, _updated_at = ?
          WHERE order_id = ? AND status IN ('CONFIRMED', 'RESERVED')`
       )
-      .run(nowIso, nowIso, orderId);
+      .run(nowIso, nowIso, orderId));
 
-    OrderEventService.logEvent({
+    (await OrderEventService.logEvent({
       orderId,
       organizationId,
       eventType: 'PICK_STARTED',
@@ -139,13 +139,13 @@ export class OrderPickPackService {
       actorId: pickerUserId,
       actorName: pickerName,
       notes: `Picking started by ${pickerName}`,
-    });
+    }));
   }
 
   /**
    * Scan barcode and pick item
    */
-  static pickItem(params: {
+  static async pickItem(params: {
     orderId: string;
     orderItemId: string;
     organizationId: string;
@@ -153,7 +153,7 @@ export class OrderPickPackService {
     pickedQuantity: number;
     pickedBatchId?: string | null;
     pickerUserId: string;
-  }): { success: boolean; pickedQuantity: number; fulfilledQuantity: number; itemStatus: string } {
+  }): Promise<{ success: boolean; pickedQuantity: number; fulfilledQuantity: number; itemStatus: string }> {
     const {
       orderId,
       orderItemId,
@@ -164,35 +164,35 @@ export class OrderPickPackService {
       pickerUserId,
     } = params;
 
-    const item: any = localDb
+    const item: any = (await localDb
       .prepare('SELECT * FROM order_items WHERE id = ? AND order_id = ?')
-      .get(orderItemId, orderId);
+      .get(orderItemId, orderId));
 
     if (!item) {
       throw new AppError(404, 'Order item not found', 'ITEM_NOT_FOUND');
     }
 
     // 1. Barcode Verification: Scanned barcode must match item or product barcodes
-    const medRow: any = localDb
+    const medRow: any = (await localDb
       .prepare('SELECT * FROM medicines WHERE id = ? OR _local_id = ?')
-      .get(item.medicine_id, item.medicine_id);
+      .get(item.medicine_id, item.medicine_id));
 
     const matchesBarcode =
       medRow?.primary_barcode === scannedBarcode ||
       medRow?.name?.toLowerCase() === scannedBarcode.toLowerCase() ||
       Boolean(
-        localDb
+        (await localDb
           .prepare(
             'SELECT 1 FROM product_barcodes WHERE medicine_id = ? AND barcode = ? AND _deleted = 0'
           )
-          .get(item.medicine_id, scannedBarcode)
+          .get(item.medicine_id, scannedBarcode))
       ) ||
       Boolean(
-        localDb
+        (await localDb
           .prepare(
             'SELECT 1 FROM medicine_batches WHERE medicine_id = ? AND (batch_number = ? OR id = ?) AND _deleted = 0'
           )
-          .get(item.medicine_id, scannedBarcode, scannedBarcode)
+          .get(item.medicine_id, scannedBarcode, scannedBarcode))
       );
 
     if (!matchesBarcode) {
@@ -206,16 +206,16 @@ export class OrderPickPackService {
     // 2. Batch Validation: Revalidate expiry, recall, disposal
     let targetBatchId = pickedBatchId;
     if (!targetBatchId) {
-      const allocRow: any = localDb
+      const allocRow: any = (await localDb
         .prepare('SELECT batch_id FROM order_fulfilment_items WHERE order_item_id = ?')
-        .get(orderItemId);
+        .get(orderItemId));
       targetBatchId = allocRow?.batch_id || null;
     }
 
     if (targetBatchId) {
-      const batchRow: any = localDb
+      const batchRow: any = (await localDb
         .prepare('SELECT * FROM medicine_batches WHERE id = ? OR _local_id = ?')
-        .get(targetBatchId, targetBatchId);
+        .get(targetBatchId, targetBatchId));
 
       if (batchRow) {
         if (batchRow.is_disposed) {
@@ -230,12 +230,12 @@ export class OrderPickPackService {
       }
 
       // Check if recalled
-      const recallRow: any = localDb
+      const recallRow: any = (await localDb
         .prepare(
           `SELECT r.reason FROM product_recalls r 
            WHERE r.batch_id = ? AND r.status = 'ACTIVE' AND r._deleted = 0`
         )
-        .get(targetBatchId);
+        .get(targetBatchId));
 
       if (recallRow) {
         throw new AppError(
@@ -249,24 +249,24 @@ export class OrderPickPackService {
     const nowIso = new Date().toISOString();
 
     // Update fulfillment item & order item picked quantity
-    localDb
+    (await localDb
       .prepare(
         `UPDATE order_fulfilment_items 
          SET quantity_picked = ?, status = 'PICKED', updated_at = ?, _updated_at = ?
          WHERE order_item_id = ?`
       )
-      .run(pickedQuantity, nowIso, nowIso, orderItemId);
+      .run(pickedQuantity, nowIso, nowIso, orderItemId));
 
     const isFullPick = pickedQuantity >= Number(item.requested_quantity);
-    localDb
+    (await localDb
       .prepare(
         `UPDATE order_items 
          SET fulfilled_quantity = ?, status = ?, updated_at = ?, _updated_at = ?
          WHERE id = ?`
       )
-      .run(pickedQuantity, isFullPick ? 'PICKED' : 'PARTIALLY_FULFILLED', nowIso, nowIso, orderItemId);
+      .run(pickedQuantity, isFullPick ? 'PICKED' : 'PARTIALLY_FULFILLED', nowIso, nowIso, orderItemId));
 
-    OrderEventService.logEvent({
+    (await OrderEventService.logEvent({
       orderId,
       organizationId,
       eventType: 'ITEM_PICKED',
@@ -278,7 +278,7 @@ export class OrderPickPackService {
         quantity: pickedQuantity,
         batchId: targetBatchId,
       },
-    });
+    }));
 
     return {
       success: true,
@@ -291,19 +291,19 @@ export class OrderPickPackService {
   /**
    * Record pick shortage
    */
-  static recordShortage(params: {
+  static async recordShortage(params: {
     orderId: string;
     orderItemId: string;
     organizationId: string;
     foundQuantity: number;
     reason?: string;
     pickerUserId: string;
-  }): { shortageQuantity: number } {
+  }): Promise<{ shortageQuantity: number }> {
     const { orderId, orderItemId, organizationId, foundQuantity, reason = 'PHYSICAL_SHORTAGE', pickerUserId } = params;
 
-    const item: any = localDb
+    const item: any = (await localDb
       .prepare('SELECT * FROM order_items WHERE id = ? AND order_id = ?')
-      .get(orderItemId, orderId);
+      .get(orderItemId, orderId));
 
     if (!item) {
       throw new AppError(404, 'Order item not found', 'ITEM_NOT_FOUND');
@@ -313,23 +313,23 @@ export class OrderPickPackService {
     const shortQty = Math.max(0, reqQty - foundQuantity);
     const nowIso = new Date().toISOString();
 
-    localDb
+    (await localDb
       .prepare(
         `UPDATE order_items 
          SET fulfilled_quantity = ?, cancelled_quantity = ?, status = 'PARTIALLY_FULFILLED', updated_at = ?, _updated_at = ?
          WHERE id = ?`
       )
-      .run(foundQuantity, shortQty, nowIso, nowIso, orderItemId);
+      .run(foundQuantity, shortQty, nowIso, nowIso, orderItemId));
 
-    localDb
+    (await localDb
       .prepare(
         `UPDATE order_fulfilment_items 
          SET quantity_picked = ?, status = 'PARTIALLY_FULFILLED', notes = ?, updated_at = ?, _updated_at = ?
          WHERE order_item_id = ?`
       )
-      .run(foundQuantity, `Shortage reported: found ${foundQuantity}/${reqQty}. Reason: ${reason}`, nowIso, nowIso, orderItemId);
+      .run(foundQuantity, `Shortage reported: found ${foundQuantity}/${reqQty}. Reason: ${reason}`, nowIso, nowIso, orderItemId));
 
-    OrderEventService.logEvent({
+    (await OrderEventService.logEvent({
       orderId,
       organizationId,
       eventType: 'PICK_SHORTAGE',
@@ -343,7 +343,7 @@ export class OrderPickPackService {
         reason,
       },
       notes: `Shortage of ${shortQty} units for ${item.medicine_name}`,
-    });
+    }));
 
     return { shortageQuantity: shortQty };
   }
@@ -351,13 +351,13 @@ export class OrderPickPackService {
   /**
    * Pack order items into physical package container and mark READY
    */
-  static packOrder(params: {
+  static async packOrder(params: {
     orderId: string;
     organizationId: string;
     packedByUserId: string;
     packedByName?: string;
     specialInstructions?: string;
-  }): OrderPackage {
+  }): Promise<OrderPackage> {
     const {
       orderId,
       organizationId,
@@ -366,9 +366,9 @@ export class OrderPickPackService {
       specialInstructions = '',
     } = params;
 
-    const order: any = localDb
+    const order: any = (await localDb
       .prepare('SELECT * FROM orders WHERE id = ? AND organization_id = ?')
-      .get(orderId, organizationId);
+      .get(orderId, organizationId));
 
     if (!order) {
       throw new AppError(404, 'Order not found', 'ORDER_NOT_FOUND');
@@ -383,22 +383,22 @@ export class OrderPickPackService {
       );
     }
 
-    const fulfilment: any = localDb
+    const fulfilment: any = (await localDb
       .prepare('SELECT * FROM order_fulfilments WHERE order_id = ?')
-      .get(orderId);
+      .get(orderId));
 
-    const items: any[] = localDb
+    const items: any[] = (await localDb
       .prepare('SELECT * FROM order_items WHERE order_id = ? AND _deleted = 0')
-      .all(orderId);
+      .all(orderId));
 
     // Identify cold chain and prescription requirements
     let isColdChain = false;
     let isPrescriptionRequired = false;
 
     for (const it of items) {
-      const medRow: any = localDb
+      const medRow: any = (await localDb
         .prepare('SELECT cold_chain_required, prescription_required FROM medicines WHERE id = ? OR _local_id = ?')
-        .get(it.medicine_id, it.medicine_id);
+        .get(it.medicine_id, it.medicine_id));
 
       if (medRow?.cold_chain_required) isColdChain = true;
       if (medRow?.prescription_required || it.prescription_required) isPrescriptionRequired = true;
@@ -409,7 +409,7 @@ export class OrderPickPackService {
     const packageLabel = `PKG-${order.order_number}-${packageNumber}`;
     const nowIso = new Date().toISOString();
 
-    const pkgRecord = localMutate({
+    const pkgRecord = (await localMutate({
       table: 'order_packages',
       operation: 'INSERT',
       data: {
@@ -429,16 +429,16 @@ export class OrderPickPackService {
         seal_number: `SEAL-${Math.random().toString(36).substring(2, 8).toUpperCase()}`,
         weight_kg: 0.5,
       },
-    });
+    }));
 
     // Populate order_package_items
     for (const it of items) {
-      const allocRow: any = localDb
+      const allocRow: any = (await localDb
         .prepare('SELECT batch_id, quantity_picked FROM order_fulfilment_items WHERE order_item_id = ?')
-        .get(it.id);
+        .get(it.id));
 
       const pkgItemId = uuidv4();
-      localMutate({
+      (await localMutate({
         table: 'order_package_items',
         operation: 'INSERT',
         data: {
@@ -452,13 +452,13 @@ export class OrderPickPackService {
           batch_id: allocRow?.batch_id || null,
           quantity: allocRow?.quantity_picked || it.fulfilled_quantity || it.requested_quantity,
         },
-      });
+      }));
     }
 
     // Determine target ready status
     const targetStatus = order.fulfilment_type === 'HOME_DELIVERY' ? 'READY_FOR_DISPATCH' : 'READY_FOR_PICKUP';
 
-    localMutate({
+    (await localMutate({
       table: 'orders',
       operation: 'UPDATE',
       data: {
@@ -468,17 +468,17 @@ export class OrderPickPackService {
         ready_at: nowIso,
         updated_at: nowIso,
       },
-    });
+    }));
 
-    localDb
+    (await localDb
       .prepare(
         `UPDATE order_fulfilments 
          SET status = 'READY', packed_at = ?, ready_at = ?, updated_at = ?, _updated_at = ?
          WHERE order_id = ?`
       )
-      .run(nowIso, nowIso, nowIso, nowIso, orderId);
+      .run(nowIso, nowIso, nowIso, nowIso, orderId));
 
-    OrderEventService.logEvent({
+    (await OrderEventService.logEvent({
       orderId,
       fulfilmentId: fulfilment?.id || null,
       organizationId,
@@ -493,7 +493,7 @@ export class OrderPickPackService {
         isPrescriptionRequired,
       },
       notes: `Package ${packageLabel} assembled and marked ${targetStatus}`,
-    });
+    }));
 
     return {
       id: packageId,

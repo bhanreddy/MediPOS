@@ -1,3 +1,8 @@
+import { selectedCloudStore } from '../services/cloudStoreContext';
+import { transactionalRoute } from '../lib/transactionalRoute';
+import { tenantRecord } from '../lib/tenantRecords';
+import { requireStoreAccess } from '../middleware/storeAccess';
+import { LocationService } from '../services/transfers/locationService';
 import { Router } from 'express';
 import { AppError } from '../lib/appError';
 import { requireAuth } from '../middleware/auth';
@@ -13,14 +18,39 @@ import {
 
 export const inventoryRouter = Router();
 inventoryRouter.use(requireAuth);
-inventoryRouter.param('id', (req, _res, next, id) => {
+inventoryRouter.use(async (req,res,next)=>{
+  if(!process.env.DATABASE_URL || !/^\/(availability|cross-location|reconciliation|stocktakes|reorder-recommendations|expiry-risk|ageing|classifications|recalls|reservations|alerts|valuation)(\/|$)/.test(req.path)) return next();
+  if (req.query.warehouse_id) {
+    try {
+      const supportsWarehouse = /^\/(availability|reconciliation(?:\/repair)?|stocktakes|reservations|valuation)\/?$/.test(req.path);
+      if (!supportsWarehouse || typeof req.query.warehouse_id !== 'string' || req.query.store_id || req.body?.store_id) {
+        throw new AppError(400, 'Choose a single inventory location.');
+      }
+      const actor = req.user!;
+      const orgId = actor.organization_id || actor.clinic_id!;
+      const warehouse = await tenantRecord('warehouses', req.query.warehouse_id, orgId);
+      if (!(await LocationService.validateUserAccess(actor.id, 'WAREHOUSE', warehouse.id, orgId))) {
+        throw new AppError(403, 'Warehouse access denied.');
+      }
+      req.query.warehouse_id = warehouse.id;
+      return next();
+    } catch (error) { return next(error); }
+  }
+  return requireStoreAccess()(req,res,next);
+});
+inventoryRouter.param('id', async (req, _res, next, id) => {
   const resource = /^\/(stocktakes|recalls|alerts|reservations)\//.exec(req.path)?.[1];
   if (!resource) return next();
   try {
     const tables: Record<string, string> = {stocktakes:'stocktake_sessions',recalls:'product_recalls',alerts:'inventory_alerts',reservations:'inventory_reservations'};
     const {orgId} = resolveOrgAndStore(req);
-    const row = localDb.prepare(`SELECT id FROM ${tables[resource]} WHERE (id = ? OR _local_id = ?) AND organization_id = ? AND _deleted = 0`).get(id,id,orgId) as {id:string} | undefined;
+    const row = (await localDb.prepare(`SELECT * FROM ${tables[resource]} WHERE (id = ? OR _local_id = ?) AND organization_id = ? AND _deleted = 0`).get(id,id,orgId)) as {id:string;store_id?:string;warehouse_id?:string} | undefined;
     if (!row) throw new AppError(404, 'Inventory record not found');
+    if(process.env.DATABASE_URL && row.store_id && row.store_id!==req.storeContext?.storeId && !['OWNER','SUPER_ADMIN'].includes(req.user!.role)) throw new AppError(403,'Store access denied');
+    if (process.env.DATABASE_URL && row.warehouse_id &&
+        !(await LocationService.validateUserAccess(req.user!.id,'WAREHOUSE',row.warehouse_id,orgId))) {
+      throw new AppError(403, 'Warehouse access denied.');
+    }
     req.params.id = row.id;
     next();
   } catch (error) { next(error); }
@@ -54,25 +84,33 @@ inventoryRouter.get('/medicines/search', requireAuth, async (req, res, next) => 
     }
 
     // POS needs the ranked page plus sellable FEFO snapshots, not substitutes.
-    // A lateral aggregate returns both in one database round trip.
+    // Aggregate all ranked product keys in one database round trip.
     if (req.query.include_substitutes === 'false') {
+      const branch = selectedCloudStore();
+      const stockSource = branch ? `medicine_batches b
+        JOIN branch_stock_snapshot position ON position.batch_id=b.id AND position.store_id=?` : 'medicine_batches b';
+      const quantity = branch ? 'position.available' : 'b.quantity_remaining';
       const results = await queryRaw(
-        `WITH page AS MATERIALIZED (${searchSql})
-         SELECT page.*, stock.medicine_batches, stock.total_stock FROM page
-         LEFT JOIN LATERAL (
-           SELECT COALESCE(jsonb_agg(to_jsonb(b) ORDER BY b.expiry_date, b.id), '[]'::jsonb) AS medicine_batches,
-                  COALESCE(SUM(b.quantity_remaining), 0) AS total_stock
-           FROM medicine_batches b WHERE
-             (b.medicine_id = page.id OR b.medicine_id = CASE
-               WHEN page._local_id::text ~* '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
-               THEN page._local_id::text::uuid ELSE NULL END)
-             AND b.clinic_id = page.clinic_id AND b.deleted_at IS NULL
-             AND b.quantity_remaining > 0 AND (b.is_disposed = false OR b.is_disposed IS NULL)
-             AND b.expiry_date >= ?
-         ) stock ON true
+        `WITH page AS MATERIALIZED (${searchSql}),
+         page_keys AS (
+           SELECT id AS product_id, id AS medicine_id, clinic_id FROM page
+           UNION
+           SELECT id, _local_id::uuid, clinic_id FROM page
+           WHERE _local_id ~* '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
+         ), stock AS (
+           SELECT keys.product_id,
+                  jsonb_agg(to_jsonb(b) || jsonb_build_object('quantity_remaining', ${quantity}) ORDER BY b.expiry_date, b.id) AS medicine_batches,
+                  SUM(${quantity}) AS total_stock
+           FROM ${stockSource} JOIN page_keys keys ON keys.medicine_id=b.medicine_id AND keys.clinic_id=b.clinic_id
+           WHERE b.deleted_at IS NULL AND ${quantity}>0 AND b.is_disposed IS NOT TRUE AND b.expiry_date>=?
+           GROUP BY keys.product_id
+         )
+         SELECT page.*, COALESCE(stock.medicine_batches,'[]'::jsonb) AS medicine_batches,
+                COALESCE(stock.total_stock,0) AS total_stock
+         FROM page LEFT JOIN stock ON stock.product_id=page.id
          ORDER BY ${barcode ? '' : 'CASE WHEN LOWER(page.name)=LOWER(?) THEN 0 WHEN page.name ILIKE ? THEN 1 ELSE 2 END,'}
                   page.name, page.id`,
-        [...searchParams, new Date().toISOString().split('T')[0], ...(barcode ? [] : [q, `${q.replace(/[\\%_]/g, '\\$&')}%`])],
+        [...searchParams, ...(branch ? [branch] : []), new Date().toISOString().split('T')[0], ...(barcode ? [] : [q, `${q.replace(/[\\%_]/g, '\\$&')}%`])],
       );
       return res.json({ results, substitutes: [] });
     }
@@ -83,7 +121,13 @@ inventoryRouter.get('/medicines/search', requireAuth, async (req, res, next) => 
     if (medicineIds.length > 0) {
       const placeholders = medicineIds.map(() => '?').join(',');
       const today = new Date().toISOString().split('T')[0];
-      const allBatches = await queryRaw(
+      const branch = selectedCloudStore();
+      const allBatches = branch ? await queryRaw(
+        `SELECT b.*, p.available AS quantity_remaining FROM medicine_batches b
+         JOIN branch_stock_snapshot p ON p.batch_id=b.id AND p.store_id=?
+         WHERE b.medicine_id IN (${placeholders}) AND p.available>0
+         ORDER BY b.expiry_date,b.id`, [branch,...medicineIds],
+      ) : await queryRaw(
         `SELECT * FROM medicine_batches WHERE medicine_id IN (${placeholders})
          AND quantity_remaining > 0 AND deleted_at IS NULL AND ${SELLABLE_BATCH_FILTER}
          AND expiry_date >= ?${clinicClause} ORDER BY expiry_date ASC, id ASC`,
@@ -142,20 +186,40 @@ inventoryRouter.get('/medicines', requireAuth, async (req, res, next) => {
     if (category) { conditions.push('category=?'); values.push(category); }
     if (scheduleH1) { conditions.push('is_schedule_h1=true'); }
 
+    const rawSize = req.query.page_size;
+    const cursor = req.query.after;
+    const pageSize = rawSize === undefined ? undefined : Number(rawSize);
+    if ((pageSize !== undefined && (typeof rawSize !== 'string' || !/^\d{1,3}$/.test(rawSize) ||
+        pageSize < 1 || pageSize > 500)) || (cursor !== undefined && (
+        pageSize === undefined || typeof cursor !== 'string' ||
+        !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.test(cursor)))) {
+      throw new AppError(400, 'Invalid inventory catalogue page.');
+    }
+    if (cursor) {
+      conditions.push('id>?');
+      values.push(cursor);
+    }
     const where = conditions.join(' AND ');
-    const batchClinicClause = clinicId ? ' AND clinic_id = ?' : '';
-    // Selecting batches by the same filter (not by the fetched ids) lets both reads run concurrently.
-    const [medicines, allBatches] = await Promise.all([
-      queryAll('medicines', where, values),
-      queryRaw(
-        `SELECT * FROM medicine_batches
-         WHERE EXISTS (SELECT 1 FROM medicines WHERE deleted_at IS NULL AND (${where})
-           AND (medicine_batches.medicine_id::text = medicines.id::text OR medicine_batches.medicine_id::text = medicines._local_id::text))
-           AND quantity_remaining > 0 AND deleted_at IS NULL AND ${SELLABLE_BATCH_FILTER}${batchClinicClause}
-         ORDER BY expiry_date ASC`,
-        clinicId ? [...values, clinicId] : values,
-      ),
-    ]);
+    const batchClinicClause = clinicId ? ' AND medicine_batches.clinic_id = ?' : '';
+    const branch = selectedCloudStore();
+    const stockSource = branch ? 'JOIN branch_stock_snapshot p ON p.batch_id=medicine_batches.id AND p.store_id=?' : '';
+    const quantity = branch ? 'p.available' : 'medicine_batches.quantity_remaining';
+    const medicines = pageSize === undefined ? await queryAll('medicines', where, values) : await queryRaw(
+      `SELECT * FROM medicines WHERE deleted_at IS NULL AND (${where}) ORDER BY id LIMIT ?`,
+      [...values,pageSize+1],
+    );
+    const nextCursor = pageSize !== undefined && medicines.length > pageSize ? medicines[pageSize-1].id : null;
+    if (nextCursor) medicines.pop();
+    const batchMedicineIds = [...new Set(medicines.flatMap(med => [med.id, med._local_id])
+      .filter((id): id is string => typeof id === 'string' &&
+        /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.test(id)))];
+    const allBatches = batchMedicineIds.length ? await queryRaw(
+      `SELECT medicine_batches.*${branch ? `, ${quantity} AS quantity_remaining` : ''} FROM medicine_batches ${stockSource}
+       WHERE medicine_batches.medicine_id=ANY(?::uuid[])
+         AND ${quantity}>0 AND medicine_batches.deleted_at IS NULL AND ${SELLABLE_BATCH_FILTER}${batchClinicClause}
+       ORDER BY medicine_batches.expiry_date ASC`,
+      [...(branch ? [branch] : []), batchMedicineIds, ...(clinicId ? [clinicId] : [])],
+    ) : [];
 
     // Attach stock totals
     const batchesByMedicine = new Map<string, any[]>();
@@ -180,7 +244,7 @@ inventoryRouter.get('/medicines', requireAuth, async (req, res, next) => {
       data = data.filter((d: any) => (d.total_stock ?? 0) <= (d.low_stock_threshold ?? 10));
     }
 
-    res.json({ data });
+    res.json(pageSize === undefined ? { data } : { data, next_cursor: nextCursor });
   } catch (err) {
     next(err);
   }
@@ -200,15 +264,20 @@ inventoryRouter.get('/attention-counts', requireAuth, async (req, res, next) => 
       fallback.setUTCDate(fallback.getUTCDate() + 30);
       warning = fallback.toISOString().slice(0, 10);
     }
+    const branch = selectedCloudStore();
+    const stockSource = branch ? 'JOIN branch_stock_snapshot p ON p.batch_id=mb.id AND p.store_id=?' : '';
+    const onHand = branch ? 'p.on_hand' : 'mb.quantity_remaining';
+    const available = branch ? 'p.available' : 'mb.quantity_remaining';
     const [row] = await queryRaw<{ low_stock: number; expiring: number; shortbook: number }>(
       `WITH medicines_in_scope AS (
          SELECT id, _local_id, GREATEST(COALESCE(low_stock_threshold, 10), 0) AS min_alert
          FROM medicines WHERE clinic_id = ? AND deleted_at IS NULL AND is_active = true
        ), batches AS (
-         SELECT m.id AS medicine_id, mb.quantity_remaining AS qty, mb.expiry_date
+         SELECT m.id AS medicine_id, ${available} AS qty, mb.expiry_date
          FROM medicines_in_scope m
          JOIN medicine_batches mb ON (mb.medicine_id::text = m.id::text OR mb.medicine_id::text = m._local_id::text)
-         WHERE mb.clinic_id = ? AND mb.deleted_at IS NULL AND mb.quantity_remaining > 0
+         ${stockSource}
+         WHERE mb.clinic_id = ? AND mb.deleted_at IS NULL AND ${onHand} > 0
            AND (mb.is_disposed = false OR mb.is_disposed IS NULL)
        ), stock AS (
          SELECT m.id, m.min_alert,
@@ -220,7 +289,7 @@ inventoryRouter.get('/attention-counts', requireAuth, async (req, res, next) => 
          (SELECT COUNT(*)::int FROM stock WHERE available <= min_alert) AS low_stock,
          (SELECT COUNT(*)::int FROM batches WHERE expiry_date <= ?::date) AS expiring,
          (SELECT COUNT(*)::int FROM shortbook WHERE clinic_id = ? AND is_ordered = false AND deleted_at IS NULL) AS shortbook`,
-      [clinicId, clinicId, today, warning, clinicId],
+      [clinicId, ...(branch ? [branch] : []), clinicId, today, warning, clinicId],
     );
     res.json({
       data: {
@@ -244,7 +313,12 @@ inventoryRouter.get('/medicines/:id', requireAuth, async (req, res, next) => {
     }
 
     const medId = (medicine as any).id;
-    const batches = await queryAll('medicine_batches', `medicine_id=? AND ${SELLABLE_BATCH_FILTER}`, [medId]);
+    const branch = selectedCloudStore();
+    const batches = branch ? await queryRaw(
+      `SELECT b.*, p.available AS quantity_remaining FROM medicine_batches b
+       JOIN branch_stock_snapshot p ON p.batch_id=b.id AND p.store_id=?
+       WHERE b.clinic_id=? AND b.medicine_id=? AND p.available>0`, [branch,clinicId,medId],
+    ) : await queryAll('medicine_batches', `medicine_id=? AND clinic_id=? AND ${SELLABLE_BATCH_FILTER}`, [medId,clinicId]);
     batches.sort((a: any, b: any) => String(a.expiry_date ?? '').localeCompare(String(b.expiry_date ?? '')));
 
     res.json({ data: { ...medicine, batches } });
@@ -257,6 +331,9 @@ inventoryRouter.get('/medicines/:id', requireAuth, async (req, res, next) => {
 inventoryRouter.post('/medicines', requireAuth, requireRole('OWNER'), async (req, res, next) => {
   try {
     const parsed = createMedicineSchema.parse(req.body);
+    if (parsed.store_id) await resolveCloudStoreContext(req.user!.clinic_id!, { store_id: parsed.store_id });
+    if (parsed.preferred_supplier_id && !await queryOne('suppliers', 'id = ? AND clinic_id = ?', [parsed.preferred_supplier_id, req.user!.clinic_id]))
+      throw new AppError(404, 'Supplier not found');
     const payload = { ...parsed, clinic_id: req.user!.clinic_id! };
 
     const data = await localMutate({ table: 'medicines', operation: 'INSERT', data: payload });
@@ -271,6 +348,9 @@ inventoryRouter.post('/medicines', requireAuth, requireRole('OWNER'), async (req
 inventoryRouter.put('/medicines/:id', requireAuth, requireRole('OWNER'), async (req, res, next) => {
   try {
     const parsed = updateMedicineSchema.parse(req.body);
+    if (parsed.store_id) await resolveCloudStoreContext(req.user!.clinic_id!, { store_id: parsed.store_id });
+    if (parsed.preferred_supplier_id && !await queryOne('suppliers', 'id = ? AND clinic_id = ?', [parsed.preferred_supplier_id, req.user!.clinic_id]))
+      throw new AppError(404, 'Supplier not found');
     const payload = { ...parsed, clinic_id: req.user!.clinic_id! };
     const clinicId = req.user!.clinic_id;
     const clinicClause = clinicId ? ' AND clinic_id=?' : '';
@@ -323,7 +403,7 @@ inventoryRouter.get('/batches/disposed', requireAuth, async (req, res, next) => 
     if (!clinicId) {
       return res.status(403).json({ error: { message: 'Clinic context required', code: 'NO_CLINIC' } });
     }
-    const data = await listDisposedBatches(clinicId);
+    const data = await listDisposedBatches(clinicId, selectedCloudStore());
     res.json({ data });
   } catch (err) {
     next(err);
@@ -331,7 +411,7 @@ inventoryRouter.get('/batches/disposed', requireAuth, async (req, res, next) => 
 });
 
 // POST /api/inventory/batches/:batchId/dispose
-inventoryRouter.post('/batches/:batchId/dispose', requireAuth, async (req, res, next) => {
+inventoryRouter.post('/batches/:batchId/dispose', requireAuth, transactionalRoute(async (req, res, next) => {
   try {
     const clinicId = req.user!.clinic_id;
     if (!clinicId) {
@@ -343,6 +423,7 @@ inventoryRouter.post('/batches/:batchId/dispose', requireAuth, async (req, res, 
       batchId: req.params.batchId,
       clinicId,
       userId: req.user!.id,
+      storeId: selectedCloudStore(),
       reason: parsed.reason,
       notes: parsed.notes,
     });
@@ -351,7 +432,7 @@ inventoryRouter.post('/batches/:batchId/dispose', requireAuth, async (req, res, 
   } catch (err) {
     next(err);
   }
-});
+}));
 
 // GET /api/inventory/batches
 inventoryRouter.get('/batches', requireAuth, async (req, res, next) => {
@@ -362,10 +443,21 @@ inventoryRouter.get('/batches', requireAuth, async (req, res, next) => {
     const includeUnavailable = req.query.include_unavailable === 'true';
     const conditions = ['clinic_id = ?', 'deleted_at IS NULL'];
     const params: unknown[] = [clinicId];
+    const branch = selectedCloudStore();
+    if (branch) {
+      conditions.push('EXISTS (SELECT 1 FROM branch_stock_snapshot p WHERE p.batch_id = medicine_batches.id AND p.store_id = ?)');
+      params.push(branch);
+    }
     if (medicineId) { conditions.push('medicine_id = ?'); params.push(medicineId); }
     if (!includeUnavailable) conditions.push(SELLABLE_BATCH_FILTER);
     params.push(limit);
-    const data = await queryRaw(`SELECT * FROM medicine_batches WHERE ${conditions.join(' AND ')} ORDER BY expiry_date ASC, id ASC LIMIT ?`, params);
+    const data = branch ? await queryRaw(
+      `SELECT b.*, p.on_hand AS quantity_remaining FROM medicine_batches b
+       JOIN branch_stock_snapshot p ON p.batch_id=b.id AND p.store_id=?
+       WHERE b.clinic_id=? AND b.deleted_at IS NULL
+         ${medicineId ? 'AND b.medicine_id=?' : ''} ${includeUnavailable ? '' : 'AND p.available>0'}
+       ORDER BY b.expiry_date,b.id LIMIT ?`, [branch,clinicId,...(medicineId ? [medicineId] : []),limit],
+    ) : await queryRaw(`SELECT * FROM medicine_batches WHERE ${conditions.join(' AND ')} ORDER BY expiry_date ASC, id ASC LIMIT ?`, params);
 
     res.json({ data });
   } catch (err) {
@@ -382,7 +474,14 @@ inventoryRouter.get('/batches/expiring', requireAuth, async (req, res, next) => 
     const maxStr = maxDate.toISOString().split('T')[0];
     const clinicId = req.user!.clinic_id!;
 
-    const data = await queryAll(
+    const branch = selectedCloudStore();
+    const data = branch ? await queryRaw(
+      `SELECT b.*,p.on_hand AS quantity_remaining FROM medicine_batches b
+       JOIN branch_stock_snapshot p ON p.batch_id=b.id AND p.store_id=?
+       WHERE b.clinic_id=? AND p.on_hand>0 AND b.expiry_date<=?
+         AND b.is_disposed IS NOT TRUE AND b.is_recalled IS NOT TRUE`,
+      [branch,clinicId,maxStr],
+    ) : await queryAll(
       'medicine_batches',
       `quantity_remaining>0 AND expiry_date<=? AND clinic_id=? AND ${SELLABLE_BATCH_FILTER}`,
       [maxStr, clinicId],
@@ -399,7 +498,14 @@ inventoryRouter.get('/batches/expiring', requireAuth, async (req, res, next) => 
 inventoryRouter.get('/stock/low', requireAuth, async (req, res, next) => {
   try {
     const clinicId = req.user!.clinic_id!;
-    const data = await queryRaw(
+    const branch = selectedCloudStore();
+    const data = branch ? await queryRaw(
+      `SELECT m.*,COALESCE(SUM(p.available),0) AS total_stock FROM medicines m
+       LEFT JOIN branch_stock_snapshot p ON p.medicine_id=m.id AND p.store_id=?
+       WHERE m.clinic_id=? AND m.deleted_at IS NULL AND m.is_active GROUP BY m.id
+       HAVING COALESCE(SUM(p.available),0)<=COALESCE(m.low_stock_threshold,10)`,
+      [branch,clinicId],
+    ) : await queryRaw(
       `SELECT m.*, COALESCE(SUM(mb.quantity_remaining), 0) as total_stock
        FROM medicines m
        LEFT JOIN medicine_batches mb ON mb.medicine_id = m.id AND mb.deleted_at IS NULL AND mb.clinic_id = ? AND (mb.is_disposed = false OR mb.is_disposed IS NULL)
@@ -424,7 +530,13 @@ inventoryRouter.get('/stock/summary', requireAuth, async (req, res, next) => {
       [clinicId]
     );
 
-    const batchStats = await queryRaw<{ total_batches: number; total_stock_value: number }>(
+    const branch = selectedCloudStore();
+    const batchStats = branch ? await queryRaw<{ total_batches: number; total_stock_value: number }>(
+      `SELECT COUNT(*) AS total_batches,COALESCE(SUM(p.on_hand*p.purchase_price),0) AS total_stock_value
+       FROM branch_stock_snapshot p JOIN medicine_batches b ON b.id=p.batch_id
+       WHERE p.store_id=? AND p.clinic_id=? AND p.on_hand>0 AND b.is_disposed IS NOT TRUE`,
+      [branch,clinicId],
+    ) : await queryRaw<{ total_batches: number; total_stock_value: number }>(
       `SELECT COUNT(*) as total_batches, COALESCE(SUM(quantity_remaining * purchase_price), 0) as total_stock_value
        FROM medicine_batches WHERE deleted_at IS NULL AND quantity_remaining>0 AND (is_disposed = false OR is_disposed IS NULL) AND clinic_id = ?`,
       [clinicId]
@@ -456,13 +568,15 @@ import { InventoryReservationService } from '../services/inventory/inventoryRese
 import { ReorderEngine } from '../services/inventory/reorderEngine';
 import { InventoryAlertEngine } from '../services/inventory/inventoryAlertEngine';
 import { InventoryValuationService } from '../services/inventory/inventoryValuationService';
-import { localDb } from '../local-db';
+import { businessDb as localDb } from '../lib/businessDb';
 
 // Helper to resolve org and store from auth user
 function resolveOrgAndStore(req: any) {
-  const orgId = req.user?.organization_id || req.user?.clinic_id || 'default-org';
-  const storeId = req.user?.store_id || req.query.store_id || null;
+  const orgId = req.storeContext?.organizationId || req.user?.organization_id || req.user?.clinic_id;
   const warehouseId = req.query.warehouse_id || null;
+  const storeId = process.env.DATABASE_URL && warehouseId
+    ? null
+    : req.storeContext?.storeId || req.user?.store_id || req.query.store_id || null;
   return { orgId, storeId, warehouseId };
 }
 
@@ -479,7 +593,7 @@ inventoryRouter.get('/availability', requireAuth, async (req, res, next) => {
     }
 
     const locationType = warehouseId ? 'WAREHOUSE' : 'STORE';
-    const result = InventoryAvailabilityService.getAvailability({
+    const result = (await InventoryAvailabilityService.getAvailability({
       organizationId: orgId,
       medicineId,
       locationType,
@@ -487,7 +601,7 @@ inventoryRouter.get('/availability', requireAuth, async (req, res, next) => {
       warehouseId,
       batchId,
       requestedQuantity: requestedQty,
-    });
+    }));
 
     res.json({ data: result });
   } catch (err) {
@@ -504,11 +618,14 @@ inventoryRouter.get('/cross-location', requireAuth, async (req, res, next) => {
       return res.status(400).json({ error: 'medicine_id is required' });
     }
 
-    const result = InventoryAvailabilityService.getCrossLocationAvailability({
+    if (process.env.DATABASE_URL && !['OWNER','SUPER_ADMIN'].includes(req.user!.role)) {
+      throw new AppError(403, 'Use the sister-store stock lookup for branches you can access.');
+    }
+    const result = (await InventoryAvailabilityService.getCrossLocationAvailability({
       organizationId: orgId,
       medicineId,
       currentStoreId: storeId,
-    });
+    }));
 
     res.json({ data: result });
   } catch (err) {
@@ -522,12 +639,12 @@ inventoryRouter.get('/reconciliation', requireAuth, async (req, res, next) => {
     const { orgId, storeId, warehouseId } = resolveOrgAndStore(req);
     const medicineId = (req.query.medicine_id as string) || null;
 
-    const result = InventoryReconciliationServiceV2.reconcile({
+    const result = (await InventoryReconciliationServiceV2.reconcile({
       organizationId: orgId,
       storeId,
       warehouseId,
       medicineId,
-    });
+    }));
 
     res.json({ data: result });
   } catch (err) {
@@ -542,7 +659,7 @@ inventoryRouter.post('/reconciliation/repair', requireAuth, requireRole('OWNER')
     const { medicineId, batchId, targetPhysicalQuantity, reason } = req.body;
 
     const locationType = warehouseId ? 'WAREHOUSE' : 'STORE';
-    const result = InventoryReconciliationServiceV2.repairDiscrepancy({
+    const result = (await InventoryReconciliationServiceV2.repairDiscrepancy({
       organizationId: orgId,
       medicineId,
       batchId,
@@ -552,7 +669,7 @@ inventoryRouter.post('/reconciliation/repair', requireAuth, requireRole('OWNER')
       targetPhysicalQuantity: Number(targetPhysicalQuantity),
       reason: reason || 'Approved Reconciliation Adjustment',
       approvedBy: req.user!.id,
-    });
+    }));
 
     res.json({ data: result });
   } catch (err) {
@@ -563,16 +680,19 @@ inventoryRouter.post('/reconciliation/repair', requireAuth, requireRole('OWNER')
 // GET /api/inventory/stocktakes
 inventoryRouter.get('/stocktakes', requireAuth, async (req, res, next) => {
   try {
-    const { orgId, storeId } = resolveOrgAndStore(req);
+    const { orgId, storeId, warehouseId } = resolveOrgAndStore(req);
     let query = `SELECT * FROM stocktake_sessions WHERE organization_id = ?`;
     const params: any[] = [orgId];
-    if (storeId) {
-      query += ` AND (store_id = ? OR store_id IS NULL)`;
+    if (process.env.DATABASE_URL && warehouseId) {
+      query += ' AND warehouse_id = ?';
+      params.push(warehouseId);
+    } else if (storeId) {
+      query += process.env.DATABASE_URL ? ' AND store_id = ?' : ' AND (store_id = ? OR store_id IS NULL)';
       params.push(storeId);
     }
     query += ` ORDER BY created_at DESC`;
 
-    const sessions = localDb.prepare(query).all(...params);
+    const sessions = (await localDb.prepare(query).all(...params));
     res.json({ data: sessions });
   } catch (err) {
     next(err);
@@ -585,7 +705,7 @@ inventoryRouter.post('/stocktakes', requireAuth, async (req, res, next) => {
     const { orgId, storeId, warehouseId } = resolveOrgAndStore(req);
     const { name, type, scope, countingMode, isBlindCount, isDoubleCount, notes } = req.body;
 
-    const session = StocktakeEngine.createSession({
+    const session = (await StocktakeEngine.createSession({
       organizationId: orgId,
       storeId,
       warehouseId,
@@ -597,7 +717,7 @@ inventoryRouter.post('/stocktakes', requireAuth, async (req, res, next) => {
       isDoubleCount,
       initiatedBy: req.user!.id,
       notes,
-    });
+    }));
 
     res.status(201).json({ data: session });
   } catch (err) {
@@ -608,11 +728,11 @@ inventoryRouter.post('/stocktakes', requireAuth, async (req, res, next) => {
 // GET /api/inventory/stocktakes/:id
 inventoryRouter.get('/stocktakes/:id', requireAuth, async (req, res, next) => {
   try {
-    const session = StocktakeEngine.getSession(req.params.id);
+    const session = (await StocktakeEngine.getSession(req.params.id));
     if (!session) return res.status(404).json({ error: 'Stocktake session not found' });
 
     const isManager = (req.user?.role as string) === 'OWNER' || (req.user?.role as string) === 'STORE_MANAGER' || (req.user?.role as string) === 'SUPER_ADMIN';
-    const items = StocktakeEngine.getSessionItems(req.params.id, isManager);
+    const items = (await StocktakeEngine.getSessionItems(req.params.id, isManager));
 
     res.json({ data: { session, items } });
   } catch (err) {
@@ -623,7 +743,7 @@ inventoryRouter.get('/stocktakes/:id', requireAuth, async (req, res, next) => {
 // POST /api/inventory/stocktakes/:id/start
 inventoryRouter.post('/stocktakes/:id/start', requireAuth, async (req, res, next) => {
   try {
-    const session = StocktakeEngine.startSession(req.params.id, req.user!.id);
+    const session = (await StocktakeEngine.startSession(req.params.id, req.user!.id));
     res.json({ data: session });
   } catch (err) {
     next(err);
@@ -634,8 +754,9 @@ inventoryRouter.post('/stocktakes/:id/start', requireAuth, async (req, res, next
 inventoryRouter.post('/stocktakes/:id/count', requireAuth, async (req, res, next) => {
   try {
     const { medicineId, batchId, counterName, scannedBarcode, rawQuantity, unitType, conversionFactor, deviceId, isOfflineSync, counterRole } = req.body;
-    const result = StocktakeEngine.recordCount({
+    const result = (await StocktakeEngine.recordCount({
       stocktakeId: req.params.id,
+      requestId:req.body.requestId||req.get('Idempotency-Key'),
       medicineId,
       batchId,
       counterName,
@@ -647,7 +768,7 @@ inventoryRouter.post('/stocktakes/:id/count', requireAuth, async (req, res, next
       deviceId,
       isOfflineSync,
       counterRole,
-    });
+    }));
 
     res.json({ data: result });
   } catch (err) {
@@ -658,12 +779,12 @@ inventoryRouter.post('/stocktakes/:id/count', requireAuth, async (req, res, next
 // POST /api/inventory/stocktakes/:id/approve
 inventoryRouter.post('/stocktakes/:id/approve', requireAuth, async (req, res, next) => {
   try {
-    const session = StocktakeEngine.approveSession({
+    const session = (await StocktakeEngine.approveSession({
       sessionId: req.params.id,
       approvedBy: req.user!.id,
       userRole: req.user?.role || 'CASHIER',
       notes: req.body.notes,
-    });
+    }));
     res.json({ data: session });
   } catch (err) {
     next(err);
@@ -673,11 +794,11 @@ inventoryRouter.post('/stocktakes/:id/approve', requireAuth, async (req, res, ne
 // POST /api/inventory/stocktakes/:id/post
 inventoryRouter.post('/stocktakes/:id/post', requireAuth, async (req, res, next) => {
   try {
-    const result = StocktakeEngine.postAdjustments({
+    const result = (await StocktakeEngine.postAdjustments({
       sessionId: req.params.id,
       postedBy: req.user!.id,
       userRole: req.user?.role || 'CASHIER',
-    });
+    }));
     res.json({ data: result });
   } catch (err) {
     next(err);
@@ -688,10 +809,10 @@ inventoryRouter.post('/stocktakes/:id/post', requireAuth, async (req, res, next)
 inventoryRouter.get('/reorder-recommendations', requireAuth, async (req, res, next) => {
   try {
     const { orgId, storeId } = resolveOrgAndStore(req);
-    const recommendations = ReorderEngine.getReorderRecommendations({
+    const recommendations = (await ReorderEngine.getReorderRecommendations({
       organizationId: orgId,
       storeId,
-    });
+    }));
     res.json({ data: recommendations });
   } catch (err) {
     next(err);
@@ -703,11 +824,11 @@ inventoryRouter.get('/expiry-risk', requireAuth, async (req, res, next) => {
   try {
     const { orgId, storeId } = resolveOrgAndStore(req);
     const days = parseInt(req.query.days as string) || 180;
-    const result = ExpiryIntelligenceEngine.getExpiryRiskItems({
+    const result = (await ExpiryIntelligenceEngine.getExpiryRiskItems({
       organizationId: orgId,
       storeId,
       daysThreshold: days,
-    });
+    }));
     res.json({ data: result });
   } catch (err) {
     next(err);
@@ -718,10 +839,10 @@ inventoryRouter.get('/expiry-risk', requireAuth, async (req, res, next) => {
 inventoryRouter.get('/ageing', requireAuth, async (req, res, next) => {
   try {
     const { orgId, storeId } = resolveOrgAndStore(req);
-    const result = InventoryClassificationEngine.getAgeingAnalysis({
+    const result = (await InventoryClassificationEngine.getAgeingAnalysis({
       organizationId: orgId,
       storeId,
-    });
+    }));
     res.json({ data: result });
   } catch (err) {
     next(err);
@@ -732,10 +853,10 @@ inventoryRouter.get('/ageing', requireAuth, async (req, res, next) => {
 inventoryRouter.get('/classifications', requireAuth, async (req, res, next) => {
   try {
     const { orgId, storeId } = resolveOrgAndStore(req);
-    const result = InventoryClassificationEngine.computeClassifications({
+    const result = (await InventoryClassificationEngine.computeClassifications({
       organizationId: orgId,
       storeId,
-    });
+    }));
     res.json({ data: result });
   } catch (err) {
     next(err);
@@ -746,7 +867,7 @@ inventoryRouter.get('/classifications', requireAuth, async (req, res, next) => {
 inventoryRouter.get('/recalls', requireAuth, async (req, res, next) => {
   try {
     const { orgId } = resolveOrgAndStore(req);
-    const recalls = localDb
+    const recalls = (await localDb
       .prepare(
         `SELECT pr.*, m.name as product_name, m.generic_name
          FROM product_recalls pr
@@ -754,7 +875,7 @@ inventoryRouter.get('/recalls', requireAuth, async (req, res, next) => {
          WHERE pr.organization_id = ?
          ORDER BY pr.created_at DESC`
       )
-      .all(orgId);
+      .all(orgId));
     res.json({ data: recalls });
   } catch (err) {
     next(err);
@@ -766,7 +887,7 @@ inventoryRouter.post('/recalls', requireAuth, requireRole('OWNER'), async (req, 
   try {
     const { orgId } = resolveOrgAndStore(req);
     const { recallReference, recallType, productId, batchId, batchNumber, manufacturer, reason, severity } = req.body;
-    const recall = ProductRecallEngine.createRecall({
+    const recall = (await ProductRecallEngine.createRecall({
       organizationId: orgId,
       recallReference,
       recallType,
@@ -777,7 +898,7 @@ inventoryRouter.post('/recalls', requireAuth, requireRole('OWNER'), async (req, 
       reason,
       severity,
       createdBy: req.user!.id,
-    });
+    }));
     res.status(201).json({ data: recall });
   } catch (err) {
     next(err);
@@ -787,7 +908,7 @@ inventoryRouter.post('/recalls', requireAuth, requireRole('OWNER'), async (req, 
 // GET /api/inventory/recalls/:id
 inventoryRouter.get('/recalls/:id', requireAuth, async (req, res, next) => {
   try {
-    const recall = ProductRecallEngine.getRecall(req.params.id);
+    const recall = (await ProductRecallEngine.getRecall(req.params.id));
     if (!recall) return res.status(404).json({ error: 'Recall not found' });
     res.json({ data: recall });
   } catch (err) {
@@ -798,7 +919,7 @@ inventoryRouter.get('/recalls/:id', requireAuth, async (req, res, next) => {
 // POST /api/inventory/recalls/:id/activate
 inventoryRouter.post('/recalls/:id/activate', requireAuth, requireRole('OWNER'), async (req, res, next) => {
   try {
-    const recall = ProductRecallEngine.activateRecall(req.params.id, req.user!.id);
+    const recall = (await ProductRecallEngine.activateRecall(req.params.id, req.user!.id));
     res.json({ data: recall });
   } catch (err) {
     next(err);
@@ -808,30 +929,42 @@ inventoryRouter.post('/recalls/:id/activate', requireAuth, requireRole('OWNER'),
 // POST /api/inventory/recalls/tasks/:taskId/complete
 inventoryRouter.post('/recalls/tasks/:taskId/complete', requireAuth, async (req, res, next) => {
   try {
+    const { orgId, storeId } = resolveOrgAndStore(req);
+    const task = await localDb.prepare(
+      'SELECT id,store_id,warehouse_id FROM recall_tasks WHERE CAST(id AS TEXT)=? AND organization_id=?',
+    ).get(req.params.taskId,orgId);
+    if (!task) throw new AppError(404, 'Recall task not found.');
+    if (process.env.DATABASE_URL) {
+      const allowed = task.warehouse_id
+        ? await LocationService.validateUserAccess(req.user!.id,'WAREHOUSE',task.warehouse_id,orgId)
+        : task.store_id === storeId || req.storeContext?.isOrgAdmin;
+      if (!allowed) throw new AppError(403, 'Access to the recall task location is required.');
+    }
     const { quarantinedUnits, notes } = req.body;
-    const task = ProductRecallEngine.completeTask({
+    const completed = (await ProductRecallEngine.completeTask({
       taskId: req.params.taskId,
       quarantinedUnits: Number(quarantinedUnits || 0),
       completedBy: req.user!.id,
       notes,
-    });
-    res.json({ data: task });
+    }));
+    res.json({ data: completed });
   } catch (err) {
     next(err);
   }
 });
 
 // GET /api/inventory/recalls/:id/trace/sales
-inventoryRouter.get('/recalls/:id/trace/sales', requireAuth, async (req, res, next) => {
+inventoryRouter.get('/recalls/:id/trace/sales', requireAuth, requireRole('OWNER','PHARMACIST','SUPER_ADMIN'), async (req, res, next) => {
   try {
-    const recall = ProductRecallEngine.getRecall(req.params.id);
+    const recall = (await ProductRecallEngine.getRecall(req.params.id));
     if (!recall) return res.status(404).json({ error: 'Recall not found' });
 
-    const trace = ProductRecallEngine.traceHistoricalSales({
+    const trace = (await ProductRecallEngine.traceHistoricalSales({
       organizationId: recall.organization_id,
       productId: recall.product_id,
       batchId: recall.batch_id,
-    });
+      storeId: process.env.DATABASE_URL && req.user!.role === 'PHARMACIST' ? req.storeContext?.storeId : undefined,
+    }));
     res.json({ data: trace });
   } catch (err) {
     next(err);
@@ -839,16 +972,17 @@ inventoryRouter.get('/recalls/:id/trace/sales', requireAuth, async (req, res, ne
 });
 
 // GET /api/inventory/recalls/:id/trace/prescriptions
-inventoryRouter.get('/recalls/:id/trace/prescriptions', requireAuth, async (req, res, next) => {
+inventoryRouter.get('/recalls/:id/trace/prescriptions', requireAuth, requireRole('OWNER','PHARMACIST','SUPER_ADMIN'), async (req, res, next) => {
   try {
-    const recall = ProductRecallEngine.getRecall(req.params.id);
+    const recall = (await ProductRecallEngine.getRecall(req.params.id));
     if (!recall) return res.status(404).json({ error: 'Recall not found' });
 
-    const trace = ProductRecallEngine.tracePrescriptionDispensing({
+    const trace = (await ProductRecallEngine.tracePrescriptionDispensing({
       organizationId: recall.organization_id,
       productId: recall.product_id,
       batchId: recall.batch_id,
-    });
+      storeId: process.env.DATABASE_URL && req.user!.role === 'PHARMACIST' ? req.storeContext?.storeId : undefined,
+    }));
     res.json({ data: trace });
   } catch (err) {
     next(err);
@@ -862,7 +996,7 @@ inventoryRouter.post('/reservations', requireAuth, async (req, res, next) => {
     const { medicineId, batchId, quantity, sourceType, sourceId, durationMinutes } = req.body;
 
     const locationType = warehouseId ? 'WAREHOUSE' : 'STORE';
-    const reservation = InventoryReservationService.createReservation({
+    const reservation = (await InventoryReservationService.createReservation({
       organizationId: orgId,
       locationType,
       storeId,
@@ -874,7 +1008,7 @@ inventoryRouter.post('/reservations', requireAuth, async (req, res, next) => {
       sourceId: sourceId || 'MANUAL-RES',
       durationMinutes: Number(durationMinutes || 60),
       createdBy: req.user!.id,
-    });
+    }));
 
     res.status(201).json({ data: reservation });
   } catch (err) {
@@ -885,7 +1019,7 @@ inventoryRouter.post('/reservations', requireAuth, async (req, res, next) => {
 // DELETE /api/inventory/reservations/:id
 inventoryRouter.delete('/reservations/:id', requireAuth, async (req, res, next) => {
   try {
-    InventoryReservationService.releaseReservation(req.params.id);
+    (await InventoryReservationService.releaseReservation(req.params.id));
     res.json({ success: true });
   } catch (err) {
     next(err);
@@ -896,10 +1030,10 @@ inventoryRouter.delete('/reservations/:id', requireAuth, async (req, res, next) 
 inventoryRouter.get('/alerts', requireAuth, async (req, res, next) => {
   try {
     const { orgId, storeId } = resolveOrgAndStore(req);
-    const alerts = InventoryAlertEngine.listAlerts({
+    const alerts = (await InventoryAlertEngine.listAlerts({
       organizationId: orgId,
       storeId,
-    });
+    }));
     res.json({ data: alerts });
   } catch (err) {
     next(err);
@@ -910,11 +1044,11 @@ inventoryRouter.get('/alerts', requireAuth, async (req, res, next) => {
 inventoryRouter.patch('/alerts/:id', requireAuth, async (req, res, next) => {
   try {
     const { status } = req.body;
-    const alert = InventoryAlertEngine.updateAlertStatus({
+    const alert = (await InventoryAlertEngine.updateAlertStatus({
       alertId: req.params.id,
       status: status || 'ACKNOWLEDGED',
       acknowledgedBy: req.user!.id,
-    });
+    }));
     res.json({ data: alert });
   } catch (err) {
     next(err);
@@ -925,11 +1059,11 @@ inventoryRouter.patch('/alerts/:id', requireAuth, async (req, res, next) => {
 inventoryRouter.get('/valuation', requireAuth, async (req, res, next) => {
   try {
     const { orgId, storeId, warehouseId } = resolveOrgAndStore(req);
-    const valuation = InventoryValuationService.getValuation({
+    const valuation = (await InventoryValuationService.getValuation({
       organizationId: orgId,
       storeId,
       warehouseId,
-    });
+    }));
     res.json({ data: valuation });
   } catch (err) {
     next(err);
@@ -937,3 +1071,4 @@ inventoryRouter.get('/valuation', requireAuth, async (req, res, next) => {
 });
 
 export default inventoryRouter;
+import { resolveCloudStoreContext } from '../services/cloudStoreContext';

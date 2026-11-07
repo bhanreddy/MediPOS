@@ -124,9 +124,15 @@ customersRouter.post(
   "/",
   requireAuth,
   requireRole("PHARMACIST", "OWNER"),
-  async (req, res, next) => {
+  transactionalRoute(async (req, res, next) => {
     try {
       const parsed = createCustomerSchema.parse(req.body);
+      if(parsed.phone){
+        const identity=`customer:${req.user!.clinic_id}:${parsed.phone}:${parsed.name.trim().toLowerCase()}`;
+        await queryRaw('SELECT pg_advisory_xact_lock(hashtextextended(?,0))',[identity]);
+        const duplicate=await queryOne('customers','clinic_id=? AND phone=? AND lower(btrim(name))=?',[req.user!.clinic_id!,parsed.phone,parsed.name.trim().toLowerCase()]);
+        if(duplicate)return void res.status(409).json({error:{code:'CUSTOMER_ALREADY_EXISTS',message:'A customer with this name and phone already exists. Select the existing profile.',customer_id:duplicate.id}});
+      }
       const payload = { ...parsed, clinic_id: req.user!.clinic_id! };
 
       const data = await localMutate({
@@ -139,7 +145,7 @@ customersRouter.post(
     } catch (err) {
       next(err);
     }
-  },
+  }),
 );
 
 // PUT /api/customers/:id

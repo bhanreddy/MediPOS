@@ -1,5 +1,5 @@
 // expiryRedistributionEngine.ts — Near-Expiry Stock Redistribution & Velocity-Matching Engine
-import { localDb } from '../../local-db';
+import { businessDb as localDb } from '../../lib/businessDb';
 import { ExpiryRedistributionPlan } from '../../domain/transferTypes';
 
 export class ExpiryRedistributionEngine {
@@ -7,11 +7,11 @@ export class ExpiryRedistributionEngine {
    * Identify near-expiry batches in slow-moving stores and recommend
    * redistribution to fast-moving stores that can consume before expiry
    */
-  static evaluateExpiryRedistribution(params: {
+  static async evaluateExpiryRedistribution(params: {
     organizationId: string;
     nearExpiryDaysThreshold?: number;
     minDailyDemandRatio?: number;
-  }): ExpiryRedistributionPlan[] {
+  }): Promise<ExpiryRedistributionPlan[]> {
     const {
       organizationId,
       nearExpiryDaysThreshold = 90,
@@ -22,7 +22,7 @@ export class ExpiryRedistributionEngine {
     const todayStr = today.toISOString().split('T')[0];
 
     // Find all unexpired batches within expiry threshold
-    const batches: any[] = localDb
+    const batches: any[] = (await localDb
       .prepare(
         `SELECT mb.id as batch_id, mb._local_id, mb.batch_number, mb.expiry_date, mb.medicine_id,
                 m.name as medicine_name, ip.store_id, ip.quantity_available, s.name as store_name, s.display_name
@@ -35,7 +35,7 @@ export class ExpiryRedistributionEngine {
            AND ip.quantity_available > 0
            AND mb._deleted = 0`
       )
-      .all(organizationId, todayStr);
+      .all(organizationId, todayStr));
 
     const plans: ExpiryRedistributionPlan[] = [];
 
@@ -48,14 +48,14 @@ export class ExpiryRedistributionEngine {
       const sourceQty = Number(batch.quantity_available);
 
       // Compute source store 30-day daily demand
-      const srcSalesRow: any = localDb
+      const srcSalesRow: any = (await localDb
         .prepare(
           `SELECT COALESCE(SUM(quantity), 0) as sold 
            FROM sale_items si JOIN sales s ON s.id = si.sale_id
            WHERE (s.store_id = ? OR s.store_id = ?) AND (si.medicine_id = ? OR si.medicine_id = ?)
              AND s.created_at >= datetime('now', '-30 days')`
         )
-        .get(batch.store_id, batch.store_id, batch.medicine_id, batch.medicine_id);
+        .get(batch.store_id, batch.store_id, batch.medicine_id, batch.medicine_id));
 
       const srcSold = Number(srcSalesRow?.sold || 0);
       const srcDailyDemand = Math.max(0.01, srcSold / 30);
@@ -65,27 +65,27 @@ export class ExpiryRedistributionEngine {
       if (atRiskQty <= 0) continue; // Source store will naturally sell through
 
       // Discover other stores with high sales velocity for this SKU
-      const candidateStores: any[] = localDb
+      const candidateStores: any[] = (await localDb
         .prepare(
           `SELECT s.id, s.name, s.display_name
            FROM stores s
            WHERE (s.organization_id = ?)
              AND s.id != ? AND s._deleted = 0`
         )
-        .all(organizationId, batch.store_id);
+        .all(organizationId, batch.store_id));
 
       let bestDest: any = null;
       let maxDestCapacity = 0;
 
       for (const cs of candidateStores) {
-        const destSalesRow: any = localDb
+        const destSalesRow: any = (await localDb
           .prepare(
             `SELECT COALESCE(SUM(quantity), 0) as sold 
              FROM sale_items si JOIN sales s ON s.id = si.sale_id
              WHERE (s.store_id = ? OR s.store_id = ?) AND (si.medicine_id = ? OR si.medicine_id = ?)
                AND s.created_at >= datetime('now', '-30 days')`
           )
-          .get(cs.id, cs.id, batch.medicine_id, batch.medicine_id);
+          .get(cs.id, cs.id, batch.medicine_id, batch.medicine_id));
 
         const destSold = Number(destSalesRow?.sold || 0);
         const destDailyDemand = destSold / 30;

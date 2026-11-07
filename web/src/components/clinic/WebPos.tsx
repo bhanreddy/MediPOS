@@ -1,3 +1,10 @@
+import { SisterStoresDialog } from './SisterStoresDialog';
+import { getBranchSelection } from '../../lib/branchSelection';
+import { CounterPrescriptionFields, emptyPrescriptionCheckout } from '../Prescriptions/CounterPrescriptionFields';
+import { RegisterDialog } from './RegisterDialog';
+import { CounterApprovalsDialog, CounterBatchDialog, ParkedBillsDialog, counterError, type CounterBatch, type ParkedBill } from './CounterDialogs';
+import { SyncStatusBadge } from '../SyncStatusBadge';
+import { desktopQueueAvailable,queueOfflineCommand } from '../../services/offlineCommandService';
 import { useState, useRef, useEffect, useMemo, useCallback } from "react";
 import { Link } from "react-router-dom";
 import { useSelector } from "react-redux";
@@ -51,6 +58,7 @@ const PAYMENT_METHODS = [
   { id: "upi", label: "UPI", Icon: Smartphone },
   { id: "card", label: "Card", Icon: CreditCard },
   { id: "credit", label: "Credit", Icon: Wallet },
+  { id: "mixed", label: "Split", Icon: Plus },
 ] as const;
 
 type CustomerHit = {
@@ -145,6 +153,30 @@ function mapPosPaymentToService(mode: string): PaymentMode {
 
 export const WebPos = () => {
   const store = usePosStore();
+  const [registerOpen, setRegisterOpen] = useState(false);
+  const [showParked, setShowParked] = useState(false);
+  const [showApprovals, setShowApprovals] = useState(false);
+  const [sisterMedicine, setSisterMedicine] = useState<{ id: string; name: string } | null>(null);
+  const [batchLine, setBatchLine] = useState<PosCartLine | null>(null);
+  const [discountReason, setDiscountReason] = useState('');
+  const [approvalFingerprint, setApprovalFingerprint] = useState('');
+  const [parking, setParking] = useState(false);
+  const parkRequest = useRef({ payload: '', id: '' });
+  const role = useAuth(state => state.role);
+  const isOwner = role === 'OWNER';
+  const [prescription, setPrescription] = useState(emptyPrescriptionCheckout);
+  const [placeOfSupply, setPlaceOfSupply] = useState('');
+  const [deliveryAddress, setDeliveryAddress] = useState('');
+  const [showDelivery, setShowDelivery] = useState(false);
+  useEffect(() => { setPrescription(emptyPrescriptionCheckout); }, [store.customer_id]);
+  const register = useQuery({
+    queryKey: ['register-active'],
+    queryFn: async () => (await api.get('/register/active')).data.data as { id: string; opened_at: string } | null,
+  });
+  const employeeDiscount = useQuery({
+    queryKey: ['counter-discount-limit'],
+    queryFn: async () => Number((await api.get('/counter/discount-limit')).data.data.max_basis_points),
+  });
   const searchInputRef = useRef<HTMLInputElement>(null);
   const customerInputRef = useRef<HTMLInputElement>(null);
   const customerNameRef = useRef<HTMLInputElement>(null);
@@ -298,13 +330,40 @@ export const WebPos = () => {
 
   const handleConfirmRef = useRef<() => void>(() => {});
 
+  const regulatedLines = store.cart.filter(line => line.prescription_required || (line.schedule_classification && line.schedule_classification !== 'NONE'));
+  const canDispense = role === 'PHARMACIST' && regulatedLines.length > 0;
+  const dispensingAttestation = canDispense && prescription.signed && prescription.annotated ? {
+    signed_original_checked: true as const,
+    annotated_and_signed: true as const,
+    prescription_register: prescription.prescriptionRegister.trim() || undefined,
+    h1_register: prescription.h1Register.trim() || undefined,
+    x_register_page: prescription.xPage.trim() || undefined,
+    x_duplicate_reference: prescription.xDuplicate.trim() || undefined,
+  } : undefined;
+  const quoteFingerprint=JSON.stringify({items:store.cart.map(line=>({medicine_id:line.medicine_id,batch_id:line.manual_batch_id||undefined,allocation_mode:line.manual_batch_id?'manual':'auto',quantity:line.quantity,mrp:line.mrp,discount_pct:line.discount_pct,gst_rate:line.gst_rate})),discount:Number(store.bill_discount)||0,is_bill_discount_percentage:store.is_percentage_discount,
+    ...(canDispense && prescription.id ? {customer_id:store.customer_id,prescription_id:prescription.id,dispensing_attestation:dispensingAttestation} : {}),
+    place_of_supply_state_code: placeOfSupply || undefined, delivery_address: deliveryAddress.trim() || undefined,
+  });
+  const [serverQuote,setServerQuote]=useState<{fingerprint:string;subtotal:number;totalCgst:number;totalSgst:number;totalIgst:number;grandTotal:number;totalDiscount:number;billDiscountAmount:number;expected_total_paise:number;items:Array<{medicine_id:string;batch_id:string;quantity:number;mrp:number}>}|null>(null);
+  const [quoteError,setQuoteError]=useState('');const [quoteLoading,setQuoteLoading]=useState(false);
+  useEffect(()=>{
+    setServerQuote(null);setQuoteError('');if(!store.cart.length){setQuoteLoading(false);return;}
+    const controller=new AbortController();setQuoteLoading(true);
+    const timer=setTimeout(()=>{api.post('/sales/quote',JSON.parse(quoteFingerprint),{signal:controller.signal,'axios-retry':{retries:0}})
+      .then(response=>setServerQuote({...response.data.data,fingerprint:quoteFingerprint}))
+      .catch(error=>{if(!controller.signal.aborted)setQuoteError(error.response?.data?.error?.message||'Unable to confirm stock and prices. Retry before checkout.');})
+      .finally(()=>{if(!controller.signal.aborted)setQuoteLoading(false);});},180);
+    return()=>{clearTimeout(timer);controller.abort();};
+  },[quoteFingerprint]);
+
   const calculation = useMemo(() => {
     let subtotal = 0;
     let cgst = 0;
     let sgst = 0;
+    let igst = 0;
 
     store.cart.forEach((item) => {
-      const itemTotal = item.quantity * item.mrp;
+      const itemTotal = item.quantity * item.mrp * (1 - item.discount_pct / 100);
       const itemTax = itemTotal - itemTotal / (1 + item.gst_rate / 100);
       const itemCgst = itemTax / 2;
       const itemSgst = itemTax / 2;
@@ -324,14 +383,18 @@ export const WebPos = () => {
     const discountRatio = subtotal > 0 ? (subtotal - billDiscountAmt) / subtotal : 1;
     cgst *= discountRatio;
     sgst *= discountRatio;
-    const payable = roundMoney(subtotal - billDiscountAmt);
-    const walletPaise = store.use_nex_coins && store.customer_id && store.payment_mode !== 'credit'
+    const activeQuote=serverQuote?.fingerprint===quoteFingerprint?serverQuote:null;
+    if(activeQuote){subtotal=Number(activeQuote.subtotal);cgst=Number(activeQuote.totalCgst);sgst=Number(activeQuote.totalSgst);igst=Number(activeQuote.totalIgst);billDiscountAmt=Number(activeQuote.billDiscountAmount);}
+    const payable = activeQuote?Number(activeQuote.grandTotal):roundMoney(subtotal - billDiscountAmt);
+    const walletPaise = store.use_nex_coins && store.customer_id && !['credit', 'mixed'].includes(store.payment_mode)
       ? Math.min(Math.max(0,store.wallet_amount_paise || 0),walletAvailable,Math.floor(Math.round(payable*100)*(wallet.data?.policy?.redemption_limit_percent??100)/100)) : 0;
     const walletAmount = walletPaise / 100;
     const amountToCollect = roundMoney(payable-walletAmount);
     const rawPaid = store.paid_amount.trim();
     const parsedPaid = Number(rawPaid);
-    const tendered = rawPaid !== "" && Number.isFinite(parsedPaid)
+    const splitCollected = store.payments.filter(payment => payment.tender_type !== 'CREDIT')
+      .reduce((sum, payment) => sum + (Math.round(payment.amount * 100) || 0), 0) / 100;
+    const tendered = store.payment_mode === 'mixed' ? splitCollected : rawPaid !== "" && Number.isFinite(parsedPaid)
       ? Math.max(0, parsedPaid)
       : store.payment_mode === "credit"
         ? 0
@@ -340,7 +403,7 @@ export const WebPos = () => {
     const changeDue = store.payment_mode === "cash"
       ? Math.max(0, roundMoney(tendered - amountToCollect))
       : 0;
-    const collected = store.payment_mode === "credit"
+    const collected = store.payment_mode === "mixed" ? splitCollected : store.payment_mode === "credit"
       ? Math.min(tendered, amountToCollect)
       : amountToCollect;
 
@@ -348,6 +411,7 @@ export const WebPos = () => {
       subtotal,
       cgst,
       sgst,
+      igst,
       billDiscountAmt,
       payable,
       walletPaise,
@@ -359,10 +423,12 @@ export const WebPos = () => {
       collected,
     };
   }, [
+    serverQuote,quoteFingerprint,
     store.cart,
     store.bill_discount,
     store.is_percentage_discount,
     store.paid_amount,
+    store.payments,
     store.payment_mode,
     store.wallet_amount_paise,
     store.use_nex_coins,
@@ -374,7 +440,7 @@ export const WebPos = () => {
   const coinPolicy=wallet.data?.policy;
   const coinRedemptionCap=Math.min(walletAvailable,Math.floor(Math.round(calculation.payable*100)*(coinPolicy?.redemption_limit_percent??100)/100));
   const usingCoins = store.use_nex_coins;
-  const canUseCoins = wallet.isSuccess && !wallet.isFetching && coinRedemptionCap > 0 && store.payment_mode !== 'credit';
+  const canUseCoins = wallet.isSuccess && !wallet.isFetching && coinRedemptionCap > 0 && !['credit','mixed'].includes(store.payment_mode);
   const expectedCoins = store.customer_id && store.payment_mode!=='credit' && coinPolicy?.enabled && Math.round(calculation.payable*100)>=coinPolicy.minimum_sale_paise
     ? Math.min(coinPolicy.earning_cap_paise||Number.MAX_SAFE_INTEGER,Math.floor(Math.round(calculation.amountToCollect*100)*coinPolicy.rate_bps/10000)) : 0;
   const selectedCoinAmount=store.wallet_amount_paise;
@@ -384,17 +450,43 @@ export const WebPos = () => {
   },[wallet.isSuccess,wallet.isFetching,selectedCoinAmount,setSelectedCoinAmount,coinRedemptionCap]);
 
   const unitCount = store.cart.reduce((sum, line) => sum + line.quantity, 0);
-  const creditNeedsCustomer = store.payment_mode === "credit" && !store.customer_id;
-  const shortPay = store.payment_mode !== "credit" && calculation.balance_due > 0.009;
+  const splitPayments = store.payments.filter(payment => payment.amount > 0 && payment.tender_type !== 'WALLET')
+    .map(payment => ({
+      tender_type: payment.tender_type as 'CASH' | 'UPI' | 'CARD' | 'CREDIT',
+      amount_paise: Math.round(payment.amount * 100),
+      reference_number: payment.reference_number?.trim() || undefined,
+    }));
+  const splitMode = store.payment_mode === 'mixed';
+  const splitCredit = splitMode && splitPayments.some(payment => payment.tender_type === 'CREDIT');
+  const needsCash = (store.payment_mode === 'cash' || store.payment_mode === 'credit') && calculation.collected > 0
+    || splitMode && splitPayments.some(payment => payment.tender_type === 'CASH');
+  const splitMismatch = splitMode && (splitPayments.length < 2
+    || splitPayments.reduce((sum, payment) => sum + payment.amount_paise, 0) !== Math.round(calculation.payable * 100));
+  const discountPaise = Math.round(Number(serverQuote?.totalDiscount || 0) * 100);
+  const needsApproval = discountPaise * 10000 > Math.round(calculation.subtotal * 100) * (employeeDiscount.data ?? 1500);
+  const approvalKey = JSON.stringify([quoteFingerprint, store.customer_id, discountReason.trim()]);
+  const approvalId = approvalFingerprint === approvalKey ? store.supervisor_auth_id : null;
+  const creditNeedsCustomer = (store.payment_mode === 'credit' || splitCredit) && !store.customer_id;
+  const shortPay = !splitMode && store.payment_mode !== "credit" && calculation.balance_due > 0.009;
   const overCreditLimit = Boolean(
-    store.payment_mode === "credit" &&
+    (store.payment_mode === "credit" || splitCredit) &&
       customerAccount &&
       customerAccount.limit > 0 &&
       customerAccount.due + calculation.balance_due > customerAccount.limit + 0.009,
   );
   const confirmBlockedReason = store.cart.length === 0
     ? ""
-    : walletBlocked
+    : quoteLoading || quoteError || serverQuote?.fingerprint !== quoteFingerprint
+      ? quoteError || 'Confirming stock and prices'
+      : needsCash && !register.data
+      ? 'Open the cash register to collect cash'
+      : splitMismatch
+        ? 'Enter at least two tenders that add up to the bill total'
+        : discountPaise > 0 && !discountReason.trim()
+          ? 'Enter a discount reason'
+          : needsApproval && !approvalId
+            ? 'Ask an owner to approve this discount'
+            : walletBlocked
       ? "Refresh the Nex Coins before confirming"
       : creditNeedsCustomer
       ? "Choose a saved customer for credit"
@@ -406,6 +498,7 @@ export const WebPos = () => {
 
   const executeSale = useCallback(async () => {
     if (committingRef.current) return;
+    if (store.cart.length && (!serverQuote || serverQuote.fingerprint!==quoteFingerprint || quoteLoading || quoteError)) { toast.error(quoteError||'Wait for stock and prices to be confirmed.');return; }
     if (!cashierId) {
       toast.error("Sign in to complete a sale");
       return;
@@ -419,7 +512,12 @@ export const WebPos = () => {
       (customerNameRef.current || customerInputRef.current)?.focus();
       return;
     }
-    if (store.payment_mode !== "credit" && calculation.balance_due > 0.009) {
+    if (confirmBlockedReason) {
+      if (needsCash && !register.data) setRegisterOpen(true);
+      toast.error(confirmBlockedReason);
+      return;
+    }
+    if (!splitMode && store.payment_mode !== "credit" && calculation.balance_due > 0.009) {
       toast.error("Amount received is less than the bill. Collect the rest or switch to Credit.");
       return;
     }
@@ -432,22 +530,12 @@ export const WebPos = () => {
     committingRef.current = true;
     setIsCommitting(true);
     try {
-      const sub = calculation.subtotal;
-      let lineDiscountPct = 0;
-      if (sub > 0) {
-        if (store.is_percentage_discount) {
-          lineDiscountPct = parseFloat(store.bill_discount) || 0;
-        } else {
-          const flat = parseFloat(store.bill_discount) || 0;
-          lineDiscountPct = (flat / sub) * 100;
-        }
-      }
-
       const serviceCart: CartItem[] = store.cart.map((c) => ({
         product: { id: c.medicine_id, gst_rate: Number(c.gst_rate || 0) },
         quantity: c.quantity,
-        discountPercent: lineDiscountPct,
-        batchId: c.batch_id,
+        discountPercent: c.discount_pct,
+        batchId: c.manual_batch_id || c.batch_id,
+        allocationMode: c.manual_batch_id ? "manual" : "auto",
         sellingPrice: c.mrp,
       }));
 
@@ -456,16 +544,20 @@ export const WebPos = () => {
         store.customer_id || undefined,
         cashierId,
         mapPosPaymentToService(store.payment_mode),
-        { supplyType: "INTRA", paidAmount: calculation.collected, walletAmountPaise: calculation.walletPaise, requestId: store.checkout_request_id },
+        { supplyType: "INTRA", paidAmount: calculation.collected, walletAmountPaise: calculation.walletPaise, requestId: store.checkout_request_id, billDiscount: Number(store.bill_discount)||0, isBillDiscountPercentage:store.is_percentage_discount, expectedTotalPaise:serverQuote?.expected_total_paise,
+          paymentSplits: splitMode ? splitPayments : undefined, requireRegister: true, parkId: store.park_id,
+          discountReason, discountApprovalId: approvalId,
+          prescriptionId: canDispense ? prescription.id : undefined, dispensingAttestation,
+          placeOfSupply, deliveryAddress: deliveryAddress.trim() },
       );
 
       const items = ((sale as { sale_items?: Record<string, unknown>[] }).sale_items || []).map(
         (item, index) => {
-          const line = store.cart[index];
+          const line = store.cart.find(line=>line.medicine_id===item.medicine_id) || store.cart[index];
           return {
             ...item,
-            medicines: { name: line?.medicine_name || "" },
-            medicine_batches: {
+            medicines: (item.medicines as {name?:string}) || { name: line?.medicine_name || "" },
+            medicine_batches: item.medicine_batches || {
               batch_number: line?.batch_number || "",
               expiry_date: line?.expiry_date || "",
             },
@@ -474,6 +566,11 @@ export const WebPos = () => {
       );
 
       setUpiModal("closed");
+      setDiscountReason("");
+      setPrescription(emptyPrescriptionCheckout);
+      setPlaceOfSupply('');
+      setDeliveryAddress('');
+      setShowDelivery(false);
       setPendingUpiAmount(0);
       const earned=Number((sale as Sale & {nex_coins_earned_paise?:number}).nex_coins_earned_paise||0);
       toast.success(earned>0?`Sale confirmed · earned ${walletMoney(earned)} Nex Coins`:"Sale confirmed");
@@ -521,7 +618,9 @@ export const WebPos = () => {
     calculation.subtotal,
     calculation.collected,
     calculation.walletPaise,
-    walletBlocked,
+    walletBlocked, confirmBlockedReason, needsCash, register.data, splitMode, splitPayments,
+    discountReason, approvalId, serverQuote, quoteFingerprint, quoteLoading, quoteError,
+    canDispense, prescription.id, dispensingAttestation, placeOfSupply, deliveryAddress,
     queryClient,
   ]);
 
@@ -532,6 +631,7 @@ export const WebPos = () => {
 
   const handleConfirm = useCallback(async () => {
     if (committingRef.current) return;
+    if (store.cart.length && (!serverQuote || serverQuote.fingerprint!==quoteFingerprint || quoteLoading || quoteError)) { toast.error(quoteError||'Wait for stock and prices to be confirmed.');return; }
     if (!cashierId) {
       toast.error("Sign in to complete a sale");
       return;
@@ -544,6 +644,11 @@ export const WebPos = () => {
     if (!store.customer_id && store.customer_phone.trim()) {
       toast.error("Select a saved customer or enter a name and save the customer first");
       (customerNameRef.current || customerInputRef.current)?.focus();
+      return;
+    }
+    if (confirmBlockedReason) {
+      if (needsCash && !register.data) setRegisterOpen(true);
+      toast.error(confirmBlockedReason);
       return;
     }
     if (shortPay) {
@@ -582,6 +687,7 @@ export const WebPos = () => {
     calculation.collected,
     upiId,
     executeSale,
+    confirmBlockedReason, needsCash, register.data,
     shortPay,
     creditNeedsCustomer,
     overCreditLimit,
@@ -606,12 +712,8 @@ export const WebPos = () => {
 
   const addSearchResultToCart = async (result: SearchResult) => {
     if (committingRef.current) return;
-    if (result.totalStock <= 0) {
-      toast.error("No stock available");
-      return;
-    }
-    if (!result.bestBatchId) {
-      toast.error("No sellable batch");
+    if (result.totalStock <= 0 || !result.bestBatchId) {
+      setSisterMedicine({ id: result.product.id, name: result.product.name });
       return;
     }
 
@@ -632,7 +734,7 @@ export const WebPos = () => {
         return;
       }
 
-      const maxStock = Number(batch.quantity_remaining ?? 0);
+      const maxStock = Number(result.totalStock || 0);
       if (maxStock <= 0) {
         toast.error("No stock available for this batch");
         return;
@@ -642,7 +744,7 @@ export const WebPos = () => {
         (line) => line.medicine_id === product.id && line.batch_id === batchKey,
       );
       if (existing && existing.quantity >= maxStock) {
-        toast.error(`Only ${maxStock} left in this batch`);
+        toast.error(`Only ${maxStock} sellable units available`);
         return;
       }
       const price = Number(batch.sales_rate || batch.mrp || 0);
@@ -660,7 +762,7 @@ export const WebPos = () => {
         mrp: price,
         purchase_price: Number(batch.purchase_price || batch.purchase_rate || 0),
         batch_id: batchKey,
-        manual_batch_id: batchKey,
+        manual_batch_id: null,
         batch_number: batch.batch_number || "",
         expiry_date: batch.expiry_date || "",
         max_stock: maxStock,
@@ -774,6 +876,21 @@ export const WebPos = () => {
     store.updateQuantity(item.id, Math.min(Math.max(1, next), maxStock));
   };
 
+  const savePendingDesktopBill=async()=>{
+    if(!store.cart.length||committingRef.current)return;
+    if(store.cart.some(line=>line.prescription_required||(line.schedule_classification&&line.schedule_classification!=='NONE'))) {toast.error('Restricted medicines require the verified online dispensing workflow.');return;}
+    if(store.use_nex_coins){toast.error('Nex Coins require online verification.');return;}
+    committingRef.current=true;
+    try {
+      const actor = useAuth.getState();
+      const branch = getBranchSelection(actor.user?.id, sessionStorage.getItem('impersonate_clinic_id') || actor.clinic_id);
+      await queueOfflineCommand({command_id:store.checkout_request_id,type:'SALE',payload:{...JSON.parse(quoteFingerprint),store_id:branch,customer_id:store.customer_id||null,
+        payment_mode:store.payment_mode,paid_amount:calculation.collected,expected_total_paise:Math.round(calculation.payable*100),
+        local_cart_snapshot:store.cart,local_created_at:new Date().toISOString()}});
+      store.reset();toast.success('Pending bill saved on this device. Complete sync before treating it as a sale.');
+    }catch(error){toast.error(String(error));}finally{committingRef.current=false;}
+  };
+
   const clearBill = () => {
     if (!clearArmed) {
       setClearArmed(true);
@@ -789,6 +906,78 @@ export const WebPos = () => {
   const activeOptionId = showSearchPanel && results[selectedIndex]
     ? `${SEARCH_LIST_ID}-option-${selectedIndex}`
     : undefined;
+  async function parkCurrentBill() {
+    if (!store.cart.length || parking) return;
+    const snapshot = {
+      resume_id: store.park_id || undefined,
+      cart: store.cart,
+      customer: { id: store.customer_id, name: store.customer_name, phone: store.customer_phone },
+      totals: {
+        bill_discount: store.bill_discount, is_percentage_discount: store.is_percentage_discount,
+        discount_reason: discountReason, payment_mode: store.payment_mode, paid_amount: store.paid_amount, payments: store.payments,
+      },
+    };
+    const fingerprint = JSON.stringify(snapshot);
+    if (parkRequest.current.payload !== fingerprint) parkRequest.current = { payload: fingerprint, id: crypto.randomUUID() };
+    setParking(true);
+    try {
+      const response = await api.post('/pos/park', { ...snapshot, request_id: parkRequest.current.id });
+      store.reset();
+      setDiscountReason('');
+      parkRequest.current = { payload: '', id: '' };
+      toast.success(`Bill parked · ${response.data.data.park_token}`);
+    } catch (failure) {
+      toast.error(counterError(failure, 'Unable to park the bill. Your cart is still open.'));
+    } finally {
+      setParking(false);
+    }
+  }
+
+  function resumeBill(draft: ParkedBill) {
+    const totals = draft.totals_snapshot;
+    store.reset();
+    usePosStore.setState({
+      cart: draft.cart_snapshot,
+      customer_id: draft.customer_snapshot.id ?? null,
+      customer_name: draft.customer_snapshot.name ?? '',
+      customer_phone: draft.customer_snapshot.phone ?? '',
+      bill_discount: totals.bill_discount ?? '0',
+      is_percentage_discount: !!totals.is_percentage_discount,
+      payment_mode: totals.payment_mode ?? 'cash',
+      paid_amount: totals.paid_amount ?? '',
+      ...(totals.payments ? { payments: totals.payments } : {}),
+      park_id: draft.id,
+      park_token: draft.park_token,
+    });
+    setDiscountReason(totals.discount_reason ?? '');
+    setShowParked(false);
+  }
+
+  function selectBatch(batch: CounterBatch | null) {
+    if (!batchLine) return;
+    usePosStore.setState(state => ({
+      cart: state.cart.map(line => line.id !== batchLine.id ? line : {
+        ...line, manual_batch_id: batch?.id ?? null, batch_id: batch?.id ?? line.batch_id,
+        batch_number: batch?.batch_number ?? line.batch_number, expiry_date: batch?.expiry_date ?? line.expiry_date,
+        mrp: batch?.selling_price ?? line.mrp, max_stock: batch?.available_quantity ?? 9999,
+      }),
+    }));
+    setBatchLine(null);
+  }
+
+  async function requestOwnerApproval() {
+    try {
+      await api.post('/counter/discount-approvals', {
+        ...JSON.parse(quoteFingerprint), customer_id: store.customer_id,
+        _local_id: store.checkout_request_id, discount_reason: discountReason.trim(),
+      });
+      setShowApprovals(true);
+      toast.success('Discount sent for owner approval.');
+    } catch (failure) {
+      toast.error(counterError(failure, 'Unable to request approval.'));
+    }
+  }
+
   const suggestions = store.payment_mode === "cash" ? cashSuggestions(calculation.amountToCollect) : [];
   const receivedLabel = store.payment_mode === "credit" ? "Received now" : "Amount received";
   const receivedHint = store.payment_mode === "credit"
@@ -804,6 +993,26 @@ export const WebPos = () => {
       }`}
     >
       <section className="flex min-w-0 flex-1 flex-col gap-3 lg:flex-[3]">
+        <div className="flex flex-wrap gap-2">
+          <Button type="button" variant="secondary" onClick={() => setRegisterOpen(true)}>{register.data ? 'Cash register · Open' : 'Cash register'}</Button>
+          <Button type="button" variant="secondary" onClick={() => void parkCurrentBill()} disabled={!store.cart.length || parking}>
+            {store.park_id ? 'Save and park bill' : 'Park bill'}
+          </Button>
+          <Button type="button" variant="secondary" onClick={() => setShowParked(true)}>Parked bills</Button>
+          <Button type="button" variant="secondary" onClick={() => setShowApprovals(true)}>Discount approvals</Button>
+          {store.park_token && <span className="self-center text-sm text-muted">Resumed {store.park_token}</span>}
+        </div>
+        {registerOpen && <RegisterDialog session={register.data ?? null} onChange={() => void register.refetch()} onClose={() => setRegisterOpen(false)} />}
+        {showParked && <ParkedBillsDialog hasCurrentBill={!!store.cart.length} onResume={resumeBill} onClose={() => setShowParked(false)} />}
+        {sisterMedicine && <SisterStoresDialog medicine={sisterMedicine} onClose={() => setSisterMedicine(null)} />}
+        {batchLine && <CounterBatchDialog line={batchLine} onSelect={selectBatch} onClose={() => setBatchLine(null)} />}
+        {showApprovals && <CounterApprovalsDialog isOwner={isOwner} checkoutId={store.checkout_request_id}
+          onClose={() => setShowApprovals(false)} onUse={id => {
+            store.setSupervisorAuth(id); setApprovalFingerprint(approvalKey); setShowApprovals(false);
+          }} />}
+        {desktopQueueAvailable()&&<div className="flex justify-end"><SyncStatusBadge/></div>}
+      {(quoteLoading||quoteError)&&<p role={quoteError?'alert':'status'} className={quoteError?'text-sm text-danger':'text-sm text-muted'}>{quoteError||'Confirming batch stock and prices…'}</p>}
+        {quoteError&&desktopQueueAvailable()&&store.cart.length>0&&regulatedLines.length===0&&<button type="button" className="rounded-lg border border-border px-3 py-2 text-sm" onClick={()=>void savePendingDesktopBill()}>Save pending bill on this device</button>}
         {searchError && (
           <p role="alert" className="text-sm text-danger">
             {searchError}
@@ -932,13 +1141,23 @@ export const WebPos = () => {
                           {item.medicine_name}
                         </p>
                         <p className={`mt-1 text-xs ${expiryTone}`}>
-                          <span className="font-mono text-muted">{item.batch_number || "Auto batch"}</span>
+                          <span className="font-mono text-muted">{item.manual_batch_id ? item.batch_number : serverQuote?.items.filter(allocation=>allocation.medicine_id===item.medicine_id).map(allocation=>`${allocation.quantity} units`).join(' + ') || 'Auto · FEFO across available batches'}</span>
                           {" · "}
                           Exp {formatExpiry(item.expiry_date)}
                           {expiryNote ? ` · ${expiryNote}` : ""}
                           {" · "}
                           {formatRupee(item.mrp)} each
                         </p>
+                        <div className="mt-2 flex flex-wrap items-center gap-3">
+                          <button type="button" className="text-xs font-semibold text-primary" onClick={() => setBatchLine(item)}>Change batch</button>
+                          <button type="button" className="text-xs font-semibold text-primary"
+                            onClick={() => setSisterMedicine({ id: item.medicine_id, name: item.medicine_name })}>Check sister stores</button>
+                          <label className="text-xs text-muted">Item discount (%)
+                            <input aria-label={`Item discount for ${item.medicine_name}`} type="number" min="0" max="100" step="0.01"
+                              className="ml-1 w-16 rounded border border-border bg-surface px-1 py-1 text-foreground"
+                              value={item.discount_pct || ''} onChange={event => store.updateLineDiscount(item.id, Math.min(100, Math.max(0, Number(event.target.value) || 0)))} />
+                          </label>
+                        </div>
                         {(item.prescription_required || schedule || item.cold_chain_required) && (
                           <p className="mt-2 flex flex-wrap gap-1.5">
                             {item.prescription_required && (
@@ -954,7 +1173,7 @@ export const WebPos = () => {
                         )}
                       </div>
                       <p className="shrink-0 text-base font-semibold tabular-nums text-foreground-strong">
-                        {formatRupee(item.quantity * item.mrp)}
+                        {formatRupee(serverQuote?.fingerprint===quoteFingerprint ? serverQuote.items.filter(allocation=>allocation.medicine_id===item.medicine_id).reduce((sum,allocation)=>sum+allocation.quantity*allocation.mrp,0) : item.quantity*item.mrp)}
                       </p>
                     </div>
                     <div className="mt-3 flex items-center justify-between gap-3">
@@ -1227,10 +1446,38 @@ export const WebPos = () => {
             </div>
             <div className="flex items-center justify-between text-muted" title="Prices already include GST. This is the tax portion of the total.">
               <span>GST included</span>
-              <span className="tabular-nums">{formatRupee(calculation.cgst + calculation.sgst)}</span>
+              <span className="tabular-nums">{formatRupee(calculation.cgst + calculation.sgst + calculation.igst)}</span>
             </div>
           </div>
           </div>
+
+          {regulatedLines.length > 0 && (canDispense
+            ? <CounterPrescriptionFields customerId={store.customer_id} value={prescription} onChange={setPrescription}
+                needsGeneral={regulatedLines.some(line => line.schedule_classification !== 'SCHEDULE_X')}
+                needsH1={regulatedLines.some(line => line.schedule_classification === 'SCHEDULE_H1')}
+                needsX={regulatedLines.some(line => line.schedule_classification === 'SCHEDULE_X')} />
+            : <p className="rounded-lg bg-warning/10 p-3 text-sm">A registered pharmacist must complete a bill containing restricted medicines.</p>)}
+          <button type="button" aria-expanded={showDelivery} className="text-left text-sm font-semibold text-primary"
+            onClick={() => setShowDelivery(value => !value)}>Place of supply and delivery</button>
+          {showDelivery && <div className="grid gap-2 sm:grid-cols-2">
+            <label className="text-sm">Place of supply (State code)
+              <input className="block w-full rounded border border-border bg-surface p-2" inputMode="numeric" maxLength={2}
+                placeholder="Store State by default" value={placeOfSupply}
+                onChange={event => setPlaceOfSupply(event.target.value.replace(/[^0-9]/g, ''))} />
+            </label>
+            <label className="text-sm">Delivery address
+              <input className="block w-full rounded border border-border bg-surface p-2" maxLength={500}
+                value={deliveryAddress} onChange={event => setDeliveryAddress(event.target.value)} />
+            </label>
+          </div>}
+          {discountPaise > 0 && <div className="space-y-2">
+            <label className="block text-sm">Discount reason
+              <input className="mt-1 block w-full rounded-lg border border-border bg-surface px-3 py-2" value={discountReason} maxLength={400}
+                onChange={event => setDiscountReason(event.target.value)} />
+            </label>
+            {needsApproval && <Button type="button" variant="secondary" disabled={!discountReason.trim() || !!approvalId}
+              onClick={() => void requestOwnerApproval()}>{approvalId ? 'Discount approved' : 'Request owner approval'}</Button>}
+          </div>}
 
           <div className="flex flex-col gap-3">
           <div className="rounded-xl bg-primary/8 px-4 py-3">
@@ -1247,7 +1494,7 @@ export const WebPos = () => {
           <div
             role="radiogroup"
             aria-label="Payment method"
-            className="grid grid-cols-4 gap-1 rounded-xl border border-border bg-surface-elevated p-1"
+            className="grid grid-cols-5 gap-1 rounded-xl border border-border bg-surface-elevated p-1"
           >
             {PAYMENT_METHODS.map(({ id, label, Icon }) => {
               const selected = store.payment_mode === id;
@@ -1261,6 +1508,10 @@ export const WebPos = () => {
                     if (store.payment_mode === id) return;
                     store.setPaymentMode(id);
                     store.setPaidAmount("");
+                    if (id === 'mixed') {
+                      store.setUseNexCoins(false);
+                      if (store.payments.length < 2) store.setPayments([{ tender_type: 'CASH', amount: 0 }, { tender_type: 'UPI', amount: 0 }]);
+                    }
                   }}
                   className={`flex min-h-12 flex-col items-center justify-center gap-1 rounded-lg text-xs font-semibold transition-colors ${
                     selected
@@ -1275,6 +1526,31 @@ export const WebPos = () => {
             })}
           </div>
 
+          {splitMode ? <div className="space-y-2">
+            {store.payments.map((payment, index) => {
+              const update = (values: Partial<typeof payment>) => store.setPayments(store.payments.map((entry, row) => row === index ? { ...entry, ...values } : entry));
+              return <div className="grid grid-cols-2 gap-2 rounded-lg border border-border p-2 text-sm" key={index}>
+                <label>Method {index + 1}
+                  <select className="block w-full rounded border border-border bg-surface p-1" value={payment.tender_type}
+                    onChange={event => update({ tender_type: event.target.value as typeof payment.tender_type })}>
+                    <option value="CASH">Cash</option><option value="UPI">UPI</option><option value="CARD">Card</option><option value="CREDIT">Credit</option>
+                  </select>
+                </label>
+                <label>Amount {index + 1} (₹)
+                  <input className="block w-full rounded border border-border bg-surface p-1" type="number" min="0" step="0.01"
+                    value={payment.amount || ''} onChange={event => update({ amount: Math.max(0, Number(event.target.value) || 0) })} />
+                </label>
+                {(payment.tender_type === 'UPI' || payment.tender_type === 'CARD') && <label>Reference {index + 1}
+                  <input className="block w-full rounded border border-border bg-surface p-1" value={payment.reference_number || ''}
+                    maxLength={255} onChange={event => update({ reference_number: event.target.value })} />
+                </label>}
+                {store.payments.length > 2 && <button type="button" className="text-danger" onClick={() => store.setPayments(store.payments.filter((_entry, row) => row !== index))}>Remove tender {index + 1}</button>}
+              </div>;
+            })}
+            <Button type="button" variant="secondary" disabled={store.payments.length >= 20}
+              onClick={() => store.setPayments([...store.payments, { tender_type: 'CARD', amount: 0 }])}>Add tender</Button>
+            {confirmBlockedReason && <p role="alert" className="text-sm font-semibold text-danger">{confirmBlockedReason}</p>}
+          </div> : <>
           <div>
             <div className="flex items-center justify-between gap-3 rounded-xl border border-border bg-surface-elevated px-3 py-2">
               <label htmlFor="pos-received" className="text-sm font-semibold text-muted">
@@ -1328,6 +1604,8 @@ export const WebPos = () => {
               </p>
             )}
           </div>
+
+          </>}
 
           <div className="max-[480px]:hidden">
             <Button

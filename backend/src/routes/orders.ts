@@ -13,7 +13,7 @@ import { RepeatOrderService } from '../services/oms/repeatOrderService';
 import { OrderEventService } from '../services/oms/orderEventService';
 import { CustomerAddressService } from '../services/oms/customerAddressService';
 import { OrderStateMachine } from '../services/oms/orderStateMachine';
-import { localDb } from '../local-db';
+import { businessDb as localDb } from '../lib/businessDb';
 import { AppError } from '../lib/appError';
 import { rejectLegacyLoyalty } from '../services/commercial/retiredLoyalty';
 
@@ -22,7 +22,7 @@ ordersRouter.use(requireAuth, rejectLegacyLoyalty);
 
 // Helper to resolve org ID from user
 function resolveOrgId(req: any): string {
-  return req.user?.organization_id || req.user?.clinic_id || 'default-org';
+  return req.user?.organization_id || req.user?.clinic_id;
 }
 
 // ── 1. GET /api/orders — List Orders Command Center ─────────────────────────
@@ -97,7 +97,7 @@ ordersRouter.get('/', requireAuth, async (req, res, next) => {
     query += ` ORDER BY o.created_at DESC LIMIT ? OFFSET ?`;
     params.push(Number(limit), Number(offset));
 
-    const rows = localDb.prepare(query).all(...params);
+    const rows = (await localDb.prepare(query).all(...params));
 
     // Count total matching
     let countQuery = `
@@ -118,7 +118,7 @@ ordersRouter.get('/', requireAuth, async (req, res, next) => {
       countQuery += ` AND o.customer_id = ?`;
       countParams.push(customer_id);
     }
-    const countRow: any = localDb.prepare(countQuery).get(...countParams);
+    const countRow: any = (await localDb.prepare(countQuery).get(...countParams));
 
     res.json({
       data: rows,
@@ -144,7 +144,7 @@ ordersRouter.get('/metrics', requireAuth, async (req, res, next) => {
       params.push(storeId, storeId);
     }
 
-    const rows: any[] = localDb
+    const rows: any[] = (await localDb
       .prepare(
         `SELECT 
            COUNT(*) as total_orders,
@@ -163,7 +163,7 @@ ordersRouter.get('/metrics', requireAuth, async (req, res, next) => {
          FROM orders
          WHERE ${filter}`
       )
-      .all(...params);
+      .all(...params));
 
     const m = rows[0] || {};
     res.json({
@@ -197,12 +197,12 @@ ordersRouter.get('/fulfilment/candidates', requireAuth, async (req, res, next) =
     const fulfilmentType = (req.query.fulfilment_type as any) || 'STORE_PICKUP';
     const requestedStoreId = (req.query.requested_store_id as string) || null;
 
-    const candidates = FulfilmentEngine.evaluateCandidates({
+    const candidates = (await FulfilmentEngine.evaluateCandidates({
       organizationId: orgId,
       items,
       fulfilmentType,
       requestedStoreId,
-    });
+    }));
 
     res.json({ data: candidates });
   } catch (err) {
@@ -220,10 +220,10 @@ ordersRouter.get('/picking/queue', requireAuth, async (req, res, next) => {
       throw new AppError(400, 'store_id parameter or x-store-id header is required', 'STORE_REQUIRED');
     }
 
-    const queue = OrderPickPackService.getStorePickQueue({
+    const queue = (await OrderPickPackService.getStorePickQueue({
       organizationId: orgId,
       storeId,
-    });
+    }));
 
     res.json({ data: queue });
   } catch (err) {
@@ -246,7 +246,7 @@ ordersRouter.post('/quote', requireAuth, async (req, res, next) => {
       delivery_charge_paise,
     } = req.body;
 
-    const quote = OrderQuoteService.generateQuote({
+    const quote = (await OrderQuoteService.generateQuote({
       organizationId: orgId,
       storeId: store_id || null,
       customerId: customer_id || null,
@@ -256,7 +256,7 @@ ordersRouter.post('/quote', requireAuth, async (req, res, next) => {
       couponCode: coupon_code || null,
       redeemLoyaltyCredits: Number(redeem_loyalty_credits || 0),
       deliveryChargePaiseOverride: delivery_charge_paise != null ? Number(delivery_charge_paise) : null,
-    });
+    }));
 
     res.json({ data: quote });
   } catch (err) {
@@ -268,7 +268,7 @@ ordersRouter.post('/quote', requireAuth, async (req, res, next) => {
 ordersRouter.post('/draft', requireAuth, async (req, res, next) => {
   try {
     const orgId = resolveOrgId(req);
-    const result = OrderLifecycleService.createDraftOrder({
+    const result = (await OrderLifecycleService.createDraftOrder({
       organizationId: orgId,
       customerId: req.body.customer_id,
       patientId: req.body.patient_id,
@@ -283,7 +283,7 @@ ordersRouter.post('/draft', requireAuth, async (req, res, next) => {
       internalNotes: req.body.internal_notes,
       priority: req.body.priority || 'NORMAL',
       createdBy: req.user!.id,
-    });
+    }));
 
     res.status(201).json({ data: result });
   } catch (err) {
@@ -295,7 +295,7 @@ ordersRouter.post('/draft', requireAuth, async (req, res, next) => {
 ordersRouter.post('/confirm', requireAuth, async (req, res, next) => {
   try {
     const orgId = resolveOrgId(req);
-    const result = OrderLifecycleService.confirmOrder({
+    const result = (await OrderLifecycleService.confirmOrder({
       organizationId: orgId,
       customerId: req.body.customer_id,
       patientId: req.body.patient_id,
@@ -314,7 +314,7 @@ ordersRouter.post('/confirm', requireAuth, async (req, res, next) => {
       idempotencyKey: req.body.idempotency_key,
       prepaidPayment: req.body.prepaid_payment,
       createdBy: req.user!.id,
-    });
+    }));
 
     res.status(201).json({ data: result });
   } catch (err) {
@@ -328,7 +328,7 @@ ordersRouter.get('/:id', requireAuth, async (req, res, next) => {
     const orgId = resolveOrgId(req);
     const orderId = req.params.id;
 
-    const order: any = localDb
+    const order: any = (await localDb
       .prepare(
         `SELECT o.*, 
                 c.name as customer_name, c.phone as customer_phone, c.email as customer_email,
@@ -338,51 +338,51 @@ ordersRouter.get('/:id', requireAuth, async (req, res, next) => {
          LEFT JOIN stores s ON (o.fulfilment_store_id = s.id OR o.fulfilment_store_id = s._local_id)
          WHERE (o.id = ? OR o._local_id = ? OR o.order_number = ?) AND o.organization_id = ? AND o._deleted = 0`
       )
-      .get(orderId, orderId, orderId, orgId);
+      .get(orderId, orderId, orderId, orgId));
 
     if (!order) {
       throw new AppError(404, 'Order not found', 'ORDER_NOT_FOUND');
     }
 
-    const items = localDb
+    const items = (await localDb
       .prepare('SELECT * FROM order_items WHERE order_id = ? AND _deleted = 0 ORDER BY created_at ASC')
-      .all(order.id);
+      .all(order.id));
 
-    const addressSnapshot = localDb
+    const addressSnapshot = (await localDb
       .prepare('SELECT * FROM order_address_snapshots WHERE order_id = ?')
-      .get(order.id);
+      .get(order.id));
 
-    const commercialSnapshot = OrderQuoteService.getCommercialSnapshot(order.id, orgId);
+    const commercialSnapshot = (await OrderQuoteService.getCommercialSnapshot(order.id, orgId));
 
-    const fulfilments = localDb
+    const fulfilments = (await localDb
       .prepare('SELECT * FROM order_fulfilments WHERE order_id = ? AND _deleted = 0')
-      .all(order.id);
+      .all(order.id));
 
-    const fulfilmentItems = localDb
+    const fulfilmentItems = (await localDb
       .prepare('SELECT * FROM order_fulfilment_items WHERE order_id = ? AND _deleted = 0')
-      .all(order.id);
+      .all(order.id));
 
-    const packages = localDb
+    const packages = (await localDb
       .prepare('SELECT * FROM order_packages WHERE order_id = ? AND _deleted = 0')
-      .all(order.id);
+      .all(order.id));
 
-    const packageItems = localDb
+    const packageItems = (await localDb
       .prepare('SELECT * FROM order_package_items WHERE order_id = ? AND _deleted = 0')
-      .all(order.id);
+      .all(order.id));
 
-    const paymentTransactions = localDb
+    const paymentTransactions = (await localDb
       .prepare('SELECT * FROM payment_transactions WHERE order_id = ? AND _deleted = 0')
-      .all(order.id);
+      .all(order.id));
 
-    const substitutions = localDb
+    const substitutions = (await localDb
       .prepare('SELECT * FROM order_substitutions WHERE order_id = ? AND _deleted = 0')
-      .all(order.id);
+      .all(order.id));
 
-    const refunds = localDb
+    const refunds = (await localDb
       .prepare('SELECT * FROM order_refunds WHERE order_id = ? AND _deleted = 0')
-      .all(order.id);
+      .all(order.id));
 
-    const timeline = OrderEventService.getTimeline(order.id, orgId);
+    const timeline = (await OrderEventService.getTimeline(order.id, orgId));
 
     res.json({
       data: {
@@ -409,12 +409,12 @@ ordersRouter.get('/:id', requireAuth, async (req, res, next) => {
 ordersRouter.post('/:id/cancel', requireAuth, async (req, res, next) => {
   try {
     const orgId = resolveOrgId(req);
-    const result = OrderLifecycleService.cancelOrder({
+    const result = (await OrderLifecycleService.cancelOrder({
       orderId: req.params.id,
       organizationId: orgId,
       reason: req.body.reason || 'CUSTOMER_REQUEST',
       cancelledByUserId: req.user!.id,
-    });
+    }));
     res.json({ data: result });
   } catch (err) {
     next(err);
@@ -425,13 +425,13 @@ ordersRouter.post('/:id/cancel', requireAuth, async (req, res, next) => {
 ordersRouter.post('/:id/reassign', requireAuth, requireRole('OWNER', 'SUPER_ADMIN'), async (req, res, next) => {
   try {
     const orgId = resolveOrgId(req);
-    const result = OrderLifecycleService.reassignFulfilmentStore({
+    const result = (await OrderLifecycleService.reassignFulfilmentStore({
       orderId: req.params.id,
       organizationId: orgId,
       targetStoreId: req.body.target_store_id,
       reassignedByUserId: req.user!.id,
       reason: req.body.reason,
-    });
+    }));
     res.json({ data: result });
   } catch (err) {
     next(err);
@@ -442,12 +442,12 @@ ordersRouter.post('/:id/reassign', requireAuth, requireRole('OWNER', 'SUPER_ADMI
 ordersRouter.post('/:id/pick/start', requireAuth, async (req, res, next) => {
   try {
     const orgId = resolveOrgId(req);
-    OrderPickPackService.startPicking({
+    (await OrderPickPackService.startPicking({
       orderId: req.params.id,
       organizationId: orgId,
       pickerUserId: req.user!.id,
       pickerName: (req.user as any)?.name || req.user?.email || 'Staff',
-    });
+    }));
     res.json({ success: true, message: 'Picking started' });
   } catch (err) {
     next(err);
@@ -458,7 +458,7 @@ ordersRouter.post('/:id/pick/start', requireAuth, async (req, res, next) => {
 ordersRouter.post('/:id/pick/item', requireAuth, async (req, res, next) => {
   try {
     const orgId = resolveOrgId(req);
-    const result = OrderPickPackService.pickItem({
+    const result = (await OrderPickPackService.pickItem({
       orderId: req.params.id,
       orderItemId: req.body.order_item_id,
       organizationId: orgId,
@@ -466,7 +466,7 @@ ordersRouter.post('/:id/pick/item', requireAuth, async (req, res, next) => {
       pickedQuantity: Number(req.body.quantity || 1),
       pickedBatchId: req.body.batch_id || null,
       pickerUserId: req.user!.id,
-    });
+    }));
     res.json({ data: result });
   } catch (err) {
     next(err);
@@ -477,14 +477,14 @@ ordersRouter.post('/:id/pick/item', requireAuth, async (req, res, next) => {
 ordersRouter.post('/:id/pick/shortage', requireAuth, async (req, res, next) => {
   try {
     const orgId = resolveOrgId(req);
-    OrderPickPackService.recordShortage({
+    (await OrderPickPackService.recordShortage({
       orderId: req.params.id,
       orderItemId: req.body.order_item_id,
       organizationId: orgId,
       foundQuantity: Number(req.body.found_quantity || 0),
       reason: req.body.reason,
       pickerUserId: req.user!.id,
-    });
+    }));
     res.json({ success: true, message: 'Shortage recorded' });
   } catch (err) {
     next(err);
@@ -495,13 +495,13 @@ ordersRouter.post('/:id/pick/shortage', requireAuth, async (req, res, next) => {
 ordersRouter.post('/:id/pack', requireAuth, async (req, res, next) => {
   try {
     const orgId = resolveOrgId(req);
-    const pkg = OrderPickPackService.packOrder({
+    const pkg = (await OrderPickPackService.packOrder({
       orderId: req.params.id,
       organizationId: orgId,
       packedByUserId: req.user!.id,
       packedByName: (req.user as any)?.name || req.user?.email || 'Staff',
       specialInstructions: req.body.special_instructions,
-    });
+    }));
     res.json({ data: pkg });
   } catch (err) {
     next(err);
@@ -512,12 +512,12 @@ ordersRouter.post('/:id/pack', requireAuth, async (req, res, next) => {
 ordersRouter.post('/:id/pickup/verify', requireAuth, async (req, res, next) => {
   try {
     const orgId = resolveOrgId(req);
-    const result = OrderPickupService.verifyPickupCode({
+    const result = (await OrderPickupService.verifyPickupCode({
       orderId: req.params.id,
       organizationId: orgId,
       pickupCode: req.body.pickup_code,
       verifiedByUserId: req.user!.id,
-    });
+    }));
     res.json({ data: result });
   } catch (err) {
     next(err);
@@ -528,7 +528,7 @@ ordersRouter.post('/:id/pickup/verify', requireAuth, async (req, res, next) => {
 ordersRouter.post('/:id/complete-pickup', requireAuth, async (req, res, next) => {
   try {
     const orgId = resolveOrgId(req);
-    const result = OrderToSaleConverter.convertToSale({
+    const result = (await OrderToSaleConverter.convertToSale({
       orderId: req.params.id,
       organizationId: orgId,
       storeId: req.body.store_id || (req.headers['x-store-id'] as string) || null,
@@ -536,7 +536,7 @@ ordersRouter.post('/:id/complete-pickup', requireAuth, async (req, res, next) =>
       terminalId: req.body.terminal_id || (req.headers['x-terminal-id'] as string) || null,
       servedByUserId: req.user!.id,
       payments: req.body.payments || [],
-    });
+    }));
     res.json({ data: result });
   } catch (err) {
     next(err);
@@ -547,14 +547,14 @@ ordersRouter.post('/:id/complete-pickup', requireAuth, async (req, res, next) =>
 ordersRouter.post('/:id/substitute', requireAuth, async (req, res, next) => {
   try {
     const orgId = resolveOrgId(req);
-    const sub = OrderSubstitutionService.requestSubstitution({
+    const sub = (await OrderSubstitutionService.requestSubstitution({
       orderId: req.params.id,
       orderItemId: req.body.order_item_id,
       organizationId: orgId,
       suggestedMedicineId: req.body.suggested_medicine_id,
       reason: req.body.reason || 'OUT_OF_STOCK',
       requestedByUserId: req.user!.id,
-    });
+    }));
     res.status(201).json({ data: sub });
   } catch (err) {
     next(err);
@@ -565,13 +565,13 @@ ordersRouter.post('/:id/substitute', requireAuth, async (req, res, next) => {
 ordersRouter.post('/substitutions/:subId/approve', requireAuth, async (req, res, next) => {
   try {
     const orgId = resolveOrgId(req);
-    const result = OrderSubstitutionService.approveSubstitution({
+    const result = (await OrderSubstitutionService.approveSubstitution({
       substitutionId: req.params.subId,
       organizationId: orgId,
       approvedByUserId: req.user!.id,
       approvedByRole: req.user!.role,
       customerConfirmed: req.body.customer_confirmed !== false,
-    });
+    }));
     res.json({ data: result });
   } catch (err) {
     next(err);
@@ -582,11 +582,11 @@ ordersRouter.post('/substitutions/:subId/approve', requireAuth, async (req, res,
 ordersRouter.post('/repeat/:sourceId', requireAuth, async (req, res, next) => {
   try {
     const orgId = resolveOrgId(req);
-    const result = RepeatOrderService.evaluateRepeatOrder({
+    const result = (await RepeatOrderService.evaluateRepeatOrder({
       sourceId: req.params.sourceId,
       organizationId: orgId,
       storeId: (req.query.store_id as string) || null,
-    });
+    }));
     res.json({ data: result });
   } catch (err) {
     next(err);
@@ -597,9 +597,9 @@ ordersRouter.post('/repeat/:sourceId', requireAuth, async (req, res, next) => {
 ordersRouter.get('/:id/tracking', async (req, res, next) => {
   try {
     const orderId = req.params.id;
-    const order: any = localDb
-      .prepare('SELECT id, order_number, status, fulfilment_type, placed_at, ready_at, completed_at FROM orders WHERE id = ? OR order_number = ?')
-      .get(orderId, orderId);
+    const order: any = (await localDb
+      .prepare('SELECT id, order_number, status, fulfilment_type, placed_at, ready_at, completed_at FROM orders WHERE (id = ? OR order_number = ?) AND organization_id = ? AND _deleted = 0')
+      .get(orderId, orderId, resolveOrgId(req)));
 
     if (!order) {
       throw new AppError(404, 'Order not found', 'ORDER_NOT_FOUND');
@@ -628,7 +628,7 @@ ordersRouter.get('/:id/tracking', async (req, res, next) => {
 ordersRouter.get('/customers/:customerId/addresses', requireAuth, async (req, res, next) => {
   try {
     const orgId = resolveOrgId(req);
-    const addresses = CustomerAddressService.getCustomerAddresses(orgId, req.params.customerId);
+    const addresses = (await CustomerAddressService.getCustomerAddresses(orgId, req.params.customerId));
     res.json({ data: addresses });
   } catch (err) {
     next(err);
@@ -639,7 +639,7 @@ ordersRouter.get('/customers/:customerId/addresses', requireAuth, async (req, re
 ordersRouter.post('/customers/:customerId/addresses', requireAuth, async (req, res, next) => {
   try {
     const orgId = resolveOrgId(req);
-    const addr = CustomerAddressService.saveAddress({
+    const addr = (await CustomerAddressService.saveAddress({
       id: req.body.id,
       organizationId: orgId,
       customerId: req.params.customerId,
@@ -658,7 +658,7 @@ ordersRouter.post('/customers/:customerId/addresses', requireAuth, async (req, r
       longitude: req.body.longitude,
       isDefault: req.body.is_default,
       deliveryInstructions: req.body.delivery_instructions,
-    });
+    }));
     res.status(201).json({ data: addr });
   } catch (err) {
     next(err);

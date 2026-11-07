@@ -6,6 +6,7 @@ export interface CartItem {
   quantity: number;
   discountPercent: number; // 0-100
   batchId?: string;
+  allocationMode?: "auto" | "manual";
   sellingPrice?: number;
 }
 
@@ -14,7 +15,21 @@ export interface FinalizeSaleOptions {
   paidAmount?: number;
   walletAmountPaise?: number;
   requestId?: string;
-  paymentSplits?: any[];
+  billDiscount?: number;
+  isBillDiscountPercentage?: boolean;
+  expectedTotalPaise?: number;
+  paymentSplits?: Array<{ tender_type: 'CASH' | 'UPI' | 'CARD' | 'CREDIT'; amount_paise: number; reference_number?: string }>;
+  requireRegister?: boolean;
+  parkId?: string | null;
+  discountReason?: string;
+  discountApprovalId?: string | null;
+  prescriptionId?: string;
+  dispensingAttestation?: {
+    signed_original_checked: true; annotated_and_signed: true; prescription_register?: string;
+    h1_register?: string; x_register_page?: string; x_duplicate_reference?: string;
+  };
+  placeOfSupply?: string;
+  deliveryAddress?: string;
   prescriptionRxNumber?: string;
   prescriptionImageData?: string;
 }
@@ -37,7 +52,8 @@ export const BillingService = {
 
     const itemsPayload = cartItems.map((item) => ({
       medicine_id: item.product.id || item.product._local_id,
-      batch_id: item.batchId!,
+      batch_id: item.batchId,
+      allocation_mode: item.allocationMode || (item.batchId ? "manual" : "auto"),
       quantity: item.quantity,
       mrp: Number(item.sellingPrice || 0),
       discount_pct: Number(item.discountPercent || 0),
@@ -64,11 +80,22 @@ export const BillingService = {
     const payload = {
       price_includes_tax: true,
       customer_id: customerId || null,
-      discount: 0,
+      discount: options.billDiscount || 0,
+      is_bill_discount_percentage: !!options.isBillDiscountPercentage,
+      expected_total_paise: options.expectedTotalPaise,
       payment_mode: backendMode,
       payment_status: paymentStatus,
       paid_amount: paidAmount,
       items: itemsPayload,
+      payments: options.paymentSplits,
+      register_required: options.requireRegister,
+      park_id: options.parkId || undefined,
+      discount_reason: options.discountReason?.trim() || undefined,
+      discount_approval_id: options.discountApprovalId || undefined,
+      prescription_id: options.prescriptionId || undefined,
+      dispensing_attestation: options.dispensingAttestation,
+      place_of_supply_state_code: options.placeOfSupply || undefined,
+      delivery_address: options.deliveryAddress || undefined,
       ...(options.walletAmountPaise ? { wallet_amount_paise: options.walletAmountPaise } : {}),
       ...(options.requestId ? { _local_id: options.requestId } : {}),
     };

@@ -1,4 +1,4 @@
-import { localDb } from '../local-db';
+import { businessDb as localDb } from '../lib/businessDb';
 
 export interface POSSearchResult {
   id: string;
@@ -68,11 +68,11 @@ export class POSSearchService {
   }
 
   /** Fetch stock once for a candidate set, supporting cloud and local IDs. */
-  private static loadBatches(medicines: any[], storeId: string, today: string): Map<string, any[]> {
+  private static async loadBatches(medicines: any[], storeId: string, today: string): Promise<Map<string, any[]>> {
     const ids = [...new Set(medicines.flatMap(med => [med.id, med._local_id]).filter(Boolean))];
     const grouped = new Map<string, any[]>();
     if (ids.length === 0) return grouped;
-    const batches: any[] = localDb.prepare(
+    const batches: any[] = (await localDb.prepare(
       `SELECT id, _local_id, medicine_id, batch_number, expiry_date,
               quantity_remaining, purchase_price, mrp
        FROM medicine_batches
@@ -82,7 +82,7 @@ export class POSSearchService {
          AND (is_disposed = 0 OR is_disposed IS NULL)
          AND expiry_date >= ? AND _deleted = 0
        ORDER BY expiry_date ASC, _local_id ASC`
-    ).all(...ids, storeId, today);
+    ).all(...ids, storeId, today));
     for (const batch of batches) {
       const group = grouped.get(batch.medicine_id);
       if (group) group.push(batch);
@@ -101,13 +101,13 @@ export class POSSearchService {
   /**
    * Main unified search method
    */
-  static search(params: {
+  static async search(params: {
     query?: string;
     barcode?: string;
     organizationId: string;
     storeId: string;
     limit?: number;
-  }): { results: POSSearchResult[]; substitutes: POSSearchResult[] } {
+  }): Promise<{ results: POSSearchResult[]; substitutes: POSSearchResult[] }> {
     const { query = '', barcode = '', organizationId, storeId } = params;
     const limit = Math.max(1, Math.min(Math.trunc(params.limit || 25), 100));
     const cleanQ = query.trim().toLowerCase();
@@ -122,7 +122,7 @@ export class POSSearchService {
     // ── 1. EXACT BARCODE LOOKUP ─────────────────────────────────────────────
     if (cleanBarcode) {
       // Check product_barcodes table
-      const barcodeRows: any[] = localDb
+      const barcodeRows: any[] = (await localDb
         .prepare(
           `SELECT m.*, pb.barcode as matched_barcode_value, pb.barcode_type,
                   pb.unit_type, pb.conversion_factor as barcode_conversion
@@ -132,7 +132,7 @@ export class POSSearchService {
              AND (m.organization_id = ?)
              AND m.is_active = 1 AND m._deleted = 0`
         )
-        .all(cleanBarcode, organizationId, organizationId);
+        .all(cleanBarcode, organizationId, organizationId));
 
       for (const row of barcodeRows) {
         matchedMedicines.set(row.id || row._local_id, {
@@ -148,12 +148,12 @@ export class POSSearchService {
       }
 
       // Check primary_barcode on medicines table
-      const primaryBarcodeRows: any[] = localDb
+      const primaryBarcodeRows: any[] = (await localDb
         .prepare(
           `SELECT * FROM medicines 
            WHERE primary_barcode = ? AND (organization_id = ?) AND is_active = 1 AND _deleted = 0`
         )
-        .all(cleanBarcode, organizationId);
+        .all(cleanBarcode, organizationId));
 
       for (const row of primaryBarcodeRows) {
         if (!matchedMedicines.has(row.id || row._local_id)) {
@@ -174,7 +174,7 @@ export class POSSearchService {
     // ── 2. TEXT & CODE SEARCH ───────────────────────────────────────────────
     if (cleanQ) {
       // 2a. Direct SQL Matches (Name, Generic, Brand, Category, HSN)
-      const sqlRows: any[] = localDb
+      const sqlRows: any[] = (await localDb
         .prepare(
           `SELECT * FROM medicines 
            WHERE (organization_id = ?)
@@ -205,7 +205,7 @@ export class POSSearchService {
           `%${cleanQ}%`,
           `%${cleanQ}%`,
           cleanQ, `${cleanQ}%`, `${cleanQ}%`, `%${cleanQ}%`
-        );
+        ));
 
       for (const row of sqlRows) {
         const id = row.id || row._local_id;
@@ -226,14 +226,14 @@ export class POSSearchService {
 
       // 2b. Typo-Tolerant Search (if few exact matches found)
       if (matchedMedicines.size < 5 && cleanQ.length >= 4) {
-        const candidatePool: any[] = localDb
+        const candidatePool: any[] = (await localDb
           .prepare(
             `SELECT * FROM medicines 
              WHERE (organization_id = ?)
                AND is_active = 1 AND _deleted = 0
              LIMIT 300`
           )
-          .all(organizationId);
+          .all(organizationId));
 
         for (const row of candidatePool) {
           const id = row.id || row._local_id;
@@ -262,7 +262,7 @@ export class POSSearchService {
     // ── 3. ATTACH BATCHES, POSITIONS & NEAREST EXPIRY ─────────────────────────
     const results: POSSearchResult[] = [];
     const todayStr = new Date().toISOString().split('T')[0];
-    const batchGroups = this.loadBatches([...matchedMedicines.values()].map(entry => entry.med), storeId, todayStr);
+    const batchGroups = (await this.loadBatches([...matchedMedicines.values()].map(entry => entry.med), storeId, todayStr));
 
     for (const { med, rank, matchedBarcode } of matchedMedicines.values()) {
       const batches = this.batchesFor(med, batchGroups);
@@ -326,7 +326,7 @@ export class POSSearchService {
       const topGeneric = genericNames[0];
       const resultIds = new Set(finalResults.map(r => r.id));
 
-      const subRows: any[] = localDb
+      const subRows: any[] = (await localDb
         .prepare(
           `SELECT * FROM medicines 
            WHERE LOWER(generic_name) = LOWER(?) 
@@ -336,9 +336,9 @@ export class POSSearchService {
              AND _deleted = 0
            LIMIT 15`
         )
-        .all(topGeneric, organizationId, ...finalResults.map(r => r.id));
+        .all(topGeneric, organizationId, ...finalResults.map(r => r.id)));
 
-      const substituteBatches = this.loadBatches(subRows, storeId, todayStr);
+      const substituteBatches = (await this.loadBatches(subRows, storeId, todayStr));
       for (const row of subRows) {
         if (resultIds.has(row.id || row._local_id)) continue;
         const batches = this.batchesFor(row, substituteBatches);

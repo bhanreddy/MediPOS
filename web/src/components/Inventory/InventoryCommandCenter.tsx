@@ -7,6 +7,7 @@ import {
   ChevronRight,
 } from 'lucide-react';
 import api from '../../lib/api';
+import { loadInventoryCatalogue } from '../../services/inventoryCatalogue';
 import toast from 'react-hot-toast';
 
 export const InventoryCommandCenter: React.FC = () => {
@@ -26,16 +27,16 @@ export const InventoryCommandCenter: React.FC = () => {
   const loadData = async () => {
     try {
       setLoading(true);
-      const [valRes, classRes, medRes, alertRes] = await Promise.all([
+      const [valRes, classRes, catalogue, alertRes] = await Promise.all([
         api.get('/inventory/valuation').catch(() => ({ data: { data: null } })),
         api.get('/inventory/classifications').catch(() => ({ data: { data: [] } })),
-        api.get('/inventory/medicines').catch(() => ({ data: { data: [] } })),
+        loadInventoryCatalogue().catch(() => []),
         api.get('/inventory/alerts').catch(() => ({ data: { data: [] } })),
       ]);
 
       setValuation(valRes.data?.data);
       setClassifications(classRes.data?.data || []);
-      setMedicines(medRes.data?.data || []);
+      setMedicines(catalogue);
       setAlerts(alertRes.data?.data || []);
     } catch (err: any) {
       toast.error('Failed to load inventory intelligence data');

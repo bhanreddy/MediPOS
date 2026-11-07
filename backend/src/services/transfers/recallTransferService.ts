@@ -1,5 +1,5 @@
 // recallTransferService.ts — Product Recall Stock Consolidation & Quarantine Transfer Engine
-import { localDb } from '../../local-db';
+import { businessDb as localDb } from '../../lib/businessDb';
 import { StockTransfer } from '../../domain/transferTypes';
 import { StockTransferService } from './stockTransferService';
 
@@ -7,26 +7,26 @@ export class RecallTransferService {
   /**
    * Create a consolidation transfer for recalled batches from branch store to central recall vault
    */
-  static createRecallConsolidationTransfer(params: {
+  static async createRecallConsolidationTransfer(params: {
     organizationId: string;
     recallId: string;
     sourceStoreId: string;
     centralWarehouseId: string;
     requestedBy: string;
-  }): StockTransfer {
+  }): Promise<StockTransfer> {
     const { organizationId, recallId, sourceStoreId, centralWarehouseId, requestedBy } = params;
 
-    const recall: any = localDb
+    const recall: any = (await localDb
       .prepare(
         `SELECT * FROM product_recalls 
          WHERE (id = ? OR _local_id = ?) AND (organization_id = ?) AND _deleted = 0`
       )
-      .get(recallId, recallId, organizationId);
+      .get(recallId, recallId, organizationId));
 
     if (!recall) throw new Error(`Product recall not found: ${recallId}`);
 
     const productId = recall.product_id || recall.medicine_id;
-    const recalledPositions: any[] = localDb
+    const recalledPositions: any[] = (await localDb
       .prepare(
         `SELECT ip.*, mb.batch_number, mb.expiry_date, mb.purchase_price
          FROM inventory_positions ip
@@ -41,7 +41,7 @@ export class RecallTransferService {
         ...(recall.batch_number
           ? [organizationId, sourceStoreId, sourceStoreId, productId, productId, recall.batch_number]
           : [organizationId, sourceStoreId, sourceStoreId, productId, productId])
-      );
+      ));
 
     if (recalledPositions.length === 0) {
       throw new Error(`No recalled stock found in store ${sourceStoreId} for recall ${recallId}`);
@@ -55,7 +55,7 @@ export class RecallTransferService {
       },
     ];
 
-    const transfer = StockTransferService.createTransfer({
+    const transfer = (await StockTransferService.createTransfer({
       organizationId,
       transferType: 'RECALL_TRANSFER',
       sourceLocationType: 'STORE',
@@ -68,7 +68,7 @@ export class RecallTransferService {
       requestedBy,
       notes: `Statutory Recall Consolidation: ${recall.recall_number} (${recall.reason})`,
       items,
-    });
+    }));
 
     return transfer;
   }

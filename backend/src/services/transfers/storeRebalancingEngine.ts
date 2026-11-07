@@ -1,5 +1,5 @@
 // storeRebalancingEngine.ts — Cross-Store Stock Rebalancing & Source Protection Engine
-import { localDb } from '../../local-db';
+import { businessDb as localDb } from '../../lib/businessDb';
 import { RebalancingRecommendation, TransferPriority } from '../../domain/transferTypes';
 import { InventoryAvailabilityService } from '../inventory/inventoryAvailabilityService';
 
@@ -8,30 +8,30 @@ export class StoreRebalancingEngine {
    * Identify excess stock in Store A and matching deficit in Store B
    * strictly protecting Store A's own demand
    */
-  static evaluateRebalancing(params: {
+  static async evaluateRebalancing(params: {
     organizationId: string;
     safetyStockDays?: number;
     minExcessDays?: number;
-  }): RebalancingRecommendation[] {
+  }): Promise<RebalancingRecommendation[]> {
     const { organizationId, safetyStockDays = 7, minExcessDays = 14 } = params;
 
-    const stores: any[] = localDb
+    const stores: any[] = (await localDb
       .prepare(
         `SELECT id, _local_id, store_code, name, display_name 
          FROM stores 
          WHERE (organization_id = ?) AND status = 'active' AND _deleted = 0`
       )
-      .all(organizationId);
+      .all(organizationId));
 
     if (stores.length < 2) return [];
 
-    const medicines: any[] = localDb
+    const medicines: any[] = (await localDb
       .prepare(
         `SELECT id, _local_id, name, reorder_level 
          FROM medicines 
          WHERE (organization_id = ?) AND _deleted = 0`
       )
-      .all(organizationId);
+      .all(organizationId));
 
     const recommendations: RebalancingRecommendation[] = [];
 
@@ -48,22 +48,22 @@ export class StoreRebalancingEngine {
       }> = [];
 
       for (const store of stores) {
-        const avail = InventoryAvailabilityService.getAvailability({
+        const avail = (await InventoryAvailabilityService.getAvailability({
           organizationId,
           medicineId: med.id,
           locationType: 'STORE',
           storeId: store.id,
-        });
+        }));
 
         // 30-day demand
-        const salesRow: any = localDb
+        const salesRow: any = (await localDb
           .prepare(
             `SELECT COALESCE(SUM(quantity), 0) as sold 
              FROM sale_items si JOIN sales s ON s.id = si.sale_id
              WHERE (s.store_id = ? OR s.store_id = ?) AND (si.medicine_id = ? OR si.medicine_id = ?)
                AND s.created_at >= datetime('now', '-30 days')`
           )
-          .get(store.id, store.id, med.id, med.id);
+          .get(store.id, store.id, med.id, med.id));
 
         const sold = Number(salesRow?.sold || 0);
         const dailyDemand = Math.max(0.05, sold / 30);

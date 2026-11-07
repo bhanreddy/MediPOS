@@ -1,5 +1,5 @@
 // internalReplenishmentEngine.ts — Central Warehouse Replenishment & Decision Optimization Engine
-import { localDb } from '../../local-db';
+import { businessDb as localDb } from '../../lib/businessDb';
 import { ReplenishmentDecision, TransferPriority } from '../../domain/transferTypes';
 import { InventoryAvailabilityService } from '../inventory/inventoryAvailabilityService';
 import { StockTransferService } from './stockTransferService';
@@ -8,13 +8,13 @@ export class InternalReplenishmentEngine {
   /**
    * Evaluate replenishment demand across a destination store
    */
-  static evaluateStoreReplenishment(params: {
+  static async evaluateStoreReplenishment(params: {
     organizationId: string;
     destinationStoreId: string;
     lookbackDays?: number;
     leadTimeDays?: number;
     safetyStockDays?: number;
-  }): ReplenishmentDecision[] {
+  }): Promise<ReplenishmentDecision[]> {
     const {
       organizationId,
       destinationStoreId,
@@ -23,33 +23,33 @@ export class InternalReplenishmentEngine {
       safetyStockDays = 7,
     } = params;
 
-    const store: any = localDb
+    const store: any = (await localDb
       .prepare(
         `SELECT id, _local_id, name, display_name, warehouse_served_by 
          FROM stores 
          WHERE (id = ? OR _local_id = ?) AND (organization_id = ?)`
       )
-      .get(destinationStoreId, destinationStoreId, organizationId);
+      .get(destinationStoreId, destinationStoreId, organizationId));
 
     if (!store) throw new Error(`Store not found: ${destinationStoreId}`);
 
     const destinationStoreName = store.display_name || store.name;
 
     // Fetch all active medicines
-    const medicines: any[] = localDb
+    const medicines: any[] = (await localDb
       .prepare(
         `SELECT m.id, m._local_id, m.name, m.reorder_level, m.min_stock, m.max_stock
          FROM medicines m
          WHERE (m.organization_id = ?) AND m._deleted = 0`
       )
-      .all(organizationId);
+      .all(organizationId));
 
     // Identify primary warehouse serving this store
     let primaryWarehouseId = store.warehouse_served_by;
     if (!primaryWarehouseId) {
-      const defaultWh: any = localDb
+      const defaultWh: any = (await localDb
         .prepare(`SELECT id FROM warehouses WHERE (organization_id = ?) AND _deleted = 0 LIMIT 1`)
-        .get(organizationId);
+        .get(organizationId));
       primaryWarehouseId = defaultWh?.id;
     }
 
@@ -57,17 +57,17 @@ export class InternalReplenishmentEngine {
 
     for (const med of medicines) {
       // 1. Current available stock at destination store
-      const destAvail = InventoryAvailabilityService.getAvailability({
+      const destAvail = (await InventoryAvailabilityService.getAvailability({
         organizationId,
         medicineId: med.id,
         locationType: 'STORE',
         storeId: destinationStoreId,
-      });
+      }));
 
       const currentAvailable = destAvail.totalAvailable;
 
       // 2. Compute average daily sales velocity
-      const salesRow: any = localDb
+      const salesRow: any = (await localDb
         .prepare(
           `SELECT COALESCE(SUM(quantity), 0) as total_sold
            FROM sale_items si
@@ -77,7 +77,7 @@ export class InternalReplenishmentEngine {
              AND s.created_at >= datetime('now', '-${lookbackDays} days')
              AND (s.status IS NULL OR s.status = 'COMPLETED')`
         )
-        .get(destinationStoreId, destinationStoreId, med.id, med.id);
+        .get(destinationStoreId, destinationStoreId, med.id, med.id));
 
       const totalSold = Number(salesRow?.total_sold || 0);
       const avgDailyDemand = Math.max(0.1, totalSold / lookbackDays);
@@ -89,7 +89,7 @@ export class InternalReplenishmentEngine {
       const daysOfCover = avgDailyDemand > 0 ? Math.round(currentAvailable / avgDailyDemand) : 999;
 
       // 3. Existing Incoming Transfers (In-transit or requested)
-      const incomingTransferRow: any = localDb
+      const incomingTransferRow: any = (await localDb
         .prepare(
           `SELECT COALESCE(SUM(sti.requested_quantity - sti.received_quantity), 0) as pending_qty
            FROM stock_transfer_items sti
@@ -99,12 +99,12 @@ export class InternalReplenishmentEngine {
              AND st.status IN ('REQUESTED', 'APPROVED', 'READY_TO_PICK', 'PICKING', 'PICKED', 'PACKED', 'DISPATCHED', 'IN_TRANSIT', 'PARTIALLY_RECEIVED')
              AND st._deleted = 0`
         )
-        .get(destinationStoreId, destinationStoreId, med.id, med.id);
+        .get(destinationStoreId, destinationStoreId, med.id, med.id));
 
       const incomingTransferQty = Number(incomingTransferRow?.pending_qty || 0);
 
       // 4. Pending Supplier Purchase Orders
-      const pendingPoRow: any = localDb
+      const pendingPoRow: any = (await localDb
         .prepare(
           `SELECT COALESCE(SUM(poi.ordered_quantity - poi.received_quantity), 0) as pending_po_qty
            FROM purchase_order_items poi
@@ -114,7 +114,7 @@ export class InternalReplenishmentEngine {
              AND po.status IN ('ISSUED', 'CONFIRMED', 'PARTIALLY_RECEIVED')
              AND po._deleted = 0`
         )
-        .get(destinationStoreId, destinationStoreId, med.id, med.id);
+        .get(destinationStoreId, destinationStoreId, med.id, med.id));
 
       const pendingPoQty = Number(pendingPoRow?.pending_po_qty || 0);
       const totalIncoming = incomingTransferQty + pendingPoQty;
@@ -150,14 +150,14 @@ export class InternalReplenishmentEngine {
       let whAvail = 0;
       let whName = 'Central Warehouse';
       if (primaryWarehouseId) {
-        const whAvailRes = InventoryAvailabilityService.getAvailability({
+        const whAvailRes = (await InventoryAvailabilityService.getAvailability({
           organizationId,
           medicineId: med.id,
           locationType: 'WAREHOUSE',
           warehouseId: primaryWarehouseId,
-        });
+        }));
         whAvail = whAvailRes.totalAvailable;
-        const whRow: any = localDb.prepare('SELECT name FROM warehouses WHERE id = ?').get(primaryWarehouseId);
+        const whRow: any = (await localDb.prepare('SELECT name FROM warehouses WHERE id = ?').get(primaryWarehouseId));
         if (whRow?.name) whName = whRow.name;
       }
 
@@ -205,33 +205,33 @@ export class InternalReplenishmentEngine {
         });
       } else {
         // Evaluate other store excess for store rebalancing candidate
-        const otherStores: any[] = localDb
+        const otherStores: any[] = (await localDb
           .prepare(
             `SELECT s.id, s.name, s.display_name
              FROM stores s
              WHERE (s.organization_id = ?)
                AND s.id != ? AND s._deleted = 0`
           )
-          .all(organizationId, destinationStoreId);
+          .all(organizationId, destinationStoreId));
 
         let bestStoreCandidate: any = null;
         let maxTransferable = 0;
 
         for (const os of otherStores) {
-          const osAvail = InventoryAvailabilityService.getAvailability({
+          const osAvail = (await InventoryAvailabilityService.getAvailability({
             organizationId,
             medicineId: med.id,
             locationType: 'STORE',
             storeId: os.id,
-          });
+          }));
 
           // Compute other store protected demand
-          const osSales: any = localDb
+          const osSales: any = (await localDb
             .prepare(
               `SELECT COALESCE(SUM(quantity), 0) as sold FROM sale_items si JOIN sales s ON s.id = si.sale_id
                WHERE s.store_id = ? AND si.medicine_id = ? AND s.created_at >= datetime('now', '-30 days')`
             )
-            .get(os.id, med.id);
+            .get(os.id, med.id));
           const osDaily = Math.max(0.1, Number(osSales?.sold || 0) / 30);
           const osProtected = Math.ceil(osDaily * 7); // 7 days protected cover
           const transferable = Math.max(0, osAvail.totalAvailable - osProtected);
@@ -294,12 +294,12 @@ export class InternalReplenishmentEngine {
   /**
    * Convert recommended decisions into an automated Stock Transfer Request
    */
-  static createTransferFromReplenishment(params: {
+  static async createTransferFromReplenishment(params: {
     organizationId: string;
     destinationStoreId: string;
     decisions: ReplenishmentDecision[];
     requestedBy: string;
-  }): any {
+  }): Promise<any> {
     const { organizationId, destinationStoreId, decisions, requestedBy } = params;
 
     // Group decisions by source location
@@ -322,7 +322,7 @@ export class InternalReplenishmentEngine {
       const [srcType, srcId] = key.split(':');
       const trfType = srcType === 'WAREHOUSE' ? 'WAREHOUSE_TO_STORE' : 'STORE_TO_STORE';
 
-      const transfer = StockTransferService.createTransfer({
+      const transfer = (await StockTransferService.createTransfer({
         organizationId,
         transferType: trfType as any,
         sourceLocationType: srcType as any,
@@ -337,7 +337,7 @@ export class InternalReplenishmentEngine {
           medicineId: i.medicineId,
           requestedQuantity: i.recommendedTransferQuantity || 1,
         })),
-      });
+      }));
 
       createdTransfers.push(transfer);
     }
